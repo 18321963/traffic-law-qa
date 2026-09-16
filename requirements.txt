@@ -1,0 +1,6 @@
+# 交通法规问答 Agent — Python 依赖
+# 安装：pip install -r requirements.txt
+#
+# 用法：本机虚拟环境 .venv 不入库，克隆后用上面命令复现环境。
+
+python-docx==1.2.0
