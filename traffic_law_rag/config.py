@@ -37,6 +37,11 @@ MANIFEST_PATH = PARSED_DIR / "manifest.json"
 CHUNKS_PATH = CHUNK_DIR / "chunks.jsonl"
 PARENTS_PATH = CHUNK_DIR / "parents.jsonl"
 INDEX_META_PATH = INDEX_DIR / "index_meta.json"
+
+# 仓库级数据，与知识库分开：知识库是要被解析/索引的语料，这里是评测用的题面语料。
+# 它参与版本管理（1.5MB），评测结果的可复现性依赖它逐字节不变。
+DATA_DIR = ROOT / "data"
+EVAL_CORPUS_PATH = DATA_DIR / "eval_corpus.json"
 # 向量数据存在 Milvus 里（docker-compose.yml 起服务），index/ 只留一份元信息快照
 
 ALL_DIRS = (DOCX_DIR, TEXT_DIR, PARSED_DIR, CHUNK_DIR, INDEX_DIR)

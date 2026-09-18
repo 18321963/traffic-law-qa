@@ -1,11 +1,11 @@
-"""离线检索评测：law_json.json（指令语料）→ hit@1/@3/@6 + MRR。
+"""离线检索评测：data/eval_corpus.json（指令语料）→ hit@1/@3/@6 + MRR。
 
-    python -m tools.eval                    # 跑全部可用评测题（域内外分开报）
-    python -m tools.eval --in-domain        # 只跑域内 135 题，快一半
-    python -m tools.eval --limit 20         # 先跑 20 条看链路
-    python -m tools.eval --no-vector        # 只走 BM25，用来 A/B 对比混合检索
-    python -m tools.eval --show-misses 10   # 打印没命中的题，便于定位
-    python -m tools.eval --json             # 机器可读
+    python -m traffic_law_rag.eval                    # 跑全部可用评测题（域内外分开报）
+    python -m traffic_law_rag.eval --in-domain        # 只跑域内 135 题，快一半
+    python -m traffic_law_rag.eval --limit 20         # 先跑 20 条看链路
+    python -m traffic_law_rag.eval --no-vector        # 只走 BM25，用来 A/B 对比混合检索
+    python -m traffic_law_rag.eval --show-misses 10   # 打印没命中的题，便于定位
+    python -m traffic_law_rag.eval --json             # 机器可读
 
 语料本身不是评测集，779 条 instruction/output 里只有一部分能当检索题用：
 
@@ -303,7 +303,7 @@ def evaluate(
     """逐题跑检索，统计 hit@k 与 MRR。in_domain_only 只跑本库覆盖得了的题。"""
     from .api import qa
 
-    data_path = Path(data_path or config.ROOT / "law_json.json")
+    data_path = Path(data_path or config.EVAL_CORPUS_PATH)
     if not data_path.exists():
         from .api import QaError
 

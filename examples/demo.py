@@ -1,4 +1,4 @@
-"""一条命令看完全貌：python demo.py
+"""一条命令看完全貌：python examples/demo.py
 
 对 4 个典型问题依次跑「确保索引就绪 → 混合检索 → 生成」，打印：
 
@@ -6,15 +6,20 @@
 
 加 --search 只跑检索，不调用大模型：秒出、不花钱，调检索时用这个。
 
-调用的就是对外那一个接口：tools.qa()
+调用的就是对外那一个接口：traffic_law_rag.qa()
 """
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-from tools import QaError, qa
-from tools.contracts import Answer, RetrievalResult
+# 未安装包时也能从仓库根目录直接跑（python examples/demo.py）：
+# 脚本所在目录是 examples/，仓库根不在 sys.path 上。装过就自然能导入，这行无害。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from traffic_law_rag import QaError, qa  # noqa: E402
+from traffic_law_rag.contracts import Answer, RetrievalResult  # noqa: E402
 
 # 4 个问题各盯着一个已知的技术点：
 #   1) 口语词「醉驾」需要改写成法条用语「醉酒驾驶」
