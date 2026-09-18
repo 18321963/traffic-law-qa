@@ -18,9 +18,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field, fields as dataclass_fields
+from dataclasses import asdict, dataclass, field
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import Any, Iterable
+
 
 # ============================================================ 1. read 层
 @dataclass(frozen=True)
@@ -348,10 +350,14 @@ class Query:
     channel_debug: bool = False        # 额外跑一次单通道检索，拿到两路各自的分/排名
 
     def normalized(self) -> "Query":
+        # 先归一到合法 top_k 再算 candidates：否则 top_k<=0 时会得到
+        # top_k=1 / candidates=0 这种自相矛盾的请求（candidates 是单通道候选数，
+        # 小于最终条数就意味着必然取不满）。
+        top_k = max(1, self.top_k)
         return Query(
             text=self.text.strip(),
-            top_k=max(1, self.top_k),
-            candidates=max(self.top_k, self.candidates),
+            top_k=top_k,
+            candidates=max(top_k, self.candidates),
             use_vector=self.use_vector,
             use_bm25=self.use_bm25,
             law_filter=self.law_filter,

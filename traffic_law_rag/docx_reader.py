@@ -113,7 +113,7 @@ def _paragraph_style(p: ET.Element) -> str | None:
 
 # ------------------------------------------------------------------ 调试入口
 def main(argv: list[str] | None = None) -> int:
-    """python -m tools.docx_reader [docx 路径 ...]"""
+    """python -m traffic_law_rag.docx_reader [docx 路径 ...]"""
     from . import config
 
     args = list(sys.argv[1:] if argv is None else argv)

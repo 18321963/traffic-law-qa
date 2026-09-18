@@ -118,7 +118,7 @@ class MilvusStore:
             try:
                 from pymilvus import MilvusClient
             except ImportError as exc:  # pragma: no cover
-                raise MilvusError("未安装 pymilvus，请先执行 pip install -r requirements.txt") from exc
+                raise MilvusError("未安装 pymilvus，请先执行 pip install -e .") from exc
 
             try:
                 self._client = MilvusClient(uri=self.uri, token=self.token, timeout=self.timeout)
@@ -338,7 +338,9 @@ class MilvusStore:
         """pymilvus 的 filter 形参声明为 str（不接受 None），所以按需传入。"""
         return {"filter": filter_expr} if filter_expr else {}
 
-    def dense_search(self, vector: list[float], *, limit: int, filter_expr: str | None = None) -> list[tuple[str, float]]:
+    def dense_search(
+        self, vector: list[float], *, limit: int, filter_expr: str | None = None
+    ) -> list[tuple[str, float]]:
         """仅稠密通道（用于诊断/对照）。"""
         response = self.client.search(
             collection_name=self.collection,

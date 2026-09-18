@@ -202,7 +202,7 @@ class Indexer:
 
 # ------------------------------------------------------------------ 调试入口
 def main(argv: list[str] | None = None) -> int:
-    """python -m tools.indexer [--no-vector] [--query 词]"""
+    """python -m traffic_law_rag.indexer [--no-vector] [--query 词]"""
     import sys
 
     from .chunker import ChunkStage

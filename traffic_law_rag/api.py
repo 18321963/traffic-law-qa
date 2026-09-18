@@ -1,6 +1,6 @@
 """对外唯一入口：`qa()` —— 一次调用拿到答案（或检索结果）。
 
-    from tools import qa
+    from traffic_law_rag import qa
 
     answer = qa("醉驾怎么处罚")                       # 检索 + 生成
     result = qa("深圳 行人 在机动车道", mode="search")  # 只检索，不花 LLM 的钱
@@ -14,7 +14,7 @@
 3. **把失败翻译成一行中文提示**（含该执行的命令），而不是 pymilvus 的堆栈。
 
 失败一律抛 `QaError`：库里不该替调用方打印，但消息本身就是给用户看的那一行。
-命令行入口（`python -m tools`）与 demo.py 会把它接住并打印。
+命令行入口（`python -m traffic_law_rag`）与 examples/demo.py 会把它接住并打印。
 """
 
 from __future__ import annotations

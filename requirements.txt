@@ -1,5 +1,9 @@
 # 交通法规 RAG 管道依赖（保持精简：docx 用标准库 zipfile + ElementTree 直读，
 # 不引入 lxml / python-docx / docling / unstructured）
+#
+# 依赖的**唯一真源**是 pyproject.toml（它还含 agent / api / dev 可选组）。
+# 这个文件只镜像其中的基础依赖，给「不想装包、只想装依赖」的场景用。
+# 装全量（含 FastAPI、pytest、LangGraph）请用：pip install -e ".[all]"
 
 # 配置
 python-dotenv>=1.0

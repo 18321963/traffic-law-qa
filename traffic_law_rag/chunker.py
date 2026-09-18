@@ -31,7 +31,13 @@ from .law_parser import LawLibrary
 RE_ARTICLE_PREFIX = re.compile(r"^第[零一二三四五六七八九十百千]+条[\s　]*")
 RE_SENTENCE_END = re.compile(r"[。；]")
 # 列举项开头：（一）/1./①/一、
-RE_LIST_MARKER = re.compile(r"^\s*(?:[（(][一二三四五六七八九十百千\d]+[）)]|[①-⑳]|[一二三四五六七八九十]+[、.]|\d+[.．、])")
+# 分几个片段拼是为了行宽（全角字符按两列算），拼接后与原表达式逐字符相同。
+RE_LIST_MARKER = re.compile(
+    r"^\s*(?:[（(][一二三四五六七八九十百千\d]+[）)]"
+    r"|[①-⑳]"
+    r"|[一二三四五六七八九十]+[、.]"
+    r"|\d+[.．、])"
+)
 
 
 class LawChunker:
@@ -232,7 +238,7 @@ class ChunkStage:
 
 # ------------------------------------------------------------------ 调试入口
 def main(argv: list[str] | None = None) -> int:
-    """python -m tools.chunker [--show 条号]"""
+    """python -m traffic_law_rag.chunker [--show 条号]"""
     args = list(sys.argv[1:] if argv is None else argv)
     chunk_set = ChunkStage().run()
 

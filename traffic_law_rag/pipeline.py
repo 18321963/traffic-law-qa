@@ -1,6 +1,6 @@
 """交通法规 RAG 管道的端到端编排与命令行入口。
 
-各层输入输出（也是 `python -m tools.pipeline layers` 打印的内容）：
+各层输入输出（也是 `python -m traffic_law_rag.pipeline layers` 打印的内容）：
 
 | 层       | 类                 | 输入                            | 输出                        |
 |----------|--------------------|---------------------------------|-----------------------------|
@@ -13,10 +13,10 @@
 | generate | `AnswerGenerator`  | `Question` + `RetrievalResult`  | `Answer`                    |
 
 命令行用法：
-    python -m tools.pipeline build  [--force] [--no-vector]
-    python -m tools.pipeline ask    "醉驾怎么处罚" [--top-k 6] [--json]
-    python -m tools.pipeline search "智能网联汽车 道路测试"
-    python -m tools.pipeline layers | status
+    python -m traffic_law_rag.pipeline build  [--force] [--no-vector]
+    python -m traffic_law_rag.pipeline ask    "醉驾怎么处罚" [--top-k 6] [--json]
+    python -m traffic_law_rag.pipeline search "智能网联汽车 道路测试"
+    python -m traffic_law_rag.pipeline layers | status
 """
 
 from __future__ import annotations
@@ -217,7 +217,7 @@ class RagPipeline:
             for note in self.indexer.load_notes():
                 lines.append(f"  提示：{note}")
         else:
-            lines.append("索引：尚未构建（docker compose up -d 后运行 python -m tools.pipeline build）")
+            lines.append("索引：尚未构建（docker compose up -d 后运行 python -m traffic_law_rag.pipeline build）")
 
         milvus = config.milvus_config()
         try:
@@ -286,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "search":
         if not payload:
-            print("用法：python -m tools.pipeline search \"问题\"")
+            print("用法：python -m traffic_law_rag.pipeline search \"问题\"")
             return 2
         result = pipeline.search(
             payload[0],
@@ -298,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "ask":
         if not payload:
-            print("用法：python -m tools.pipeline ask \"问题\"")
+            print("用法：python -m traffic_law_rag.pipeline ask \"问题\"")
             return 2
         top_k = _option(args, "--top-k")
         try:
