@@ -1,150 +1,141 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""集中读取 .env 配置，并提供带校验的配置对象。
+"""集中式配置：目录布局、模型端点、检索参数。
 
-为什么需要这个模块
-------------------
-不要在业务代码里散落 ``os.environ["LLM_API_KEY"]`` 这种写法，原因有三：
-
-1. 密钥从哪来、有哪些必填项，会分散到各处，难以维护；
-2. 配置缺失往往等到**真正调用 API 时**才报 KeyError，排查成本高；
-   这里改为启动时一次性校验，失败即给出可操作的修复指引；
-3. 密钥容易被误打印进日志。本模块提供 ``masked()``，只输出打码后的视图。
-
-用法::
-
-    from tools.config import get_config
-
-    cfg = get_config()
-    print(cfg.llm_model)   # 直接用属性，无需再判空
-
-自检::
-
-    python tools/config.py     # 打印当前配置（密钥自动打码）
+所有可变项都从环境变量读取（写在项目根目录的 .env 里），代码中不出现任何密钥。
 """
+
 from __future__ import annotations
 
 import os
-import re
-import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from dotenv import load_dotenv
+ROOT = Path(__file__).resolve().parent.parent
 
-# 本文件位于 <项目根>/tools/config.py，因此上溯两层即项目根目录
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-ENV_FILE = PROJECT_ROOT / ".env"
-ENV_EXAMPLE_FILE = PROJECT_ROOT / ".env.example"
+try:  # python-dotenv 是软依赖，缺失时退化为纯环境变量
+    from dotenv import load_dotenv as _load_dotenv
+except ImportError:  # pragma: no cover
 
-# 必填项：缺失则直接拒绝启动
-_REQUIRED_KEYS = ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")
-
-# 选填项及其默认值
-_DEFAULT_DB_PATH = "法规知识库/law.db"
-
-# 模板里那串占位符 sk-xxxxx…，用来提醒"你还没填真实密钥"
-_PLACEHOLDER_KEY = re.compile(r"^sk-x+$", re.IGNORECASE)
+    def _load_dotenv(*args: Any, **kwargs: Any) -> bool:
+        """python-dotenv 缺失时的空实现，直接读进程环境变量。"""
+        del args, kwargs
+        return False
 
 
-class ConfigError(RuntimeError):
-    """配置缺失或非法。消息中直接写明修复方法，方便直接照做。"""
+load_dotenv = _load_dotenv
+load_dotenv(ROOT / ".env", override=False)
+
+# ---------------------------------------------------------------- 目录布局
+KB_DIR = ROOT / "法规知识库"
+DOCX_DIR = KB_DIR / "docx"          # 唯一真源：原始 docx，永不改写
+TEXT_DIR = KB_DIR / "text"          # 人读层：法条 Markdown
+PARSED_DIR = KB_DIR / "parsed"      # 结构层：法→章→节→条
+CHUNK_DIR = KB_DIR / "chunks"       # 检索层：父子块 jsonl
+INDEX_DIR = KB_DIR / "index"        # 索引层：BM25 + 向量库
+
+MANIFEST_PATH = PARSED_DIR / "manifest.json"
+CHUNKS_PATH = CHUNK_DIR / "chunks.jsonl"
+PARENTS_PATH = CHUNK_DIR / "parents.jsonl"
+INDEX_META_PATH = INDEX_DIR / "index_meta.json"
+BM25_PATH = INDEX_DIR / "bm25.json"
+CHROMA_DIR = INDEX_DIR / "chroma"
+CHROMA_COLLECTION = "traffic_law"
+
+ALL_DIRS = (DOCX_DIR, TEXT_DIR, PARSED_DIR, CHUNK_DIR, INDEX_DIR)
+
+
+def ensure_dirs() -> None:
+    """确保管道各阶段输出目录存在。"""
+    for d in ALL_DIRS:
+        d.mkdir(parents=True, exist_ok=True)
+
+
+# ---------------------------------------------------------------- 配置读取
+def _env(name: str, default: str = "") -> str:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip()
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(_env(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(_env(name, str(default)))
+    except ValueError:
+        return default
 
 
 @dataclass(frozen=True)
-class Config:
-    """不可变配置对象。字段用属性访问，拼错名字会立刻报错。"""
+class LLMConfig:
+    base_url: str
+    api_key: str
+    model: str
+    temperature: float = 0.2
 
-    llm_api_key: str
-    llm_base_url: str
-    llm_model: str
-    db_path: Path
-
-    def masked(self) -> dict:
-        """返回可安全打印 / 写日志的配置视图，密钥只保留首尾各 4 位。"""
-        return {
-            "LLM_API_KEY": _mask_secret(self.llm_api_key),
-            "LLM_BASE_URL": self.llm_base_url,
-            "LLM_MODEL": self.llm_model,
-            "DB_PATH": str(self.db_path),
-        }
+    @property
+    def ready(self) -> bool:
+        return bool(self.api_key)
 
 
-def _mask_secret(secret: str) -> str:
-    """把密钥打码成 ``sk-a****z`` 形式，避免截图/日志泄露。"""
-    if len(secret) <= 8:
-        return "*" * len(secret)
-    return f"{secret[:4]}{'*' * 8}{secret[-4:]}"
+@dataclass(frozen=True)
+class EmbedConfig:
+    base_url: str
+    api_key: str
+    model: str
+    dim: int | None = None
+    batch: int = 10
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.api_key)
 
 
-def _build_config() -> Config:
-    """读取 .env（若存在）并校验，返回 Config。"""
-    # 说明：真实环境变量优先级高于 .env（override=False），
-    # 这样 CI / 容器里可以用环境变量临时覆盖，无需改文件。
-    if ENV_FILE.exists():
-        load_dotenv(ENV_FILE, override=False)
-
-    missing = [key for key in _REQUIRED_KEYS if not os.environ.get(key, "").strip()]
-    if missing:
-        if ENV_FILE.exists():
-            hint = f"请补全 {ENV_FILE} 中的以下键："
-        else:
-            hint = (
-                f"尚未创建配置文件 {ENV_FILE}，请先复制模板：\n"
-                f"    Copy-Item .env.example .env      # PowerShell\n"
-                f"    cp .env.example .env             # bash / WSL\n"
-                f"然后填入真实值，需要包含以下键："
-            )
-        raise ConfigError(f"{hint}\n    " + "\n    ".join(missing))
-
-    api_key = os.environ["LLM_API_KEY"].strip()
-    if _PLACEHOLDER_KEY.match(api_key):
-        raise ConfigError(
-            f"{ENV_FILE} 里的 LLM_API_KEY 还是模板占位值（{_mask_secret(api_key)}）。\n"
-            f"请打开该文件填入真实密钥。注意：该文件已被 .gitignore 排除，不会进仓库。"
-        )
-
-    # 相对路径统一锚定到项目根，避免"在哪个目录执行脚本"影响结果
-    db_path = Path(os.environ.get("DB_PATH", "").strip() or _DEFAULT_DB_PATH)
-    if not db_path.is_absolute():
-        db_path = PROJECT_ROOT / db_path
-
-    return Config(
-        llm_api_key=api_key,
-        llm_base_url=os.environ["LLM_BASE_URL"].strip().rstrip("/"),
-        llm_model=os.environ["LLM_MODEL"].strip(),
-        db_path=db_path,
+def llm_config() -> LLMConfig:
+    return LLMConfig(
+        base_url=_env("LLM_BASE_URL", "https://api.deepseek.com/v1"),
+        api_key=_env("LLM_API_KEY"),
+        model=_env("LLM_MODEL", "deepseek-chat"),
+        temperature=_env_float("LLM_TEMPERATURE", 0.2),
     )
 
 
-# 进程内缓存：.env 读一次即可，重复调用不产生额外 IO
-_cached_config: Config | None = None
+def embed_config() -> EmbedConfig:
+    """向量模型配置；未单独配置时回退复用 LLM 端点。"""
+    base_url = _env("EMBED_BASE_URL") or _env("LLM_BASE_URL", "https://api.deepseek.com/v1")
+    api_key = _env("EMBED_API_KEY") or _env("LLM_API_KEY")
+    dim_raw = _env("EMBED_DIM")
+    return EmbedConfig(
+        base_url=base_url,
+        api_key=api_key,
+        model=_env("EMBED_MODEL", "text-embedding-v4"),
+        dim=int(dim_raw) if dim_raw.isdigit() else None,
+        batch=_env_int("EMBED_BATCH", 10),
+    )
 
 
-def get_config(*, reload: bool = False) -> Config:
-    """获取全局配置（带缓存）。
-
-    :param reload: 传 True 强制重新读取，便于测试或改了 .env 后热更新。
-    :raises ConfigError: 配置缺失或非法时抛出，消息里含修复指引。
-    """
-    global _cached_config
-    if _cached_config is None or reload:
-        _cached_config = _build_config()
-    return _cached_config
+@dataclass(frozen=True)
+class RetrieveConfig:
+    top_k: int = 6            # 返回给 LLM 的法条（父块）数
+    candidates: int = 20      # 单通道候选数
+    rrf_k: int = 60           # RRF 平滑常数
+    vector_weight: float = 1.0
+    bm25_weight: float = 1.0
+    law_hint_boost: float = 1.5   # 查询命中法名片段时，该法规条文的分数加成
 
 
-if __name__ == "__main__":
-    try:
-        cfg = get_config()
-    except ConfigError as exc:
-        print(f"[配置错误] {exc}", file=sys.stderr)
-        raise SystemExit(1)
-
-    db_state = "已存在" if cfg.db_path.exists() else "尚未创建"
-    print(f"项目根目录：{PROJECT_ROOT}")
-    print(f"配置文件　：{ENV_FILE}（{'已加载' if ENV_FILE.exists() else '不存在'}）")
-    print("-" * 52)
-    for key, value in cfg.masked().items():
-        print(f"  {key:<12} = {value}")
-    print("-" * 52)
-    print(f"数据库路径：{cfg.db_path}（{db_state}）")
+def retrieve_config() -> RetrieveConfig:
+    return RetrieveConfig(
+        top_k=_env_int("RAG_TOP_K", 6),
+        candidates=_env_int("RAG_CANDIDATES", 20),
+        rrf_k=_env_int("RAG_RRF_K", 60),
+        vector_weight=_env_float("RAG_VECTOR_WEIGHT", 1.0),
+        bm25_weight=_env_float("RAG_BM25_WEIGHT", 1.0),
+        law_hint_boost=_env_float("RAG_LAW_HINT_BOOST", 1.5),
+    )

@@ -1,7 +1,14 @@
-# 交通法规问答 Agent — Python 依赖
-# 安装：pip install -r requirements.txt
-#
-# 用法：本机虚拟环境 .venv 不入库，克隆后用上面命令复现环境。
+# 交通法规 RAG 管道依赖（保持精简：docx 用标准库 zipfile + ElementTree 直读，
+# 不引入 lxml / python-docx / docling / unstructured）
 
-python-docx==1.2.0
-python-dotenv==1.2.1
+# 配置
+python-dotenv>=1.0
+
+# LLM + Embedding（OpenAI 兼容端点：DeepSeek / 通义百炼 / 智谱 等）
+openai>=1.40
+
+# 向量库（注意：会连带安装 onnxruntime，约 200MB）
+chromadb>=0.5
+
+# 中文分词（BM25 关键词召回）
+jieba>=0.42
