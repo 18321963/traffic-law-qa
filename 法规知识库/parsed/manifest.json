@@ -1,0 +1,59 @@
+{
+  "generated_at": "2026-09-17T16:27:00+00:00",
+  "docx_dir": "D:\\projects\\交通法规问答agent\\法规知识库\\docx",
+  "cross_check": false,
+  "laws": [
+    {
+      "law_id": "road_traffic_safety_law",
+      "law_name": "中华人民共和国道路交通安全法",
+      "version": "2021-04-29",
+      "file": "中华人民共和国道路交通安全法_20210429.docx",
+      "sha1": "35639876f805d363b0cb8aa8310ce73473b2d0f8",
+      "articles": 124,
+      "chars": 15518,
+      "chapters": 8,
+      "sections": 7,
+      "leftovers": 0,
+      "generated_at": "2026-09-17T16:22:45+00:00"
+    },
+    {
+      "law_id": "road_traffic_safety_regulation",
+      "law_name": "中华人民共和国道路交通安全法实施条例",
+      "version": "2017-10-07",
+      "file": "中华人民共和国道路交通安全法实施条例_20171007.docx",
+      "sha1": "7cde07507a3a5f00040a1865219e992c24231efc",
+      "articles": 115,
+      "chars": 15137,
+      "chapters": 8,
+      "sections": 7,
+      "leftovers": 0,
+      "generated_at": "2026-09-17T16:22:45+00:00"
+    },
+    {
+      "law_id": "sz_icv_regulation",
+      "law_name": "深圳经济特区智能网联汽车管理条例",
+      "version": "2026-05-27",
+      "file": "深圳经济特区智能网联汽车管理条例_20260527.docx",
+      "sha1": "e3870991bf27d9a77a6f8131ee9d24c082f7370e",
+      "articles": 64,
+      "chars": 7315,
+      "chapters": 9,
+      "sections": 0,
+      "leftovers": 0,
+      "generated_at": "2026-09-17T16:22:46+00:00"
+    },
+    {
+      "law_id": "sz_traffic_penalty_regulation",
+      "law_name": "深圳经济特区道路交通安全违法行为处罚条例",
+      "version": "2024-05-10",
+      "file": "深圳经济特区道路交通安全违法行为处罚条例_20240510.docx",
+      "sha1": "4d4ecb77e8db00d6d0e4a00592ce17e219e48eff",
+      "articles": 77,
+      "chars": 11161,
+      "chapters": 6,
+      "sections": 0,
+      "leftovers": 0,
+      "generated_at": "2026-09-17T16:22:46+00:00"
+    }
+  ]
+}
