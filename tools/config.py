@@ -31,7 +31,7 @@ DOCX_DIR = KB_DIR / "docx"          # 唯一真源：原始 docx，永不改写
 TEXT_DIR = KB_DIR / "text"          # 人读层：法条 Markdown
 PARSED_DIR = KB_DIR / "parsed"      # 结构层：法→章→节→条
 CHUNK_DIR = KB_DIR / "chunks"       # 检索层：父子块 jsonl
-INDEX_DIR = KB_DIR / "index"        # 索引层：BM25 + 向量库
+INDEX_DIR = KB_DIR / "index"        # 索引层：index_meta.json 快照（数据在 Milvus）
 
 MANIFEST_PATH = PARSED_DIR / "manifest.json"
 CHUNKS_PATH = CHUNK_DIR / "chunks.jsonl"

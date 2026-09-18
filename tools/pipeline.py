@@ -293,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
             with_vector=not _flag(args, "--no-vector"),
             channel_debug=_flag(args, "--debug"),
         )
-        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2) if _flag(args, "--json") else _render_retrieval(result))
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2) if _flag(args, "--json") else result.render())
         return 0
 
     if command == "ask":
@@ -323,30 +323,6 @@ def main(argv: list[str] | None = None) -> int:
 
     print(USAGE)
     return 2
-
-
-def _render_retrieval(result: RetrievalResult) -> str:
-    lines = [
-        f"查询：{result.query}",
-        f"通道：向量={'开' if result.used_vector else '关'} BM25={'开' if result.used_bm25 else '关'} "
-        f"| 耗时 {result.elapsed_ms:.0f}ms | 命中 {len(result.articles)} 条",
-    ]
-    for index, hit in enumerate(result.articles, start=1):
-        raw = []
-        if hit.bm25_score is not None:
-            raw.append(f"BM25分 {hit.bm25_score:.2f}")
-        if hit.vector_score is not None:
-            raw.append(f"向量分 {hit.vector_score:.3f}")
-        suffix = f" [{' '.join(raw)}]" if raw else ""
-        hint = f" +法名线索「{hit.law_hint}」" if hit.law_hint else ""
-        lines.append(
-            f"  {index}. RRF {hit.score:.4f}  {hit.citation}  "
-            f"(向量#{hit.vector_rank} BM25#{hit.bm25_rank}){suffix}{hint}"
-        )
-        lines.append(f"     {hit.article.text.replace(chr(10), ' ')[:80]}…")
-    for note in result.notes:
-        lines.append(f"  提示：{note}")
-    return "\n".join(lines)
 
 
 if __name__ == "__main__":

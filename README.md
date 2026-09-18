@@ -30,12 +30,19 @@
 层间契约全部定义在 `tools/contracts.py`（含各对象的 JSON 读写），
 **磁盘格式变更只需改这一个文件**。查看层表：`python -m tools.pipeline layers`。
 
+七层之上只开一个口子：`from tools import qa`，一次调用拿到结果（见第 4 节）。
+
 ## 2. 目录结构
 
 ```
 docker-compose.yml      # Milvus Standalone：etcd + MinIO + Milvus（数据卷在 volumes/，已忽略）
+demo.py                 # 4 个典型问题跑一遍：问题 → 命中条号 → 答案要点
+law_json.json           # 评测语料（779 条 instruction/output，用前必须先筛，见第 6 节）
 
 tools/
+├── api.py              # 对外唯一入口：qa()（确保索引就绪 + 检索 + 生成）
+├── __main__.py         # python -m tools "问题"：命令行版的一次 qa() 调用
+├── eval.py             # 离线检索评测：hit@k / MRR，域内外分开报
 ├── config.py           # 目录布局 + 模型端点 + Milvus + 检索参数（全部走环境变量）
 ├── contracts.py        # 层间数据契约（唯一真源）
 ├── docx_reader.py      # read     层：标准库 zipfile + ElementTree 直读 docx
@@ -46,7 +53,7 @@ tools/
 ├── query_rewriter.py   # rewrite  层：口语词法条用语对齐 + 法名线索
 ├── retriever.py        # retrieve 层：Milvus 双路召回 + 父块回灌
 ├── generator.py        # generate 层：强制引用式作答
-├── rag.py              # 门面：LegalRAG（对外只暴露 search / ask）
+├── rag.py              # 管道级门面：LegalRAG（search / ask，不含建库）
 └── pipeline.py         # 编排 + CLI
 
 法规知识库/
@@ -79,7 +86,7 @@ python -m tools.pipeline search "深圳 行人 在机动车道 罚款多少" --d
 python -m tools.pipeline status
 ```
 
-`--debug` 会额外跑一次单通道检索，把每条法条是被稠密向量还是被 BM25 捞到的、
+`--debug` 会额外跑两次单通道检索（稠密、BM25 各一次），把每条法条是被哪一路捞到的、
 各自排名多少都打出来，调检索时很有用。
 
 也可以只用管道的一部分：
@@ -94,7 +101,27 @@ result = pipe.search("智能网联汽车道路测试")       # 只检索，不�
 print(answer.render())                         # 正文 + 参考文献 + 提示
 ```
 
-## 4. 检索设计（决定效果的四件事）
+## 4. 一键使用（一个接口）
+
+对外只开 `qa()` 一个口子：不必先手动 `build`，也不必自己装配检索器。
+
+```python
+from tools import qa
+
+qa("醉驾怎么处罚")                        # 确保索引就绪 → 混合检索 → 生成（返回 Answer）
+qa("深圳 行人 在机动车道", mode="search")  # 只检索，不花 LLM 的钱（返回 RetrievalResult）
+qa("醉驾怎么处罚", debug=True)            # 附每条被向量 / BM25 各排到第几
+```
+
+命令行等价于一次 `qa()` 调用：`python -m tools "醉驾怎么处罚"`，加 `--search --debug`
+只看检索（不花 LLM 的钱，约 3 秒；再加 `--no-vector` 走纯 BM25 是毫秒级），
+加 `--rebuild` 强制重建。`python demo.py` 则把 4 个典型问题依次跑一遍，
+打印「问题 → 命中条号 → 答案要点」，一条命令看完全貌。
+
+索引只在 docx 的 sha1、本地产物、Milvus 集合行数三者不一致时才重建（避免无谓重跑
+向量化花钱）；失败抛 `QaError`，消息本身就是一行中文提示，命令行入口会把它接住。
+
+## 5. 检索设计（决定效果的五件事）
 
 1. **父子块**：款级子块进索引，命中后按 `parent_id` 回灌**整条**给 LLM。
    只给一款的话，模型会看到「（一）兜售物品、散发广告或者乞讨；」这种半句。
@@ -111,7 +138,35 @@ print(answer.render())                         # 正文 + 参考文献 + 提示
    - *跨法规选址错误*：问深圳的事却召回国家法律一般条款。抽法名线索（「深圳」等）后，
      对应法规条文分数 ×1.5，Top-1 纠正为深圳处罚条例第八条。
 
-## 5. 设计取舍
+## 6. 离线评测
+
+```powershell
+python -m tools.eval --in-domain     # 只跑域内题，约 1 分钟
+python -m tools.eval --no-vector     # 只走 BM25，做 A/B 对照
+```
+
+语料 `law_json.json`（779 条 instruction/output）**不是评测集**，必须先筛：298 条的答案里
+没有能定位到本库的条号（构造不出 gold），213 条的题面自己就写着「第X条」或《法名》
+（答案泄漏，检索必然"命中"）。剩下 268 条还得**分域报**——其中 133 条是美国自动驾驶
+事故叙述（Waymo / Zoox 在旧金山…），本库是中国交通法规，覆盖不了；混在一起算会把
+hit@3 从 85% 拉到 45%，看起来像"检索很差"。
+
+| 域内 135 题（法条问答） | hit@1 | hit@3 | hit@6 | MRR |
+|---|---|---|---|---|
+| 稠密 + BM25 | 75.6% | 85.2% | 88.1% | 0.805 |
+| 纯 BM25 | 74.1% | 84.4% | 89.6% | 0.796 |
+
+**稠密通道在这套题上几乎不赚**：+0.8pp hit@3，代价是慢 8 倍（全量 268 题实测：
+混合 102.8s，纯 BM25 12.6s）。因为这些题的题面是从法条原文生成的，词面重合度高，
+BM25 本就接近最优；稠密通道真正值钱的场景是口语提问
+（「醉驾」→「醉酒驾驶」），而本语料里没有这类题。**所以这是"这套题测不出它的价值"，
+不是"稠密通道没用"**——要验证后者，得另造一批口语题。
+
+未命中的 16 条里抽查出至少 2 条是 gold 标错：问"道路两侧植物遮挡信号灯"，gold 给了
+道交法第二十九条（道路规划建设），真正的答案是第二十八条，而检索返回的正是第二十八条。
+gold 是从模型生成的 `output` 里解析出来的，不是人工标注，带噪声。
+
+## 7. 设计取舍
 
 - **数据库选 Milvus 而不是 Chroma**：Chroma 只有稠密向量，BM25 得自己实现
   （分词、df/postings、落盘），两路融合也得手写；Milvus 用 `FunctionType.BM25`
@@ -127,8 +182,10 @@ print(answer.render())                         # 正文 + 参考文献 + 提示
 - **纯 BM25 可跑**：未配置 `EMBED_API_KEY` 时集合不建稠密字段，
   跑完 `build` 就是一套可用的关键词检索，不阻塞开发。
 
-## 6. 待办
+## 8. 待办
 
-- 离线评测集（问题 → 期望条号）与召回率/引用命中率指标
+- 评测集的 gold 噪声较大（从模型 output 解析），需人工校验一批或改为「从条文反向造题」
+- 口语题评测集：域内题全是从法条原文生成的，测不出稠密通道的价值
+- 生成侧指标：引用命中率、答案正确率（要接 LLM 评判）
 - 多轮对话（`Question.history` 已预留）
 - FastAPI + SSE 流式输出

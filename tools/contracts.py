@@ -408,6 +408,30 @@ class RetrievalResult:
     def citations(self) -> list[str]:
         return [a.citation for a in self.articles]
 
+    def render(self) -> str:
+        """人读层：每条命中的融合分、两路排名与原文摘要。"""
+        lines = [
+            f"查询：{self.query}",
+            f"通道：向量={'开' if self.used_vector else '关'} BM25={'开' if self.used_bm25 else '关'} "
+            f"| 耗时 {self.elapsed_ms:.0f}ms | 命中 {len(self.articles)} 条",
+        ]
+        for index, hit in enumerate(self.articles, start=1):
+            raw = []
+            if hit.bm25_score is not None:
+                raw.append(f"BM25分 {hit.bm25_score:.2f}")
+            if hit.vector_score is not None:
+                raw.append(f"向量分 {hit.vector_score:.3f}")
+            suffix = f" [{' '.join(raw)}]" if raw else ""
+            hint = f" +法名线索「{hit.law_hint}」" if hit.law_hint else ""
+            lines.append(
+                f"  {index}. RRF {hit.score:.4f}  {hit.citation}  "
+                f"(向量#{hit.vector_rank} BM25#{hit.bm25_rank}){suffix}{hint}"
+            )
+            lines.append(f"     {hit.article.text.replace(chr(10), ' ')[:80]}…")
+        for note in self.notes:
+            lines.append(f"  提示：{note}")
+        return "\n".join(lines)
+
     def to_dict(self) -> dict:
         return {
             "query": self.query,

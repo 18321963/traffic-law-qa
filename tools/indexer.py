@@ -23,6 +23,10 @@ from . import config
 from .contracts import ChunkSet, IndexStats
 from .milvus_store import MilvusError, MilvusStore, row_of
 
+# 向量端点挂了时的降级标记，写进 index_meta.json 的 notes。
+# api 层据此区分「没打算建稠密」和「想建但端点挂了」，避免每次调用都重试重建（会反复 drop 集合）。
+EMBED_FAILED_NOTE_PREFIX = "向量化失败"
+
 
 class EmbeddingClient:
     """OpenAI 兼容 /embeddings 端点封装（通义百炼 / 智谱 / OpenAI …）。
@@ -129,7 +133,7 @@ class Indexer:
                 vectors = self.embedder.embed(texts)
                 dim = len(vectors[0]) if vectors else None
             except Exception as exc:  # noqa: BLE001 - 向量端点挂了也要能建库
-                self.notes.append(f"向量化失败，降级为纯 BM25：{exc}")
+                self.notes.append(f"{EMBED_FAILED_NOTE_PREFIX}，降级为纯 BM25：{exc}")
                 vectors, dim = None, None
         elif with_vector:
             self.notes.append(self.embedder.unavailable_reason)
