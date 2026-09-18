@@ -33,15 +33,18 @@
 ## 2. 目录结构
 
 ```
+docker-compose.yml      # Milvus Standalone：etcd + MinIO + Milvus（数据卷在 volumes/，已忽略）
+
 tools/
-├── config.py           # 目录布局 + 模型端点 + 检索参数（全部走环境变量）
+├── config.py           # 目录布局 + 模型端点 + Milvus + 检索参数（全部走环境变量）
 ├── contracts.py        # 层间数据契约（唯一真源）
 ├── docx_reader.py      # read     层：标准库 zipfile + ElementTree 直读 docx
 ├── law_parser.py       # parse    层：LawParser / LawLibrary / ParseStage
 ├── chunker.py          # chunk    层：LawChunker / ChunkStage
-├── indexer.py          # index    层：EmbeddingClient / BM25Index / VectorIndex / Indexer
+├── milvus_store.py     # 存储层：集合 schema + BM25 函数 + hybrid_search
+├── indexer.py          # index    层：EmbeddingClient / Indexer（建集合、写索引快照）
 ├── query_rewriter.py   # rewrite  层：口语词法条用语对齐 + 法名线索
-├── retriever.py        # retrieve 层：RRF 混合召回 + 父块回灌
+├── retriever.py        # retrieve 层：Milvus 双路召回 + 父块回灌
 ├── generator.py        # generate 层：强制引用式作答
 ├── rag.py              # 门面：LegalRAG（对外只暴露 search / ask）
 └── pipeline.py         # 编排 + CLI
@@ -51,7 +54,7 @@ tools/
 ├── text/*.md           # 人读层：法条 Markdown（人工比对用）
 ├── parsed/*.json       # 结构层：法 → 章 → 节 → 条 + manifest.json（sha1 增量门控）
 ├── chunks/             # 检索层：parents.jsonl（条）+ chunks.jsonl（款）
-└── index/              # 索引层：bm25.json + chroma/ + index_meta.json
+└── index/              # 索引快照：index_meta.json（向量数据在 Milvus 里）
 ```
 
 ## 3. 快速开始
@@ -60,18 +63,24 @@ tools/
 # 1) 依赖
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
-# 2) 配置模型（没有 key 也能跑，只是退化为纯 BM25 且不生成答案）
+# 2) 起 Milvus（etcd + MinIO + Milvus，首启约 60~90 秒转 healthy）
+docker compose up -d --wait
+
+# 3) 配置模型（没有 key 也能跑：集合会退化为纯 BM25，且不生成答案）
 Copy-Item .env.example .env
 #   然后填入 LLM_API_KEY / EMBED_API_KEY
 
-# 3) 建库（可重复执行；docx 的 sha1 未变则自动跳过解析）
+# 4) 建库（重建 Milvus 集合；docx 的 sha1 未变则自动跳过解析）
 python -m tools.pipeline build
 
-# 4) 问答 / 检索
+# 5) 问答 / 检索 / 状态
 python -m tools.pipeline ask "醉驾怎么处罚"
-python -m tools.pipeline search "深圳 行人 在机动车道 罚款多少"
+python -m tools.pipeline search "深圳 行人 在机动车道 罚款多少" --debug
 python -m tools.pipeline status
 ```
+
+`--debug` 会额外跑一次单通道检索，把每条法条是被稠密向量还是被 BM25 捞到的、
+各自排名多少都打出来，调检索时很有用。
 
 也可以只用管道的一部分：
 
@@ -91,8 +100,12 @@ print(answer.render())                         # 正文 + 参考文献 + 提示
    只给一款的话，模型会看到「（一）兜售物品、散发广告或者乞讨；」这种半句。
 2. **列举项合并**：`（一）（二）` 类列举项无条件并入引出它的那一款。
    未处理时这类孤立子块占 867 个中的 248 个（29%），合并后降到 619 块、均值 79 字。
-3. **RRF 融合**：向量分与 BM25 分不同量纲不能相加，改用排名融合，任一条通道缺失都能继续跑。
-4. **查询改写**（两个实测踩过的坑）：
+3. **RRF 融合交给 Milvus**：`hybrid_search` + `RRFRanker(k)` 在服务端完成，
+   稠密通道用 COSINE、稀疏通道用 BM25；客户端不再自己拼排名。
+4. **BM25 稀疏向量也是服务端生成的**：文本字段 `enable_analyzer=True`（jieba 分词）+
+   一个 `FunctionType.BM25` 函数，插入与查询都只给原文。
+   因此项目里没有自研倒排索引、没有 `bm25.json`、连 jieba 这个 pip 依赖都不需要了。
+5. **查询改写**（两个实测踩过的坑）：
    - *口语词命不中法条用语*：问「醉驾」时法条写的是「醉酒驾驶」，BM25 只能靠「处罚」硬凑，
      Top-1 召回的是「不按交通信号灯通行」。别名展开后 Top-1 纠正为道交法第九十一条。
    - *跨法规选址错误*：问深圳的事却召回国家法律一般条款。抽法名线索（「深圳」等）后，
@@ -100,15 +113,19 @@ print(answer.render())                         # 正文 + 参考文献 + 提示
 
 ## 5. 设计取舍
 
+- **数据库选 Milvus 而不是 Chroma**：Chroma 只有稠密向量，BM25 得自己实现
+  （分词、df/postings、落盘），两路融合也得手写；Milvus 用 `FunctionType.BM25`
+  在服务端把原文转成稀疏向量，`hybrid_search` 直接给出融合结果，
+  一个集合就把稠密 + 稀疏 + 过滤三件事都覆盖了。
+  代价是多了一层 Docker（etcd + MinIO + Milvus 三容器），不适合无 Docker 环境。
 - **不用 MCP / docling 做入库解析**：MCP 是给 LLM 运行时按需调用的接口，返回整段 Markdown，
   入库要的是字段级可控、可复现、可增量的结构化产物；docling 面向 PDF/扫描件/表格，
   会重排段落从而破坏「第X条独占一段」这个根基。本语料是原生 DOCX 纯段落，
   标准库 `zipfile` + `ElementTree` 直读精度最高、依赖最轻。
 - **不用 MCP 但保留交叉校验位**：`manifest.json` 的 `cross_check` 字段留着，
   后续可接 `markitdown-mcp` 把 docx 转 Markdown 后 diff 条数/段落数。
-- **向量索引可选**：未配置 `EMBED_API_KEY` 时自动降级为纯 BM25，不阻塞开发。
-- **Chroma 会连带装 onnxruntime（约 200MB）**：因为它把 onnxruntime 列为必需依赖，
-  即使我们显式传入向量、禁用其默认嵌入模型也一样。
+- **纯 BM25 可跑**：未配置 `EMBED_API_KEY` 时集合不建稠密字段，
+  跑完 `build` 就是一套可用的关键词检索，不阻塞开发。
 
 ## 6. 待办
 

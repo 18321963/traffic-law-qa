@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields as dataclass_fields
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -281,24 +281,33 @@ class ChunkSet:
 # ============================================================ 4. index 层
 @dataclass(frozen=True)
 class IndexStats:
-    """建索引的结果摘要，落到 index/index_meta.json。"""
+    """建索引的结果摘要，落到 index/index_meta.json。
+
+    rows       集合总行数（= 子块数）
+    dense_rows 写了稠密向量的行数；0 表示纯 BM25 模式
+    sparse_rows 带 BM25 稀疏向量的行数（由 Milvus 的 BM25 函数服务端生成）
+    """
 
     collection: str
-    chunk_count: int
-    bm25_docs: int
-    vector_count: int
+    uri: str
+    rows: int
+    dense_rows: int
+    sparse_rows: int
     embedding_model: str | None
     embedding_dim: int | None
     vector_enabled: bool
     built_at: str
     elapsed_ms: float
+    schema: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> "IndexStats":
-        return cls(**data)
+        # 忽略旧版本遗留字段（例：Chroma 时代的 chunk_count），避免读历史快照时直接崩
+        known = {field.name for field in dataclass_fields(cls)}
+        return cls(**{key: value for key, value in data.items() if key in known})
 
 
 # ============================================================ 5. rewrite 层
@@ -336,6 +345,7 @@ class Query:
     use_vector: bool = True
     use_bm25: bool = True
     law_filter: tuple[str, ...] = ()   # 只在这些 law_id 内检索；空 = 全库
+    channel_debug: bool = False        # 额外跑一次单通道检索，拿到两路各自的分/排名
 
     def normalized(self) -> "Query":
         return Query(
@@ -345,6 +355,7 @@ class Query:
             use_vector=self.use_vector,
             use_bm25=self.use_bm25,
             law_filter=self.law_filter,
+            channel_debug=self.channel_debug,
         )
 
 

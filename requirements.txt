@@ -7,8 +7,7 @@ python-dotenv>=1.0
 # LLM + Embedding（OpenAI 兼容端点：DeepSeek / 通义百炼 / 智谱 等）
 openai>=1.40
 
-# 向量库（注意：会连带安装 onnxruntime，约 200MB）
-chromadb>=0.5
-
-# 中文分词（BM25 关键词召回）
-jieba>=0.42
+# 向量库客户端；服务端由 docker-compose.yml 拉起（etcd + MinIO + Milvus）
+# 稠密向量与 BM25 稀疏向量、RRF 融合都在 Milvus 侧完成，
+# 因此不再需要 chromadb / jieba（中文分词走 Milvus 内置 analyze）
+pymilvus>=2.6,<3

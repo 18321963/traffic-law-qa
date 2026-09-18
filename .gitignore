@@ -54,3 +54,6 @@ desktop.ini
 # --- RAG 管道生成的检索产物（用 python -m tools.pipeline build 重建）---
 法规知识库/chunks/
 法规知识库/index/
+
+# --- Milvus 容器数据卷（docker compose 生成，体积大且可重建）---
+volumes/

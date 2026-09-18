@@ -43,9 +43,9 @@ class LegalRAG:
         return cls(HybridRetriever.load(with_vector=with_vector), top_k=top_k)
 
     # -------------------------------------------------------------- 工具接口
-    def search(self, question: str, top_k: int | None = None) -> RetrievalResult:
+    def search(self, question: str, top_k: int | None = None, *, channel_debug: bool = False) -> RetrievalResult:
         """只做检索：返回召回的父块（整条法条）与排名信息。"""
-        return self.retriever.search(question, top_k=top_k or self.top_k)
+        return self.retriever.search(question, top_k=top_k or self.top_k, channel_debug=channel_debug)
 
     def ask(self, question: str | Question, top_k: int | None = None) -> Answer:
         """检索 + 生成：返回带 [依据N] 标注的答案。"""
@@ -63,10 +63,14 @@ class LegalRAG:
         return "\n\n".join(blocks)
 
     def describe(self) -> str:
-        vector_state = "已启用" if self.retriever.vector is not None else "未启用（仅 BM25）"
+        try:
+            vector_state = "已启用" if self.retriever.store.has_dense_field() else "未启用（仅 BM25）"
+        except Exception:  # noqa: BLE001 - 连不上 Milvus 时不该影响描述
+            vector_state = "未知（Milvus 未连接）"
         return (
             f"RAG 工具：{len(self.retriever.parents)} 条法条 / {len(self.retriever.chunks)} 个子块 | "
-            f"向量通道 {vector_state} | 默认 top_k={self.top_k} | LLM {self.generator.cfg.model}"
+            f"稠密通道 {vector_state} | 集合 {self.retriever.store.collection} | "
+            f"默认 top_k={self.top_k} | LLM {self.generator.cfg.model}"
         )
 
 

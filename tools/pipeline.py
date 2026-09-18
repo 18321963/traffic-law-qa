@@ -111,9 +111,18 @@ class RagPipeline:
             self._rag_with_vector = with_vector
         return self._rag
 
-    def search(self, question: str, *, top_k: int | None = None, with_vector: bool = True) -> RetrievalResult:
+    def search(
+        self,
+        question: str,
+        *,
+        top_k: int | None = None,
+        with_vector: bool = True,
+        channel_debug: bool = False,
+    ) -> RetrievalResult:
         """层 5：只检索。"""
-        return self.rag_tool(with_vector=with_vector).search(question, top_k=top_k)
+        return self.rag_tool(with_vector=with_vector).search(
+            question, top_k=top_k, channel_debug=channel_debug
+        )
 
     def ask(self, question: str | Question, *, top_k: int | None = None, with_vector: bool = True) -> Answer:
         """层 5+6：检索并生成答案。"""
@@ -161,7 +170,7 @@ class RagPipeline:
             StageReport(
                 name="index",
                 input_desc=f"{len(chunk_set.chunks)} 子块",
-                output_desc=f"BM25 {stats.bm25_docs} / 向量 {stats.vector_count}",
+                output_desc=f"{stats.rows} 行 / 稠密 {stats.dense_rows} / BM25 {stats.sparse_rows}",
                 ok=True,
                 elapsed_ms=(time.perf_counter() - stage_started) * 1000,
                 detail="；".join(self.indexer.notes) if self.indexer.notes else f"集合 {stats.collection}",
@@ -196,16 +205,31 @@ class RagPipeline:
                 f"  - {item['law_id']:<30} {item['articles']:>4} 条  {item['version']}  {item['law_name']}"
             )
         if stats:
-            vector = f"{stats.vector_count} 条（{stats.embedding_model}）" if stats.vector_enabled else "未启用"
-            lines.append(f"索引：BM25 {stats.bm25_docs} 块 | 向量 {vector} | 建于 {stats.built_at}")
+            dense = (
+                f"{stats.dense_rows} 行（{stats.embedding_dim} 维，{stats.embedding_model}）"
+                if stats.vector_enabled
+                else "未启用（纯 BM25）"
+            )
+            lines.append(
+                f"索引：Milvus 集合 {stats.collection} | 共 {stats.rows} 行 | "
+                f"BM25 稀疏 {stats.sparse_rows} 行 | 稠密 {dense} | 建于 {stats.built_at}"
+            )
+            for note in self.indexer.load_notes():
+                lines.append(f"  提示：{note}")
         else:
-            lines.append("索引：尚未构建（先运行 build）")
+            lines.append("索引：尚未构建（docker compose up -d 后运行 python -m tools.pipeline build）")
+
+        milvus = config.milvus_config()
+        try:
+            lines.append(f"Milvus：{self.indexer.connect()} @ {milvus.uri}")
+        except Exception as exc:  # noqa: BLE001 - 状态查询不该因连不上就崩
+            lines.append(f"Milvus：连接失败（{milvus.uri}）—— {str(exc).splitlines()[0]}")
         lines.append(f"模型：LLM={self.generator.cfg.model} | Embedding={config.embed_config().model}")
         return "\n".join(lines)
 
 
 def _load_retriever(*, with_vector: bool = True):
-    """延迟导入检索器，避免管道模块导入时就加载 jieba / chromadb。"""
+    """延迟导入检索器，避免管道模块在导入阶段就连 Milvus / 加载块文件。"""
     from .retriever import HybridRetriever
 
     return HybridRetriever.load(with_vector=with_vector)
@@ -264,7 +288,11 @@ def main(argv: list[str] | None = None) -> int:
         if not payload:
             print("用法：python -m tools.pipeline search \"问题\"")
             return 2
-        result = pipeline.search(payload[0], with_vector=not _flag(args, "--no-vector"))
+        result = pipeline.search(
+            payload[0],
+            with_vector=not _flag(args, "--no-vector"),
+            channel_debug=_flag(args, "--debug"),
+        )
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2) if _flag(args, "--json") else _render_retrieval(result))
         return 0
 
@@ -273,11 +301,15 @@ def main(argv: list[str] | None = None) -> int:
             print("用法：python -m tools.pipeline ask \"问题\"")
             return 2
         top_k = _option(args, "--top-k")
-        answer = pipeline.ask(
-            payload[0],
-            top_k=int(top_k) if top_k and top_k.isdigit() else None,
-            with_vector=not _flag(args, "--no-vector"),
-        )
+        try:
+            answer = pipeline.ask(
+                payload[0],
+                top_k=int(top_k) if top_k and top_k.isdigit() else None,
+                with_vector=not _flag(args, "--no-vector"),
+            )
+        except Exception as exc:  # noqa: BLE001 - CLI 只展示一行原因，不要把堆栈糊在脸上
+            print(f"问答失败：{exc}")
+            return 1
         if _flag(args, "--json"):
             print(json.dumps(answer.to_dict(), ensure_ascii=False, indent=2))
         else:

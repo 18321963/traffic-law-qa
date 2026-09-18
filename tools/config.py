@@ -37,9 +37,7 @@ MANIFEST_PATH = PARSED_DIR / "manifest.json"
 CHUNKS_PATH = CHUNK_DIR / "chunks.jsonl"
 PARENTS_PATH = CHUNK_DIR / "parents.jsonl"
 INDEX_META_PATH = INDEX_DIR / "index_meta.json"
-BM25_PATH = INDEX_DIR / "bm25.json"
-CHROMA_DIR = INDEX_DIR / "chroma"
-CHROMA_COLLECTION = "traffic_law"
+# 向量数据存在 Milvus 里（docker-compose.yml 起服务），index/ 只留一份元信息快照
 
 ALL_DIRS = (DOCX_DIR, TEXT_DIR, PARSED_DIR, CHUNK_DIR, INDEX_DIR)
 
@@ -124,9 +122,7 @@ def embed_config() -> EmbedConfig:
 class RetrieveConfig:
     top_k: int = 6            # 返回给 LLM 的法条（父块）数
     candidates: int = 20      # 单通道候选数
-    rrf_k: int = 60           # RRF 平滑常数
-    vector_weight: float = 1.0
-    bm25_weight: float = 1.0
+    rrf_k: int = 60           # Milvus RRFRanker 的平滑常数
     law_hint_boost: float = 1.5   # 查询命中法名片段时，该法规条文的分数加成
 
 
@@ -135,7 +131,33 @@ def retrieve_config() -> RetrieveConfig:
         top_k=_env_int("RAG_TOP_K", 6),
         candidates=_env_int("RAG_CANDIDATES", 20),
         rrf_k=_env_int("RAG_RRF_K", 60),
-        vector_weight=_env_float("RAG_VECTOR_WEIGHT", 1.0),
-        bm25_weight=_env_float("RAG_BM25_WEIGHT", 1.0),
         law_hint_boost=_env_float("RAG_LAW_HINT_BOOST", 1.5),
+    )
+
+
+# ---------------------------------------------------------------- Milvus
+@dataclass(frozen=True)
+class MilvusConfig:
+    uri: str
+    token: str
+    collection: str
+    analyzer_params: dict
+    bm25_k1: float
+    bm25_b: float
+
+
+def milvus_config() -> MilvusConfig:
+    """Milvus 连接与索引参数。
+
+    中文化依赖内置 jieba 分词器；把 MILVUS_ANALYZER 置空则回退 standard 分析器
+    （中文会退化成单字，不推荐）。
+    """
+    tokenizer = _env("MILVUS_ANALYZER", "jieba")
+    return MilvusConfig(
+        uri=_env("MILVUS_URI", "http://localhost:19530"),
+        token=_env("MILVUS_TOKEN", "root:Milvus"),
+        collection=_env("MILVUS_COLLECTION", "traffic_law"),
+        analyzer_params={"tokenizer": tokenizer} if tokenizer else {},
+        bm25_k1=_env_float("MILVUS_BM25_K1", 1.2),
+        bm25_b=_env_float("MILVUS_BM25_B", 0.75),
     )
