@@ -33,3 +33,24 @@ dist/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# --- 工具缓存 ---
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# --- 个人文件（与本项目无关且含隐私信息，禁止入库）---
+简历*.md
+简历*.pdf
+简历*.docx
+简历*.txt
+
+# --- 第三方参考项目压缩包（二进制无法 diff，且含他人许可证）---
+*.zip
+*.7z
+*.rar
+*.tar.gz
+
+# --- RAG 管道生成的检索产物（用 python -m tools.pipeline build 重建）---
+法规知识库/chunks/
+法规知识库/index/
