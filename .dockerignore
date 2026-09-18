@@ -1,0 +1,42 @@
+# 构建上下文里必须挡掉的东西。没有这个文件时 `docker build` 会把整个仓库塞给 daemon ——
+# 光 volumes/ 就 162M，而且里面是 Milvus 的数据卷，宿主机上重建就行。
+
+# --- 版本控制与虚拟环境 ---
+.git/
+.gitignore
+.venv/
+venv/
+env/
+
+# --- Python 缓存与构建产物 ---
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- 密钥：绝不能进镜像层 ---
+# 镜像层是会被 push 和被 `docker history` 看到的，密钥一旦进去就洗不掉。
+# 用 compose 的 env_file 在**运行时**注入，而不是在构建时 COPY。
+.env
+.env.*
+!.env.example
+*.key
+
+# --- Milvus 数据卷（162M，可重建）---
+volumes/
+
+# --- 个人与编辑器 ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+简历*.md
+简历*.pdf
+简历*.docx
+*.log
+*.tmp

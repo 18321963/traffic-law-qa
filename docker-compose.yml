@@ -71,6 +71,52 @@ services:
       - etcd
       - minio
 
+  # 应用层（无状态）。Dockerfile 见同目录，数据全在 Milvus 那边。
+  # 单独起应用：docker compose up -d --build app
+  app:
+    container_name: tlr-app
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: traffic-law-rag:0.1.0
+    env_file:
+      # required: false —— 没有 .env 也让它起来。刚 clone 下来还没 Copy-Item
+      # .env.example .env 的人（以及只想看一眼这项目的人）否则会直接撞上
+      # "env file .env not found" 而一个容器都起不来。
+      # 缺密钥不是致命错误：没有 key 时集合退化成纯 BM25、生成层拒答并在
+      # /health 里报 llm_ready=false，正是这个项目一贯的降级方式。
+      - path: .env
+        required: false
+    environment:
+      # 容器内必须用**服务名**连 Milvus。localhost 在容器里指容器自己 ——
+      # .env 里那个 http://localhost:19530 是给宿主机裸跑用的，这里必须覆盖掉。
+      MILVUS_URI: http://standalone:19530
+    ports:
+      - "8000:8000"
+    volumes:
+      # 派生产物用命名卷持久化。不挂的话每次 container recreate 都会丢掉
+      # chunks.jsonl，启动时判定「检索层产物缺失」而重建索引 —— 那是要重新向量化、要花钱的。
+      - tlr_chunks:/app/法规知识库/chunks
+      - tlr_index:/app/法规知识库/index
+    depends_on:
+      # service_healthy 而不是单纯的 depends_on：Milvus 容器 Up 到能接受连接之间
+      # 还有 30~90 秒，只等 Up 的话应用启动时连不上直接失败。
+      standalone:
+        condition: service_healthy
+    healthcheck:
+      # 用 python 而不是 curl：slim 镜像里没有 curl，为一条健康检查装它不值。
+      # /health 未就绪时返回 503，urlopen 会抛异常 → 退出码非 0 → 判为 unhealthy。
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)\""]
+      interval: 30s
+      start_period: 60s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  tlr_chunks:
+  tlr_index:
+
 networks:
   default:
     name: milvus

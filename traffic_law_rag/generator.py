@@ -34,6 +34,14 @@ USER_TEMPLATE = """问题：{question}
 
 请依据上述条文回答问题，并在每条结论后标注 [依据N]。"""
 
+# 两条不走 LLM 的兜底文案。抽成常量是因为流式与非流式两条路径必须说同样的话 ——
+# 同一句拒答在两个入口里措辞不同，用户会以为是两种不同的失败。
+EMPTY_RETRIEVAL_ANSWER = (
+    "现有法规库中未检索到与问题相关的条文，无法给出有依据的回答。"
+    "建议补充更具体的违法情形、地点，或确认是否属于本知识库覆盖的 4 部法规范围。"
+)
+UNAVAILABLE_ANSWER = "（未配置大模型，下面只给出召回的法条）"
+
 
 class AnswerGenerator:
     """答案生成器：把检索结果变成带引用的答案。
@@ -90,8 +98,7 @@ class AnswerGenerator:
         if retrieval.is_empty:
             return Answer(
                 question=question.text,
-                text="现有法规库中未检索到与问题相关的条文，无法给出有依据的回答。"
-                "建议补充更具体的违法情形、地点，或确认是否属于本知识库覆盖的 4 部法规范围。",
+                text=EMPTY_RETRIEVAL_ANSWER,
                 evidences=(),
                 model="(skip)",
                 elapsed_ms=(time.perf_counter() - started) * 1000,
@@ -102,7 +109,7 @@ class AnswerGenerator:
         if not self.available:
             return Answer(
                 question=question.text,
-                text="（未配置大模型，下面只给出召回的法条）",
+                text=UNAVAILABLE_ANSWER,
                 evidences=tuple(evidences),
                 model="(unavailable)",
                 elapsed_ms=(time.perf_counter() - started) * 1000,
@@ -121,6 +128,59 @@ class AnswerGenerator:
             retrieval=retrieval,
             notes=tuple(notes),
         )
+
+    # -------------------------------------------------------------- 流式
+    def stream(self, question: Question, retrieval: RetrievalResult):
+        """流式生成：依次产出 `("delta", 文本片段)` 与末尾的 `("usage", dict)`。
+
+        供 SSE 使用。**提示词与 `generate()` 完全共用** —— 两条路径若各写一份
+        messages 构造，流式与非流式迟早会给出不一样的答案，而这种偏差极难发现。
+
+        不做重试：已经吐出去的 token 收不回来。首字节之前的失败会抛出去由调用方
+        （HTTP 层）翻译成错误事件，已经开始输出后的失败则让异常终止这次流。
+        """
+        evidences = self.build_evidence(retrieval)
+
+        if retrieval.is_empty or not self.available:
+            # 与非流式同样的兜底，只是以「一个 delta」的形式给出
+            text = EMPTY_RETRIEVAL_ANSWER if retrieval.is_empty else UNAVAILABLE_ANSWER
+            yield "delta", text
+            yield "usage", {}
+            return
+
+        for chunk in self._stream_llm(question, evidences):
+            delta = chunk.choices[0].delta.content if chunk.choices else None
+            if delta:
+                yield "delta", delta
+            if getattr(chunk, "usage", None) is not None:
+                # 流式下 usage 只在末块出现，且不是所有兼容端点都会给
+                # （DashScope 默认就不给）—— 拿不到就如实返回空 dict
+                usage = chunk.usage
+                yield "usage", {
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "total_tokens": usage.total_tokens,
+                }
+
+    def _stream_llm(self, question: Question, evidences: list[Evidence]):
+        from openai import OpenAI  # 延迟导入
+
+        if self._client is None:
+            self._client = OpenAI(base_url=self.cfg.base_url, api_key=self.cfg.api_key)
+
+        messages: list[Any] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages.extend({"role": role, "content": content} for role, content in question.history)
+        messages.append({"role": "user", "content": self.build_prompt(question, evidences)})
+
+        try:
+            return self._client.chat.completions.create(
+                model=self.cfg.model,
+                messages=messages,
+                temperature=self.cfg.temperature,
+                stream=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - 首字节前失败，翻译成一句可读的话
+            raise RuntimeError(f"调用 {self.cfg.model} 失败：{exc}") from exc
 
     # -------------------------------------------------------------- 调用
     def _call_llm(self, question: Question, evidences: list[Evidence]) -> tuple[str, dict]:

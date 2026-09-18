@@ -88,6 +88,28 @@ class HybridRetriever:
             cfg=cfg,
         )
 
+    def warm(self, *, probe: str = "预热") -> float | None:
+        """预热稠密通道，返回耗时毫秒；没得预热或失败时返回 None。
+
+        **为什么需要它**：embedding 端点的首次调用要建 TCP + TLS 连接，实测
+        1.5~3 秒，之后的调用只要 ~150ms（换没见过的文本也一样，所以不是缓存）。
+        这个开销被惰性付掉时，是算在**第一个调用者**头上的 —— 放进 HTTP 服务里
+        就是「第一个用户特别慢」，而 `load()` 本身只要 39ms。预热的唯一作用
+        是把它从用户请求挪到启动阶段。命令行一次性调用不需要它：早晚都要付。
+
+        **失败不是错**：检索层本来就有「向量端点不可用就退回 BM25」的降级路径
+        （见 `retrieve()` 里 embed_one 的 except）。预热同理 —— 这里吞掉异常，
+        真正的错误会在第一次真实检索时带着上下文报出来。
+        """
+        if self.embedder is None:
+            return None
+        started = time.perf_counter()
+        try:
+            self.embedder.embed_one(probe)
+        except Exception:  # noqa: BLE001 - 外部依赖不可用；降级路径在 retrieve() 里
+            return None
+        return (time.perf_counter() - started) * 1000
+
     # -------------------------------------------------------------- 主接口
     def retrieve(self, query: Query) -> RetrievalResult:
         query = query.normalized()
