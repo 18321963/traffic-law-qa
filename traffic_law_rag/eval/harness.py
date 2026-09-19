@@ -20,12 +20,14 @@
 - **132 条**的答案里没有能定位到本库的条号 → 构造不出 ground truth
 - **208 条**的题面自己就写着「第X条」或《法名》→ 答案泄漏，检索必然"命中"，测不出东西
 - 剩下 **135 条**既能定位 gold、题面又不泄漏 → 本模块跑这些
-  → hit@1 75.6% / hit@3 85.2% / hit@6 88.1% / MRR 0.805
+  → hit@1 71.1% / hit@3 83.7% / hit@6 90.4% / MRR 0.783
+  （当前配置：本地 bge-large-zh-v1.5 + 查询指令前缀。换向量模型这组数会动，
+  各模型下的数见 docs/DESIGN.md §6 —— **别把这组数当模型的属性，它是配置的属性**。）
 
 **这 475 条是删过的。** 原语料 779 条里有 **296 条美国自动驾驶事故叙述**
 （Waymo / Cruise / Zoox 在旧金山、洛杉矶的碰撞叙述），本库是中国交通法规，
 一条也覆盖不了，而且它们的 gold 是硬凑的 —— 检索一律返回深圳条例第五十三条
-反而是合理行为，域外 hit@3 仅 4.5%，混进合计会把 hit@3 从 85.2% 拉到 45.1%。
+反而是合理行为，域外 hit@3 仅 4.5%，混进合计会把 hit@3 从 85% 拉到 45%。
 另删 8 条英文版深圳条例题（跨语言检索不是本评测要测的东西）。
 两类合起来 304 条，2026-09 一次性删净，删法见 docs/DESIGN.md。
 
@@ -351,6 +353,23 @@ def evaluate(
 
 
 # ================================================================== 规则取条臂
+def _verdict(rule_hits: int, base_hits: int) -> str:
+    """规则臂 vs 基线 hit@1 的那一句结论 —— **算出来**，不许写死。
+
+    这行原本是一句常量：「没有命中率增益，这一臂比基线还少 3 题」。3 是拿
+    当时的基线 202 减出来的，后来向量模型从 text-embedding-v4 换成 bge-large，
+    基线掉到 192，规则臂反倒**多** 7 题 —— 结论整个反了过来，而那句常量还在说旧话，
+    并且就印在重新算出来的「199 / 192」正下方，自相矛盾。
+    数字与它的解释必须同源，否则换一次模型就会留下一句理直气壮的错话。
+    """
+    delta = rule_hits - base_hits
+    if delta > 0:
+        return f"这一臂比基线 hit@1 **多** {delta} 题"
+    if delta < 0:
+        return f"这一臂比基线 hit@1 **少** {-delta} 题"
+    return f"这一臂与基线 hit@1 **打平**（各 {rule_hits} 题）"
+
+
 @dataclass(frozen=True)
 class ReferenceCase:
     """一条「题面点名了某条」的题：规则取条拿到了什么，基线检索又拿到了什么。"""
@@ -460,7 +479,7 @@ class ReferenceReport:
             f"（{self.baseline_hit_at(1):.1%}）  hit@3 {self.baseline_hits(3)}/{n}"
             f"（{self.baseline_hit_at(3):.1%}）",
             "",
-            "  ── 结论：**没有命中率增益**，这一臂比基线还少 3 题 ──",
+            f"  ── 结论：{_verdict(len(self.correct), self.baseline_hits(1))} ──",
             f"    规则答对 {len(self.correct)}，基线 hit@1 {self.baseline_hits(1)}。"
             f"两者不是同一件事：规则回退 {len(self.fell_back)} 题，基线在其中的 "
             f"{len(self.baseline_only)} 题上第 1 名就是 gold。",

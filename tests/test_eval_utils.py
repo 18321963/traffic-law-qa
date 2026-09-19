@@ -2,8 +2,9 @@
 
 **不在这里测 `evaluate()`** —— 它每道题都走一遍真实检索（连 Milvus），
 属于 `@pytest.mark.integration` 的范畴。但这个模块里被 `evaluate` 复用的
-那批纯函数必须离线可测：它们是 README 里 hit@3 85.2% 这个数字的**分母定义**，
-分母错了，数字再准也没有意义。
+那批纯函数必须离线可测：它们是 README 里那组 hit@k 的**分母定义**，
+分母错了，数字再准也没有意义。（这里**故意不写具体数值** —— 分母的定义与
+向量模型无关，把某一版的 hit@3 抄进来只会跟着模型一起腐坏。）
 """
 
 from __future__ import annotations
@@ -344,6 +345,40 @@ def test_互补性与合起来的上界():
     # 合起来严格优于任何单独一条臂
     assert report.combined_hits > len(report.correct)
     assert report.combined_hits > report.baseline_hits(1)
+
+
+def _报告(规则对: int, 基线对: int) -> ReferenceReport:
+    """造一份「规则答对 N 题、基线 hit@1 命中 M 题」的报告，两者互不重叠。"""
+    rows = [_ref(f"rule{i}", gold=True, located=True, rank=None) for i in range(规则对)]
+    rows += [_ref(f"base{i}", gold=False, located=False, rank=1) for i in range(基线对)]
+    return ReferenceReport(
+        results=tuple(rows), total_raw=len(rows), skipped_no_gold=0,
+        elapsed_ms=0.0, baseline_ran=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "规则对,基线对,词,差",
+    [
+        (199, 192, "多", 7),    # 换本地 bge 之后的真实情形
+        (199, 202, "少", 3),    # 换 bge 之前（云端 v4）的真实情形
+        (5, 5, "打平", None),
+    ],
+)
+def test_结论句跟着数字走(规则对, 基线对, 词, 差):
+    """结论句必须是**算出来的**，不能是写死的常量。
+
+    它原本写死成「没有命中率增益，这一臂比基线还少 3 题」—— 3 是拿当时的基线 202
+    减出来的。后来向量模型从 v4 换成 bge，基线掉到 192，规则臂反倒**多** 7 题，
+    方向整个反了，而那句常量仍然印在**重新算出来的**数字正下方，自相矛盾。
+    所以这里断言的是最终渲染出来的那一行，不是某个函数 —— 数字与解释必须同源。
+    """
+    text = _报告(规则对, 基线对).render()
+    结论 = text.split("结论：")[1].split("──")[0]
+
+    assert 词 in 结论, f"结论没跟上数字：{结论!r}"
+    if 差 is not None:
+        assert str(差) in 结论, f"差值写错了：{结论!r}"
 
 
 def test_基线未命中计入分母():
