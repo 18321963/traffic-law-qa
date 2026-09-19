@@ -158,6 +158,20 @@ def _stale_reason(store, stats, *, want_dense: bool) -> str | None:
     if actual != stats.rows:
         return f"集合行数（{actual}）与索引快照（{stats.rows}）不一致"
 
+    if want_dense and stats.vector_enabled:
+        # 集合里的向量是哪个模型编的，集合本身看不出来 —— 只记在快照上，所以要显式比对。
+        # 少这一步就会出现「查询用新模型编码、库里是旧模型向量」的静默劣化：换模型时
+        # 维度可能恰好相同（text-embedding-v4 与 bge-large-zh-v1.5 都是 1024），
+        # 行数和 vector_enabled 都不变，下面所有检查都会放行。
+        from .kb.indexer import EmbeddingClient
+
+        want_label = EmbeddingClient().model_label
+        if stats.embedding_model != want_label:
+            return (
+                f"索引快照的向量模型（{stats.embedding_model}）"
+                f"与当前配置（{want_label}）不一致"
+            )
+
     if want_dense and not stats.vector_enabled:
         from .kb.indexer import EMBED_FAILED_NOTE_PREFIX, Indexer
 
