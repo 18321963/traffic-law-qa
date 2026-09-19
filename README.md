@@ -12,11 +12,17 @@
 
 | 题集 | 规模 | 测什么 | 结果 |
 |---|---|---|---|
-| 域内问答 | 135 题 | 检索命中率 | hit@1 **75.6%** · hit@3 **85.2%** · hit@6 **88.1%** · MRR **0.805** |
+| 域内问答 | 135 题 | 检索命中率 | hit@1 **71.1%** · hit@3 **83.7%** · hit@6 **90.4%** · MRR **0.783** |
 | 题面含条号 | 208 题 | 能否绕过检索直接定位 | 唯一定位 **200/208**，其中取对 **199/200** |
-| 跨法多跳 | 100 题 | 一个答案横跨两部法 | 见 [设计文档](docs/DESIGN.md) 第 9 节 |
+| 跨法多跳 | 63 题 | 一个答案横跨两部法 | 见 [设计文档](docs/DESIGN.md) 第 9 节 |
 
-这些数字是**可复现的**：322 条测试全部离线跑（不连 Milvus、不发网络请求），
+> ⚠️ **第一行那组数不是"这个项目的属性"，是"这套配置的属性"** —— 它随向量模型变。
+> 同一条管道，云端 `text-embedding-v4` 跑出的是 hit@1 75.6% / MRR 0.805，
+> 换成默认的本地 `bge-large-zh-v1.5` 就是上面那组：**白嫖、不出网、快 2.7 倍**，
+> 代价是 hit@1 低 4.5pp。完整对照见 [设计文档](docs/DESIGN.md) 第 6 节。
+> 引用这些数时**带上向量模型**，否则两个人可以都没说错却对不上。
+
+这些数字是**可复现的**：341 条测试全部离线跑（不连 Milvus、不发网络请求），
 其中一批直接钉住知识库的 golden 规模（6 部 / 508 条 / 812 块 / 均长 78.8 字）——
 解析或切块逻辑一改坏，测试先红，而不是等评测数字悄悄掉下来。
 
@@ -29,17 +35,20 @@ pip install -e ".[all]"
 # 2) 起 Milvus（etcd + MinIO + Milvus，首启约 60~90 秒）
 docker compose up -d --wait standalone
 
-# 3) 配模型（没有 key 也能跑：退化为一套可用的 BM25 关键词检索）
-Copy-Item .env.example .env    # 填 LLM_API_KEY / EMBED_API_KEY
+# 3) 向量模型（默认跑在本地 Ollama，拉一次就行，之后检索不出网）
+ollama pull dengcao/bge-large-zh-v1.5
 
-# 4) 建库（docx 的 sha1 没变就自动跳过解析）
+# 4) 配模型（没有 key 也能跑：退化为一套可用的 BM25 关键词检索）
+Copy-Item .env.example .env    # 填 LLM_API_KEY 即可 —— 向量那几行已指向本地 ollama
+
+# 5) 建库（docx 的 sha1 没变就自动跳过解析）
 python -m traffic_law_rag.pipeline build
 
-# 5) 问（这一步带一致性检查：docx 变了会自动重建，不用手动 build）
+# 6) 问（这一步带一致性检查：docx 变了会自动重建，不用手动 build）
 python -m traffic_law_rag "醉驾怎么处罚"
 ```
 
-`pip install` 同时装了两个短命令：**`tlr-qa "醉驾怎么处罚"`**（等价第 5 步）和 **`tlr-serve`**（起 HTTP 服务）。
+`pip install` 同时装了两个短命令：**`tlr-qa "醉驾怎么处罚"`**（等价第 6 步）和 **`tlr-serve`**（起 HTTP 服务）。
 
 也可以当库用，一个口子：
 
@@ -75,7 +84,7 @@ print(qa("深圳 行人在机动车道 罚款多少", mode="search"))   # 只检
 |---|---|
 | 语言 | Python 3.11 |
 | 向量库 | Milvus 2.6 —— 稠密 + BM25 双路召回，分词与融合都在**服务端** |
-| 模型 | 生成 `qwen3-max`／向量 `text-embedding-v4`（OpenAI 兼容协议，换模型只改 `.env`） |
+| 模型 | 生成 `qwen3-max`／向量 `bge-large-zh-v1.5`（跑在本地 Ollama，OpenAI 兼容协议，换模型只改 `.env`） |
 | 服务 | FastAPI + uvicorn，`/qa/stream` 走 SSE 流式 |
 | Agent | LangGraph 状态机（**只用状态机**，LLM 调用直接走 `openai` SDK） |
 | 依赖 | 基础组只有 3 个包：`openai` · `pymilvus` · `python-dotenv` |
@@ -94,8 +103,8 @@ traffic_law_rag/
 └── eval/   三套题集：hit@k / 规则取条探针 / 跨法多跳
 
 法规知识库/   docx（唯一真源）→ text → parsed → chunks → index
-tests/        322 条，全部离线
-data/         两套评测题集（跨法多跳那 100 道是模型生成的产物）
+tests/        341 条，全部离线
+data/         两套评测题集（跨法多跳那 63 道是模型生成的产物）
 ```
 
 每个子包只按路径说话，**包内 `__init__.py` 一律不做 re-export** —— 要用哪个就 import 哪个。
