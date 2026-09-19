@@ -23,6 +23,7 @@ from traffic_law_rag.eval.multihop import (
     defect_diagnostic,
     format_key,
     full_budget_summary,
+    generate,
     is_preamble,
     is_pure_scope,
     load_cases,
@@ -357,6 +358,55 @@ def test_跨法种子只认别的法(library: Library):
     # 实施条例第一条：「根据《中华人民共和国道路交通安全法》……制定本条例」—— 板上钉钉的种子
     pairs = {(p.law_id, p.article_no) for p in sites}
     assert ("road_traffic_safety_regulation", "第一条") in pairs
+
+
+# ================================================================== 续跑
+class _照抄锚点的假LLM:
+    """照着锚点编题，每次换一部法当「另一条」，题面带流水号好让每条都不一样。"""
+
+    available = True
+
+    def __init__(self, library: Library):
+        self.library = library
+        self.calls = 0
+
+    def chat(self, history, temperature=0.0):
+        del temperature
+        prompt = next(row["content"] for row in history if row["role"] == "user")
+        # 「【本条】法名　条号」—— 条号那截不能进题面，会被泄漏护栏拦下
+        head = next(r for r in prompt.splitlines() if r.startswith("【本条】"))
+        anchor_name = head.split()[0][len("【本条】"):]
+        other = next(name for name in self.library.law_names if name != anchor_name)
+
+        self.calls += 1
+        content = json.dumps(
+            {
+                "question": f"路上出了点事想问问，这是第{self.calls}回：保险只赔一部分，剩下的谁掏",
+                "other_law": other,
+                "other_article_no": "第二条",
+                "why": "一条管赔偿范围，一条管责任划分",
+            },
+            ensure_ascii=False,
+        )
+        return {"content": content}, {}
+
+
+def test_续跑不重挖同一个锚点(library: Library, monkeypatch):
+    """**这条是回归**：续跑时只按题面去重挡不住重挖。
+
+    `generate` 曾经判的是 `_normalize(anchor.text) in seen` —— 拿整条法条去撞题面集合，
+    恒不相等，等于没判。锚点表又是固定顺序，于是「续跑补题」永远从第一个锚点重新挖起，
+    补多少道都是同 gold 同考点的换皮题。这里让假 LLM 每次都吐一条合格的题面，
+    所以能红的只剩锚点没被记住这一件事。
+    """
+    fake = _照抄锚点的假LLM(library)          # 同一个实例跨两次调用，题面才不重样
+    monkeypatch.setattr("traffic_law_rag.agent.graph.ToolCallingLLM", lambda: fake)
+
+    first = generate(target=1, library=library, verbose=False)
+    second = generate(target=2, library=library, seed=first, verbose=False)
+
+    assert len(second) == 2
+    assert second[1]["anchor"] != first[0]["anchor"]
 
 
 # ================================================================== 统计

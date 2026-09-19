@@ -464,7 +464,11 @@ GEN_SYSTEM = (
 GEN_TEMPLATE = """下面是一部法规的条文原文。请写**一个**自然的中文用户问题。
 
 硬性要求：
-1. 完整回答这个问题，必须**同时**用到下面这条条文，**以及另一部法规中的某一条**。
+1. 这必须是**多跳**题：**只问一件事**，而这件事要答全，必须把两条串起来用。
+   - 对的形状：本条给出规则，规则里的某个概念/资格/范围/标准得看另一条才定得下来。
+     例：本条说「不得超过核定的人数」，而「核定的人数」怎么算写在另一条里。
+   - 错的形状：把两件事并排问进一句（「这样算不算违规？是不是还得买保险？」）——
+     两条各答一半，去掉哪条都还能答，这是拼盘，不是多跳。
 2. 问题要像一个真实用户会问的话（口语一点、具体一点），不要写成法律文书。
 3. **不许**出现「第X条」「本法」「本条例」这类字样，**不许**出现任何《法规名称》。
 4. 另一条**必须来自另一部法规**，不能和下面这条同属一部。
@@ -475,7 +479,8 @@ GEN_TEMPLATE = """下面是一部法规的条文原文。请写**一个**自然�
 可选的另一部法规（只能从这 6 部里挑，且不能是本条所在的那一部）：
 {catalog}
 
-只输出这个 JSON，不要有别的内容（why 用一句话说明为什么必须两条一起）：
+只输出这个 JSON，不要有别的内容（why 用一句话说明这两条各自补上了哪一块，
+**要写成链**：本条定了什么 → 其中哪个词/资格/标准要靠另一条才落地）：
 {{"question": "……", "other_law": "另一条的法规全名", "other_article_no": "第X条", "why": "……"}}"""
 
 
@@ -559,7 +564,9 @@ def generate(
 ) -> list[dict]:
     """从条文反向造题，直到攒够 `target` 道过了护栏的题。
 
-    `seed` 是已经有过的记录（续跑用）：先装进来，再往后补。
+    `seed` 是已经有过的记录（续跑用）：先装进来，再往后补。**补的是没挖过的锚点** ——
+    同一个锚点出过的题已经进了 `seed`，再挖一遍只会得到换了说法的同 gold 同考点。
+    每接受一道就落一次盘，所以中途断了重跑时把 `out` 读回来当 `seed` 即可接着补。
     """
     from ..agent.graph import ToolCallingLLM  # 延迟导入：agent 层拉 langgraph，不能进包导入路径
 
@@ -571,12 +578,16 @@ def generate(
     catalog = "\n".join(f"- {name}" for name in library.law_names)
     accepted: list[dict] = list(seed or [])
     seen = {_normalize(item.get("question", "")) for item in accepted}
+    # 光有题面去重挡不住「同一个锚点再问一遍」：换个说法就绕过去了，补出来的题会全是
+    # 已有题的同 gold 同考点。锚点本身也要记。这里以前比的是 `_normalize(anchor.text) in seen`，
+    # 拿整条法条去撞题面集合，恒不相等 —— 等于没判。
+    mined = {item.get("anchor", "") for item in accepted}
     attempts = failures = 0
 
     for anchor in _candidates(library):
         if len(accepted) >= target:
             break
-        if _normalize(anchor.text) in seen:
+        if format_key(anchor.law_id, anchor.article_no) in mined:
             continue
 
         history: list[dict] = [
@@ -622,7 +633,10 @@ def generate(
                 continue
 
             seen.add(_normalize(case.question))
+            mined.add(format_key(anchor.law_id, anchor.article_no))
             accepted.append(case.to_dict())
+            if out is not None:  # 逐条落盘：断了才有东西可当 seed，不然「续跑」是句空话
+                _save(out, accepted)
             if verbose:
                 print(f"[gen] {len(accepted):>3}/{target}  {case.question[:44]}"
                       f"  ← {case.gold_citations[-1]}", flush=True)
@@ -723,7 +737,9 @@ def full_budget_summary(rows: list[dict]) -> str:
     """**各自全预算**：rag 走它的完整一次，agent 走它全部的检索轮次。
 
     这是产品实际形态的对照 —— agent 本来就允许多轮，把它砍成一轮等于测一个不存在的系统。
-    但只报全预算数会误导：agent 平均检索 2.4 次，rag 1 次，多打几枪本来就会多中。
+    但只报全预算数会误导：agent 会多查几轮，rag 只查一次，多打几枪本来就会多中。
+    （这个倍数**随题集与 AGENT_MAX_STEPS 走，不是常数** —— 100 题集上曾是 2.4 次，
+    63 题集上是 1.7 次。所以下面那句倍数不要写死，写成"agent 平均检索 N 次"的形态。）
     所以同一份输出里**必须**带上同预算分解（双方都只看第一次检索），
     否则「agent 更强」这个结论分不清是"第一次就查得更准"还是"单纯多查了几轮"。
     """
@@ -769,7 +785,7 @@ def full_budget_summary(rows: list[dict]) -> str:
 
     n = len(rows)
     lines = [
-        f"各自全预算对照（{n} 题 × 2 条 gold = {total} 条）",
+        f"各自全预算对照（{n} 题，共 {total} 条 gold）",
         "",
         f"  {'':6}{'查到 gold':>12}{'引用 gold':>12}{'平均检索次数':>14}",
     ]
