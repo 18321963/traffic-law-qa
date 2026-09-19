@@ -1,7 +1,7 @@
 """跨法规多跳题集的护栏测试 —— 全部离线，不连 Milvus、不调 LLM。
 
 护栏是这份题集唯一的可信度来源（gold 是模型给的，不是机械可验证的边），
-所以**负向用例比正向更重要**：必须证明「同法」「泄漏」「不存在的条」都会被拒。
+所以**负向用例比正向更重要**：必须证明「同法」「题面自带条号」「不存在的条」都会被拒。
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ def test_坏键被拒(raw: str):
         parse_key(raw)
 
 
-# ================================================================== G1 泄漏
+# ================================================================== G1 题面自带条号
 @pytest.mark.parametrize(
     "question",
     [
@@ -63,16 +63,16 @@ def test_坏键被拒(raw: str):
         "根据《深圳经济特区智能网联汽车管理条例》，责任怎么分？",
     ],
 )
-def test_题面泄漏被拒(question: str, library: Library):
-    """条号与《法名》只要出现一样，答案就被题面自己写出来了。"""
+def test_题面自带条号被拒(question: str, library: Library):
+    """条号与《法名》只要出现一样，定位信息就由题面自己给出了。"""
     with pytest.raises(HopError):
         check_question(question, library)
 
 
-def test_题面不加书名号写法名也算泄漏(library: Library):
+def test_题面不加书名号写法名也算自带条号(library: Library):
     """首轮试跑真踩到过：「不是说全国道交法里规定不系安全带才罚50吗」。
 
-    它没写书名号，`RE_LAW` 拦不住 —— 但法名简称原样在里面，答案等于被问出来了。
+    它没写书名号，`RE_LAW` 拦不住 —— 但法名简称原样在里面，定位信息等于被题面自己给出了。
     """
     with pytest.raises(HopError, match="法规名"):
         check_question("道路交通安全法里说这种情况只警告，为什么深圳罚这么重", library)
@@ -373,7 +373,7 @@ class _照抄锚点的假LLM:
     def chat(self, history, temperature=0.0):
         del temperature
         prompt = next(row["content"] for row in history if row["role"] == "user")
-        # 「【本条】法名　条号」—— 条号那截不能进题面，会被泄漏护栏拦下
+        # 「【本条】法名　条号」—— 条号那截不能进题面，会被自带条号护栏拦下
         head = next(r for r in prompt.splitlines() if r.startswith("【本条】"))
         anchor_name = head.split()[0][len("【本条】"):]
         other = next(name for name in self.library.law_names if name != anchor_name)

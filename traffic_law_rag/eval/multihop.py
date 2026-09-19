@@ -11,14 +11,14 @@
 
 **护栏**（不过就重试，连续失败丢弃该条）：
 
-    G1  题面不含条号、不含《法名》   —— 否则答案泄漏，检索必然命中，测不出东西
+    G1  题面不含条号、不含《法名》   —— 否则题面自带定位信息，检索必然命中，测不出检索
     G2  gold 每一条都能解析到真实存在的条文
     G3  gold 必须跨 >= 2 部法规      —— 硬闸，就是本模块存在的理由
     G4  题面去重
 
 **诚实交代两件事，别被数字骗了：**
 
-1. **gold 是模型给的，不是机械可验证的边。** 这与现有 135 题同一个噪声来源
+1. **gold 是模型给的，不是机械可验证的边。** 这与单跳那 82 道题同一个噪声来源
    （语料的 gold 也是从模型 output 里解析的）。护栏能保证「条存在」「真跨法」，
    保证不了「这一条真的必要」。
 2. **所以基线可检索性只做诊断，不做筛选。** 若把「基线捞不到」当成入选条件，
@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,9 @@ __all__ = [
     "check_question",
     "build_case",
     "summarize",
+    # 两侧并排跑与全预算汇总：单跳对照（eval.singlehop）复用同一份
+    "trace",
+    "full_budget_summary",
     "main",
 ]
 
@@ -165,19 +169,19 @@ def _law_aliases(library: Library) -> tuple[str, ...]:
 def check_question(question: str, library: Library) -> None:
     """G1：题面不得含条号、不得含《法名》或其简称。
 
-    只要泄漏一样，答案就被题面自己写出来了 —— 检索必然命中，指标就成了
-    在测「正则能不能匹配中文数字」。现有 135 题也是这样剔出来的。
+    只要带上一样，题面就把定位信息自己写出来了 —— 检索必然命中，指标就成了
+    在测「正则能不能匹配中文数字」。单跳那套题也是这样剔出来的。
     """
     text = (question or "").strip()
     if not text:
         raise HopError("题面为空")
     if RE_ARTICLE.search(text):
-        raise HopError("题面含条号，答案泄漏")
+        raise HopError("题面含条号，自带定位信息")
     if RE_LAW.search(text):
-        raise HopError("题面含《法名》，答案泄漏")
+        raise HopError("题面含《法名》，自带定位信息")
     for alias in _law_aliases(library):
         if alias in text:
-            raise HopError(f"题面含法规名「{alias}」，答案泄漏")
+            raise HopError(f"题面含法规名「{alias}」，自带定位信息")
 
 
 def build_case(raw: dict, library: Library) -> HopCase:
@@ -307,7 +311,7 @@ def summarize(cases: list[HopCase], *, library: Library | None = None) -> str:
 def overlap_diagnostic(cases: list[HopCase], library: Library) -> str:
     """题面与 gold 原文的最长公共片段 —— 越长说明题面越像在**抄条文**而不是提问。
 
-    G1 拦得住条号和法名，拦不住「把条文内容改写进题面」。这个数就是那份残余泄漏的
+    G1 拦得住条号和法名，拦不住「把条文内容改写进题面」。这个数就是那份残余重合的
     可见化：中位数要是到了十几个字，说明题面在复述答案，题集就白造了。
     """
 
@@ -655,9 +659,15 @@ def generate(
 
 
 # ================================================================== 看轨迹
+def _why_of(case: Any) -> str:
+    """多跳题带 `why`（这道题为什么算跨法），单跳题没有 —— 一份行格式要能吃两种 case。"""
+    return getattr(case, "why", "")
+
+
 def trace(
     *,
-    limit: int = 10,
+    cases: Sequence[Any] | None = None,
+    limit: int | None = 10,
     out: Path | None = None,
     top_k: int = 6,
     verbose: bool = True,
@@ -666,13 +676,18 @@ def trace(
 
     **这里刻意不算任何指标。** 先看两边到底产出了什么，再决定怎么比 ——
     先定指标容易把真问题盖掉。两侧都要真调 LLM。
+
+    `cases` 不给就是多跳题集；单跳题集（`eval.singlehop`）复用同一份跑法 ——
+    两条臂怎么跑、行里放什么，只此一处实现，改一次两边同时生效。
+    case 只要求有 `question` / `gold_ids` / `gold_citations` 三个字段。
     """
     from ..agent.graph import AgentRunner, render_trace
     from ..api import qa
     from ..contracts import Answer, RetrievalResult
 
-    cases, _dropped = load_cases()
-    cases = cases[:limit]
+    if cases is None:
+        cases, _dropped = load_cases()
+    cases = list(cases)[:limit]
     runner = AgentRunner.load(top_k=top_k)   # 图只建一次，10 道题复用
 
     rows: list[dict] = []
@@ -693,7 +708,7 @@ def trace(
                 "question": case.question,
                 "gold": list(case.gold_citations),
                 "gold_ids": list(case.gold_ids),
-                "why": case.why,
+                "why": _why_of(case),
                 "rag": {
                     "answer": answer.text,
                     "cited": [e.citation for e in answer.evidences],
@@ -754,7 +769,9 @@ def full_budget_summary(rows: list[dict]) -> str:
             for hit in search["articles"]:
                 index.setdefault(hit["parent_id"], hit["citation"])
 
-    total = 2 * len(rows)
+    # 分母从行里数，不写死 2×题数：多跳题恒好两条 gold，单跳题集（gold 一条起、条数不定）
+    # 复用这个汇总时，写死会把分母算错 —— 而算错的方向是**虚高**，正是最不该出的那种错。
+    total = sum(len(row["gold_ids"]) for row in rows)
     tally = {
         "rag": {"found": 0, "cited": 0, "rounds": 0},
         "agent": {"found": 0, "cited": 0, "rounds": 0},

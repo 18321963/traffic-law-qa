@@ -144,7 +144,7 @@ def _corpus(tmp_path, items: list[dict]):
 
 
 def test_语料切分成三类(tmp_path, resolver):
-    """合法题 / 无 gold / 题面泄漏 —— 三类计数的差定义了 hit@k 的分母。"""
+    """合法题 / 无 gold / 题面自带条号 —— 三类计数的差定义了 hit@k 的分母。"""
     path = _corpus(
         tmp_path,
         [
@@ -155,25 +155,25 @@ def test_语料切分成三类(tmp_path, resolver):
     )
     id_of = {(LAW, "第九十一条"): "road_traffic_safety_law@2021-04-29#a091"}
 
-    cases, no_gold, leaked = build_cases(path, resolver, id_of)
+    cases, no_gold, named = build_cases(path, resolver, id_of)
 
     assert [case.question for case in cases] == ["醉驾怎么处罚"]
     assert no_gold == 1
-    assert leaked == 1
+    assert named == 1
 
 
-def test_题面含法名也算泄漏(tmp_path, resolver):
+def test_题面含法名也算点名(tmp_path, resolver):
     path = _corpus(
         tmp_path,
         [{"instruction": f"《{LAW}》里怎么规定醉驾", "output": f"《{LAW}》第九十一条…"}],
     )
-    _, _, leaked = build_cases(path, resolver, {(LAW, "第九十一条"): "x"})
+    _, _, named = build_cases(path, resolver, {(LAW, "第九十一条"): "x"})
 
-    assert leaked == 1
+    assert named == 1
 
 
-def test_无gold优先于泄漏计数(tmp_path, resolver):
-    """两个条件同时成立时只计一次，且算「无 gold」—— 先判 gold 再判泄漏。
+def test_无gold优先于点名计数(tmp_path, resolver):
+    """两个条件同时成立时只计一次，且算「无 gold」—— 先判 gold 再判点名。
 
     这不是吹毛求疵：两条计数会一起进报告的题头，重复计数就凑不回语料总数。
     """
@@ -181,9 +181,9 @@ def test_无gold优先于泄漏计数(tmp_path, resolver):
         tmp_path,
         [{"instruction": f"《{LAW}》第九十一条怎么规定", "output": "没有引用任何条号。"}],
     )
-    cases, no_gold, leaked = build_cases(path, resolver, {(LAW, "第九十一条"): "x"})
+    cases, no_gold, named = build_cases(path, resolver, {(LAW, "第九十一条"): "x"})
 
-    assert (len(cases), no_gold, leaked) == (0, 1, 0)
+    assert (len(cases), no_gold, named) == (0, 1, 0)
 
 
 def test_库外法条不算gold(tmp_path, resolver):
@@ -198,9 +198,107 @@ def test_库外法条不算gold(tmp_path, resolver):
     assert no_gold == 1
 
 
-# ------------------------------------------------- include_leaked（规则取条臂的题集）
-def test_默认剔除泄漏桶_行为逐字节不变(tmp_path, resolver):
-    """不传 `include_leaked` 时，泄漏题既不进 cases 也不改变计数 —— 既有调用方不受影响。
+# ------------------------------------------------- 去重（同一题面存了两遍）
+def _pair(question: str, first: str, second: str) -> list[dict]:
+    """语料的真实形状：同一句 `instruction` 两条，`output` 是两次生成的结果。"""
+    return [
+        {"instruction": question, "output": first},
+        {"instruction": question, "output": second},
+    ]
+
+
+def test_同题两变体合并成一道(tmp_path, resolver):
+    """语料每道题存两遍 —— 不合并，同一句检索词会被算两遍，分母直接虚高四成。"""
+    path = _corpus(
+        tmp_path,
+        _pair(
+            "醉驾怎么处罚",
+            f"依据《{LAW}》第九十一条，处拘役。",
+            f"《{LAW}》第九十一条规定：吊销机动车驾驶证。",
+        ),
+    )
+    cases, no_gold, named = build_cases(path, resolver, {(LAW, "第九十一条"): "a091"})
+
+    assert [case.question for case in cases] == ["醉驾怎么处罚"]
+    assert cases[0].gold_ids == ("a091",)
+    assert (no_gold, named) == (0, 0)
+
+
+def test_gold取两变体的交集(tmp_path, resolver):
+    """两次生成引的条不一致（全库 9 例，多是相邻条）→ 只认两次都引了的。
+
+    交集为空 = 这道题没有可信 ground truth，整题落进「无 gold」——
+    不拿其中一次生成的结果去判另一次生成的对错。
+    """
+    path = _corpus(
+        tmp_path,
+        _pair(
+            "人行横道信号灯亮红灯时可以继续通过吗",
+            f"《{REGULATION}》第三十九条规定……",
+            f"《{REGULATION}》第四十条规定……",
+        ),
+    )
+    id_of = {(REGULATION, "第三十九条"): "a039", (REGULATION, "第四十条"): "a040"}
+    cases, no_gold, named = build_cases(path, resolver, id_of)
+
+    assert cases == []
+    assert (no_gold, named) == (1, 0)
+
+
+def test_交集非空时按交集收窄(tmp_path, resolver):
+    """一个变体多引了一条 —— 那条只有一次生成说它必要，不算 gold。"""
+    path = _corpus(
+        tmp_path,
+        _pair(
+            "机动车进入或驶离高速公路时要开转向灯吗",
+            f"《{REGULATION}》第七十九条、第八十条规定……",
+            f"《{REGULATION}》第七十九条规定……",
+        ),
+    )
+    id_of = {(REGULATION, "第七十九条"): "a079", (REGULATION, "第八十条"): "a080"}
+    cases, _, _ = build_cases(path, resolver, id_of)
+
+    assert cases[0].gold_ids == ("a079",)
+
+
+def test_一个变体解析不出gold不影响合并(tmp_path, resolver):
+    """变体答得空 ≠ 这道题没答案：有 gold 的那份说了算，题面不会因此丢。"""
+    path = _corpus(
+        tmp_path,
+        _pair(
+            "醉驾怎么处罚",
+            f"依据《{LAW}》第九十一条，处拘役。",
+            "这个问题我无法回答。",
+        ),
+    )
+    cases, no_gold, _ = build_cases(path, resolver, {(LAW, "第九十一条"): "a091"})
+
+    assert len(cases) == 1
+    assert no_gold == 0
+
+
+def test_去重后三类计数按题面闭合(tmp_path, resolver):
+    """`len(cases) + no_gold + named` 必须等于语料里的**不同题面数**。
+
+    题头那句「475 条 → 239 道」靠它；按条计数就凑不回去，而凑不回去的题头
+    正是「多算了一遍」这件事藏身的地方。
+    """
+    path = _corpus(
+        tmp_path,
+        _pair("醉驾怎么处罚", f"《{LAW}》第九十一条…", f"《{LAW}》第九十一条…")
+        + _pair("第九十一条讲什么", f"《{LAW}》第九十一条…", f"《{LAW}》第九十一条…")
+        + _pair("美国自动驾驶怎么管", "本库没有相关规定。", "库外，答不了。"),
+    )
+    cases, no_gold, named = build_cases(path, resolver, {(LAW, "第九十一条"): "a091"})
+
+    assert [case.question for case in cases] == ["醉驾怎么处罚"]
+    assert (len(cases), no_gold, named) == (1, 1, 1)
+    assert len(cases) + no_gold + named == 3   # 三句题面，六条语料
+
+
+# ------------------------------------------------- include_named（规则取条臂的题集）
+def test_默认剔除点名桶_行为逐字节不变(tmp_path, resolver):
+    """不传 `include_named` 时，点名题既不进 cases 也不改变计数 —— 既有调用方不受影响。
 
     这条是「`evaluate()` 零改动」的看门测试：改了默认行为，基线 hit@k 的分母就变了。
     """
@@ -213,17 +311,17 @@ def test_默认剔除泄漏桶_行为逐字节不变(tmp_path, resolver):
     )
     id_of = {(LAW, "第九十一条"): "a091"}
 
-    cases, no_gold, leaked = build_cases(path, resolver, id_of)
+    cases, no_gold, named = build_cases(path, resolver, id_of)
 
     assert [case.question for case in cases] == ["醉驾怎么处罚"]
-    assert (no_gold, leaked) == (0, 1)
+    assert (no_gold, named) == (0, 1)
 
 
-def test_include_leaked把泄漏桶收进题集(tmp_path, resolver):
-    """开了之后泄漏题**进 cases**，而 `leaked` 计数照旧 —— 计数是语料体检，不是筛选结果。
+def test_include_named把点名桶收进题集(tmp_path, resolver):
+    """开了之后点名题**进 cases**，而 `named` 计数照旧 —— 计数是语料体检，不是筛选结果。
 
     这对规则取条臂是必要的：题面自己写着条号，检索指标对它毫无价值（BM25 必然命中），
-    但它正是「正则抽条号 → 条号索引定位」这条路的探针，而评测集那 135 题里含条号的是 0 道。
+    但它正是「正则抽条号 → 条号索引定位」这条路的探针，而评测集那 82 道里含条号的是 0 道。
     """
     path = _corpus(
         tmp_path,
@@ -234,25 +332,25 @@ def test_include_leaked把泄漏桶收进题集(tmp_path, resolver):
     )
     id_of = {(LAW, "第九十一条"): "a091"}
 
-    cases, no_gold, leaked = build_cases(path, resolver, id_of, include_leaked=True)
+    cases, no_gold, named = build_cases(path, resolver, id_of, include_named=True)
 
     assert [case.question for case in cases] == ["醉驾怎么处罚", "第九十一条讲什么"]
-    assert (no_gold, leaked) == (0, 1)
+    assert (no_gold, named) == (0, 1)
     # gold 照常解析 —— 收进来的是完整评测题，不是只有题面的残次品
     assert cases[1].gold_ids == ("a091",)
 
 
-def test_include_leaked不改变无gold的判定(tmp_path, resolver):
+def test_include_named不改变无gold的判定(tmp_path, resolver):
     """无 gold 的题仍然被剔除 —— 它对两条臂都没有意义，没人能判它答得对不对。"""
     path = _corpus(
         tmp_path,
         [{"instruction": f"《{LAW}》第九十一条怎么规定", "output": "没有引用任何条号。"}],
     )
-    cases, no_gold, leaked = build_cases(
-        path, resolver, {(LAW, "第九十一条"): "x"}, include_leaked=True
+    cases, no_gold, named = build_cases(
+        path, resolver, {(LAW, "第九十一条"): "x"}, include_named=True
     )
 
-    assert (len(cases), no_gold, leaked) == (0, 1, 0)
+    assert (len(cases), no_gold, named) == (0, 1, 0)
 
 
 # ------------------------------------------------- 规则取条臂的统计口径
@@ -462,7 +560,7 @@ def _report(rows: list[CaseResult]) -> EvalReport:
         results=tuple(rows),
         total_raw=10,
         skipped_no_gold=2,
-        skipped_leak=1,
+        skipped_named=1,
         top_k=6,
         used_vector=True,
         elapsed_ms=1000.0,

@@ -1,6 +1,6 @@
 """离线检索评测：data/eval_corpus.json（指令语料）→ hit@1/@3/@6 + MRR。
 
-    python -m traffic_law_rag.eval                    # 跑全部可用评测题（135 条）
+    python -m traffic_law_rag.eval                    # 跑全部可用评测题（82 道）
     python -m traffic_law_rag.eval --limit 20         # 先跑 20 条看链路
     python -m traffic_law_rag.eval --no-vector        # 只走 BM25，用来 A/B 对比混合检索
     python -m traffic_law_rag.eval --show-misses 10   # 打印没命中的题，便于定位
@@ -11,16 +11,22 @@
     python -m traffic_law_rag.eval --reference        # 题面含条号那批题 → 规则取条能否唯一定位
     python -m traffic_law_rag.eval --reference --no-compare   # 连基线对照都不跑，纯离线
 
-为什么需要第二条臂：构造评测题时会**剔除**题面含条号或法名的题（答案泄漏，检索必然命中），
-所以那 135 题里含「第…条」的是 0 道 —— 检索指标在结构上永远衡量不到规则取条这条新路径。
+为什么需要第二条臂：构造评测题时会**剔除**题面自带条号或法名的题（查询里已经给了定位信息，检索必然命中），
+所以评测集那 82 道里含「第…条」的是 0 道 —— 检索指标在结构上永远衡量不到规则取条这条新路径。
 被剔除的那批反而是一份现成的、已标注的探针集，`--reference` 就是拿它来测。
 
-语料本身不是评测集，475 条 instruction/output 里只有一部分能当检索题用：
+语料本身不是评测集：475 条 instruction/output、**去重后 239 道题面**，只有一部分能当检索题用。
 
-- **132 条**的答案里没有能定位到本库的条号 → 构造不出 ground truth
-- **208 条**的题面自己就写着「第X条」或《法名》→ 答案泄漏，检索必然"命中"，测不出东西
-- 剩下 **135 条**既能定位 gold、题面又不泄漏 → 本模块跑这些
-  → hit@1 71.1% / hit@3 83.7% / hit@6 90.4% / MRR 0.783
+**先说去重。** 这 475 条是每道题**存了两遍**（同一句题面、两份不同的 `output` —— 两次生成），
+所以往下一切筛选与计数都按**题面**走：`build_cases` 先把两个变体合并成一道、gold 取交集
+（细则见该函数）。不合并的话，同一句检索词会被算两遍、分母虚高四成，而两次生成引的条
+不一致时（全库 9 例，多是相邻条）还会拿互相矛盾的两套标准去判同一次检索。
+
+- **45 道**构造不出 ground truth：答案里没引本库条号，或两次生成引的条不一致
+- **112 道**的题面自己点名了「第X条」或《法名》→ 查询自带定位信息，检索必然"命中"，
+  衡量不出检索能力（这批改当规则取条那一臂的题集，即 `--reference`）
+- 剩下 **82 道**题面不带定位信息、又能定位 gold → 本模块跑这些
+  → hit@1 69.5% / hit@3 84.1% / hit@6 91.5% / MRR 0.777
   （当前配置：本地 bge-large-zh-v1.5 + 查询指令前缀。换向量模型这组数会动，
   各模型下的数见 docs/DESIGN.md §6 —— **别把这组数当模型的属性，它是配置的属性**。）
 
@@ -90,7 +96,7 @@ class EvalReport:
     results: tuple[CaseResult, ...]
     total_raw: int                    # 语料原始条数
     skipped_no_gold: int              # 构造不出 gold 的
-    skipped_leak: int                 # 题面泄漏的
+    skipped_named: int                # 题面自己点名了条号或法名的
     top_k: int
     used_vector: bool
     elapsed_ms: float
@@ -98,6 +104,15 @@ class EvalReport:
     @property
     def cases(self) -> int:
         return len(self.results)
+
+    @property
+    def questions(self) -> int:
+        """语料里不同题面的总数 —— 每道题面恰好落进「跑了 / 无 gold / 点名」之一。
+
+        语料是每道题存两遍的，所以这个数**小于** `total_raw`；题头那句来源靠它
+        跟 `total_raw` 一起才说得通（`total_raw` 条 → 去重后 `questions` 道）。
+        """
+        return self.cases + self.skipped_no_gold + self.skipped_named
 
     def hit_at(self, k: int, subset: tuple[CaseResult, ...] | None = None) -> float:
         rows = self.results if subset is None else subset
@@ -135,9 +150,10 @@ class EvalReport:
 
         return {
             "cases": self.cases,
+            "questions": self.questions,
             "total_raw": self.total_raw,
             "skipped_no_gold": self.skipped_no_gold,
-            "skipped_leak": self.skipped_leak,
+            "skipped_named": self.skipped_named,
             "top_k": self.top_k,
             "used_vector": self.used_vector,
             "elapsed_ms": round(self.elapsed_ms, 1),
@@ -166,8 +182,9 @@ class EvalReport:
         lines = [
             f"检索评测：{self.cases} 题"
             f" ｜ {mode} ｜ top_k={self.top_k} ｜ 耗时 {self.elapsed_ms / 1000:.1f}s",
-            f"来源：{self.total_raw} 条语料 → 剔除 {self.skipped_no_gold} 条无 gold、"
-            f"{self.skipped_leak} 条题面泄漏",
+            f"来源：{self.total_raw} 条语料 → 去重后 {self.questions} 道题面"
+            f"（同题两变体合并、gold 取交集）",
+            f"      剔除 {self.skipped_no_gold} 道无 gold、{self.skipped_named} 道题面自带条号/法名",
             "",
             self._line("合计", self.results),
             "",
@@ -237,39 +254,66 @@ def build_cases(
     resolver: LawResolver,
     id_of: dict[tuple[str, str], str],
     *,
-    include_leaked: bool = False,
+    include_named: bool = False,
 ) -> tuple[list[EvalCase], int, int]:
-    """语料 → 评测题；返回（题目, 无 gold 条数, 题面泄漏条数）。
+    """语料 → 评测题；返回（题目, 无 gold 题数, 题面自带条号或法名的题数）。
 
-    `include_leaked=True` 时把「题面泄漏」那批**收进**评测集而不是剔除。
-    它们对检索指标毫无价值（题面自己写着条号，BM25 必然命中），但正是
-    **规则取条**那条路的探针：题面给出的条号就是 gold 的比例高达 94%，
+    **先按题面合并，再分类。** 语料里每道题都存了两遍（同一 `instruction`、
+    两份不同的 `output`/`complexCOT` —— 两次生成的答案）。gold 是从答案里解析的，
+    所以不合并的话同一道题会带着**两份可能不一样的标注**各占一行：同一句检索词
+    被算两遍，碰到两次生成引的条不同时（全库 9 例，多是相邻条，如 39/40、16/17），
+    还会拿两条互相矛盾的标准去判同一次检索。
+
+    合并规则：gold 取两次生成所引条号的**交集** —— 只认两次都引了的条。
+    交集为空 = 两次生成互相矛盾、没有可信的 ground truth，整题算「无 gold」
+    （`no_gold` 桶里因此有两个成因：答案没引本库条号、或两次引的条不一致）。
+
+    计数一律是**题面数**：三类各计一次，`len(cases) + no_gold + named`
+    （`include_named=False` 时）恒等于语料里的不同题面数 —— 报告的题头靠这个凑得回。
+
+    `include_named=True` 时把「题面自带条号/法名」那批**收进**评测集而不是剔除。
+    它们对检索指标毫无价值（查询里已经写明要哪一条，BM25 必然命中），但正是
+    **规则取条**那条路的探针：写了条号的 109 道里 107 道那个条号就是 gold（98%），
     是一份已经标注好、规模比手搓探针集大一个量级的现成测试集。
-
-    默认 `False` —— 既有调用方的行为逐字节不变。
     """
     raw = json.loads(Path(data_path).read_text(encoding="utf-8"))
     known = set(id_of)
     cases: list[EvalCase] = []
-    no_gold = leaked = 0
+    no_gold = named = 0
+
+    # 题面 → 每个变体引到的条（去重保序，空表示这个变体解析不出 gold）
+    groups: dict[str, list[list[tuple[str, str]]]] = {}
+    named_questions: set[str] = set()
 
     for item in raw:
         question = (item.get("instruction") or "").strip()
-        output = item.get("output") or ""
         if not question:
             continue
+        pairs = [
+            (law, art)
+            for law, art in _cited_articles(item.get("output") or "", resolver)
+            if (law, art) in known
+        ]
+        groups.setdefault(question, []).append(list(dict.fromkeys(pairs)))
+        # 题面自己点名了条号或法名 → 查询自带定位信息，检索必然命中，测不出检索能力
+        if RE_ARTICLE.search(question) or RE_LAW.search(question):
+            named_questions.add(question)
 
-        pairs = [(law, art) for law, art in _cited_articles(output, resolver) if (law, art) in known]
-        if not pairs:
+    for question, variants in groups.items():
+        with_gold = [pairs for pairs in variants if pairs]
+        gold_pairs = (
+            [pair for pair in with_gold[0] if all(pair in pairs for pairs in with_gold)]
+            if with_gold
+            else []
+        )
+        if not gold_pairs:
             no_gold += 1
             continue
-        # 题面自己写着条号或法名 → 答案泄漏，检索必然命中，测不出东西
-        if RE_ARTICLE.search(question) or RE_LAW.search(question):
-            leaked += 1
-            if not include_leaked:
+        if question in named_questions:
+            named += 1
+            if not include_named:
                 continue
 
-        gold_pairs = list(dict.fromkeys(pairs))  # 去重保序
         cases.append(
             EvalCase(
                 question=question,
@@ -278,7 +322,7 @@ def build_cases(
                 gold_laws=tuple(dict.fromkeys(law for law, _ in gold_pairs)),
             )
         )
-    return cases, no_gold, leaked
+    return cases, no_gold, named
 
 
 def _kb_index() -> tuple[LawResolver, set[tuple[str, str]], dict[tuple[str, str], str]]:
@@ -310,13 +354,13 @@ def evaluate(
         raise QaError(f"评测语料不存在：{data_path}")
 
     resolver, _known, id_of = _kb_index()
-    cases, no_gold, leaked = build_cases(data_path, resolver, id_of)
+    cases, no_gold, named = build_cases(data_path, resolver, id_of)
     if limit:
         cases = cases[:limit]
     if not cases:
         from ..api import QaError
 
-        raise QaError(f"{data_path} 里没有可用的评测题（无 gold {no_gold} 条 / 题面泄漏 {leaked} 条）")
+        raise QaError(f"{data_path} 里没有可用的评测题（无 gold {no_gold} 道 / 题面自带条号或法名 {named} 道）")
 
     top_k = top_k or max(KS)
     started = time.perf_counter()
@@ -345,7 +389,7 @@ def evaluate(
         results=tuple(results),
         total_raw=len(json.loads(data_path.read_text(encoding="utf-8"))),
         skipped_no_gold=no_gold,
-        skipped_leak=leaked,
+        skipped_named=named,
         top_k=top_k,
         used_vector=any(row.used_vector for row in results),
         elapsed_ms=(time.perf_counter() - started) * 1000,
@@ -393,6 +437,7 @@ class ReferenceReport:
     total_raw: int
     skipped_no_gold: int
     elapsed_ms: float
+    questions: int = 0           # 语料去重后的题面数（本臂只取其中一部分，凑不回去）
     baseline_ran: bool = False   # 基线那一列是否真的跑了（Milvus 没起时为 False）
 
     @property
@@ -445,9 +490,11 @@ class ReferenceReport:
     def render(self) -> str:
         total = self.cases
         lines = [
-            f"规则取条评测：{total} 题（题面含条号或法名的「泄漏桶」）"
+            f"规则取条评测：{total} 题（题面含条号或法名的「点名桶」）"
             f" ｜ 离线 ｜ 耗时 {self.elapsed_ms / 1000:.1f}s",
-            f"来源：{self.total_raw} 条语料 → 剔除 {self.skipped_no_gold} 条无 gold",
+            f"来源：{self.total_raw} 条语料 → 去重后 {self.questions} 道题面"
+            f"（同题两变体合并、gold 取交集）",
+            f"      剔除 {self.skipped_no_gold} 道无 gold ｜ 本臂只取题面含条号或法名的 {total} 道",
             "",
             f"  规则定位到唯一一条：{len(self.located)}/{total}"
             f"（{len(self.located) / total:.1%}）"
@@ -528,7 +575,7 @@ def evaluate_reference(
     """跑「题面点名了某一条」那批题，看规则取条能不能唯一定位到它。
 
     与 `evaluate()` 的分工：那个测**检索**（hit@k / MRR），这个测**定位**。
-    两者测不到同一件事 —— 评测集那 135 题里含「第…条」的是 0 道，所以
+    两者测不到同一件事 —— 评测集里含「第…条」的是 0 道，所以
     检索指标在结构上永远衡量不到本轮新增的能力，这一臂才是它的探针。
 
     `compare_baseline=True` 时额外跑一遍基线检索做对照；Milvus 不可用时
@@ -544,7 +591,10 @@ def evaluate_reference(
         raise QaError(f"评测语料不存在：{data_path}")
 
     resolver, _known, id_of = _kb_index()
-    cases, no_gold, _leaked = build_cases(data_path, resolver, id_of, include_leaked=True)
+    cases, no_gold, _named = build_cases(data_path, resolver, id_of, include_named=True)
+    # 去重后的题面数 = 有 gold 的（含点名桶）+ 无 gold 的。要在**切之前**取，
+    # 切完就只剩本臂那一部分了，题头「475 条 → N 道」的 N 得是全量。
+    questions = len(cases) + no_gold
     # 只留「题面真的点名了某一条」的题：既没条号又没法名的那些，题面给不出可定位的目标，
     # 拿它们算分母会把定位率稀释成一个没有意义的数。
     cases = [c for c in cases if RE_ARTICLE.search(c.question) or RE_LAW.search(c.question)]
@@ -605,6 +655,7 @@ def evaluate_reference(
         total_raw=len(json.loads(data_path.read_text(encoding="utf-8"))),
         skipped_no_gold=no_gold,
         elapsed_ms=(time.perf_counter() - started) * 1000,
+        questions=questions,
         baseline_ran=baseline_ran,
     )
 

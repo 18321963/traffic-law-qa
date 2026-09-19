@@ -1,6 +1,6 @@
-"""单文件 HTTP demo：把 `qa()` 包成 FastAPI，含 SSE 流式。
+"""单文件 HTTP 服务：把 `qa()` 包成 FastAPI，含 SSE 流式。
 
-    uvicorn traffic_law_rag.server_demo:app --port 8000
+    uvicorn traffic_law_rag.server:app --port 8000
     # 或安装后：tlr-serve
 
     curl -X POST localhost:8000/qa -H 'Content-Type: application/json' \\
@@ -11,7 +11,7 @@
 
     curl localhost:8000/health
 
-**这个 demo 真正想演示的不是「能起服务」，而是「装配只做一次」。**
+**这个服务真正想说明的不是「能起服务」，而是「装配只做一次」。**
 `qa()` 每次调用都会重新跑一遍索引就绪检查、重读 chunks.jsonl、重连 Milvus ——
 命令行里无所谓（进程活一次就退），但放进 HTTP 服务里就是每个请求都付这个钱。
 所以这里把检索器与生成器在 lifespan 里装配一次缓存在 `app.state`，
@@ -21,7 +21,7 @@
 容器里唯一的差别是启动参数：默认绑 `127.0.0.1` 只对本地裸跑安全，
 容器内必须 `--host 0.0.0.0`，否则宿主机映射过来的端口连不上。
 
-刻意**不做**的事（本 demo 的边界）：鉴权、限流、多副本、
+刻意**不做**的事（本服务的边界）：鉴权、限流、多副本、
 请求级的超时与重试、把 server 拆成包。端到端只有三个端点，够跑通、够被 curl 验。
 """
 
@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="交通法规问答 Agent（demo）",
+    title="交通法规问答 Agent",
     description="分层 RAG 管道 + 强制引用式生成，单文件 HTTP 封装",
     version="0.1.0",
     lifespan=lifespan,
@@ -126,7 +126,7 @@ def health() -> dict:
         "rows": rt.ready.rows,
         "channels": "稠密+BM25" if rt.ready.dense else "纯 BM25",
         "index": rt.ready.action,
-        "llm_ready": bool(getattr(rt.rag.generator, "available", False)),
+        "llm_ready": rt.rag.llm_ready,
     }
 
 
@@ -139,7 +139,7 @@ def ask(req: QaRequest) -> dict:
     if req.mode == "search":
         payload = retrieval.to_dict()
     else:
-        answer = rt.rag.generator.generate(Question(text=req.question, top_k=req.top_k), retrieval)
+        answer = rt.rag.answer(Question(text=req.question, top_k=req.top_k), retrieval)
         payload = answer.to_dict()
     # 每请求只做检索+生成；装配成本发生在启动时（见 /health 的 boot_ms）
     payload["request_ms"] = round((time.perf_counter() - started) * 1000, 2)
@@ -182,7 +182,7 @@ def _sse_events(rt: Runtime, req: QaRequest):
     parts: list[str] = []
     usage: dict = {}
     try:
-        for kind, payload in rt.rag.generator.stream(question, retrieval):
+        for kind, payload in rt.rag.stream(question, retrieval):
             if kind == "delta":
                 parts.append(payload)
                 yield _sse("delta", {"text": payload})
@@ -197,7 +197,7 @@ def _sse_events(rt: Runtime, req: QaRequest):
         {
             "question": req.question,
             "answer": "".join(parts),
-            "model": rt.rag.generator.cfg.model,
+            "model": rt.rag.model_name,
             "usage": usage,
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
             "citations": [hit.citation for hit in retrieval.articles],

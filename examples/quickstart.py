@@ -1,4 +1,4 @@
-"""一条命令看完全貌：python examples/demo.py
+"""一条命令看完全貌：python examples/quickstart.py
 
 对 4 个典型问题依次跑「确保索引就绪 → 混合检索 → 生成」，打印：
 
@@ -14,7 +14,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# 未安装包时也能从仓库根目录直接跑（python examples/demo.py）：
+# 未安装包时也能从仓库根目录直接跑（python examples/quickstart.py）：
 # 脚本所在目录是 examples/，仓库根不在 sys.path 上。装过就自然能导入，这行无害。
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     search_only = "--search" in args
 
-    print(f"交通法规问答 demo ｜ {len(QUESTIONS)} 个问题 ｜ {'只检索' if search_only else '检索 + 生成'}")
+    print(f"交通法规问答 ｜ {len(QUESTIONS)} 个问题 ｜ {'只检索' if search_only else '检索 + 生成'}")
     print("首次运行若索引缺失会自动建库（约 30~60 秒），已就绪则直接复用\n")
 
     failures = 0

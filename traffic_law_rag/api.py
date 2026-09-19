@@ -14,7 +14,7 @@
 3. **把失败翻译成一行中文提示**（含该执行的命令），而不是 pymilvus 的堆栈。
 
 失败一律抛 `QaError`：库里不该替调用方打印，但消息本身就是给用户看的那一行。
-命令行入口（`python -m traffic_law_rag`）与 examples/demo.py 会把它接住并打印。
+命令行入口（`python -m traffic_law_rag`）与 examples/quickstart.py 会把它接住并打印。
 """
 
 from __future__ import annotations
@@ -228,13 +228,12 @@ def qa(
     from .qa.rag import LegalRAG
 
     rag = LegalRAG.load(with_vector=with_vector)
-    # 两步拆开写，而不是调 LegalRAG.ask：debug 模式下要拿到双通道排名，
-    # 而 ask() 不把 channel_debug 透给检索层（它也不需要透 —— 生成时用不上排名）。
-    retrieval = rag.search(question, top_k=top_k, channel_debug=debug)
     if mode == MODE_SEARCH:
-        return retrieval
+        return rag.search(question, top_k=top_k, channel_debug=debug)
 
-    return rag.generator.generate(Question(text=question, top_k=top_k), retrieval)
+    # 从前这里拆成 search + 生成器两步，只为把 channel_debug 送进检索层
+    # （ask() 那时不接收它）。现在 ask() 自己透传，两步就并回一步了。
+    return rag.ask(Question(text=question, top_k=top_k), channel_debug=debug)
 
 
 _announced = False
@@ -250,7 +249,7 @@ def _announce(state: ReadyState, debug: bool) -> None:
 
 # ================================================================== 渲染
 def render(result: Answer | RetrievalResult, *, debug: bool = False) -> str:
-    """把 qa() 的返回值渲染成人读文本（命令行入口与 demo 共用）。"""
+    """把 qa() 的返回值渲染成人读文本（命令行入口与 examples 共用）。"""
     if isinstance(result, RetrievalResult):
         return result.render()
     text = result.render()
