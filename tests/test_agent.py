@@ -24,6 +24,7 @@ from traffic_law_rag.agent import graph as A
 from traffic_law_rag.agent.tools import (
     GET_ARTICLE_NAME,
     SEARCH_LAW_NAME,
+    SEARCH_LAW_TOOL,
     build_article_index,
     merge_retrievals,
 )
@@ -163,7 +164,10 @@ def generator():
     return gen
 
 
-def run(question, script, parents, generator, *, forced=None, max_steps=2, retriever=None):
+def run(
+    question, script, parents, generator, *,
+    forced=None, max_steps=2, retriever=None, reflect_llm=None,
+):
     """跑一次完整图，返回 (终态, 假 LLM, 假检索器, 提示词记录器)。
 
     默认值跟着 `AgentConfig` 的默认走（2，实测定的）—— 两边不一致的话，
@@ -186,6 +190,7 @@ def run(question, script, parents, generator, *, forced=None, max_steps=2, retri
         cfg=cfg,
         top_k=6,
         forced_intent=forced,
+        reflect_llm=reflect_llm,
     )
     state = graph.invoke(
         {
@@ -695,3 +700,93 @@ def test_默认轮数上限是2():
     本机配了 AGENT_MAX_STEPS 就该听本机的，那不是这条测试该管的事。
     """
     assert config.AgentConfig().max_steps == 2
+
+
+# ================================================================== 14. 提示词措辞
+def test_检索工具的措辞不许和第一轮用原话那条打架():
+    """第 1 轮照搬率曾经只有 **2/100**：系统提示词写着「不要改写」，而工具 schema 在
+    模型真正填参数的那一个字段上写着「尽量靠近法条用语」、在外层描述里写着「换用不同
+    关键词」—— 位置更靠近动作，schema 赢了。
+
+    钉的是**两处口径一致**，不是某一句原文：谁再往参数描述里加回改写引导，
+    那个 2/100 就会跟着回来。
+    """
+    fn = SEARCH_LAW_TOOL["function"]
+    query_desc = fn["parameters"]["properties"]["query"]["description"]
+
+    assert "原话" in query_desc, "参数描述得说清第一轮用原话"
+    assert "法条用语" not in query_desc, "这里回过一次「尽量靠近法条用语」，与系统提示词正面冲突"
+    assert "换用不同关键词" not in fn["description"]
+
+
+def test_审核提示词让它拿上一轮的要过没当证据(parents, generator):
+    """`retrievable` 光有字段不够：审核每轮从零重判，手上没有「上轮补上了没」这个依据，
+    于是实测 62 对相邻审核里 45 对重复了同一个结论、`missing` 相似度中位 0.82。
+
+    对话历史里那条「[检索审核] 还缺：」是它自己写的，提示词必须点明去看它 ——
+    连着两轮要不到，才是「库外」最直接的证据。引用要逐字对上 `reflect_node` 注入的写法，
+    否则审核在历史里认不出自己那条。
+    """
+    script = [
+        _assistant(calls=[("c1", SEARCH_LAW_NAME, {"query": "q"})]),
+        _reflection(True),
+    ]
+    _, llm, *_ = run("问题", script, parents, generator)
+    system = llm.calls[1]["messages"][0]["content"]      # 第 2 次调用是审核
+
+    assert "[检索审核]" in system
+    assert "上一轮" in system
+
+
+# ================================================================== 15. 审核单独挂模型
+def test_审核模型不配时逐字段回退(monkeypatch):
+    """不写 `AGENT_REFLECT_*` = 与单模型时**逐位相同**。
+
+    这是这次改动的安全绳：多出来的只是「一个配置相同的客户端」，不是一套新行为。
+    """
+    for key in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "LLM_TEMPERATURE",
+                "AGENT_REFLECT_BASE_URL", "AGENT_REFLECT_API_KEY", "AGENT_REFLECT_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("LLM_BASE_URL", "https://base.example/v1")
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    monkeypatch.setenv("LLM_MODEL", "big-model")
+
+    assert config.reflect_llm_config() == config.llm_config()
+
+
+def test_审核模型只写模型名时只覆盖那一项(monkeypatch):
+    """**逐字段**回退，不是「有一项没配就整体回退」。
+
+    同一家只想换个免费额度没用完的模型时（百炼的额度按模型算），写一项就够，
+    不必把 key 和 base_url 再抄一遍 —— 抄一遍就迟早抄不一致。
+
+    **没设的那两项必须先 delenv**：`config` 在 import 时把本机 `.env` 读进了
+    `os.environ`，不清掉的话「沿用」断言的其实是**本机 .env 的值**，装了审核模型
+    的机器上这条会红（这条测试第一次就是这么做出来的）。
+    """
+    monkeypatch.delenv("AGENT_REFLECT_BASE_URL", raising=False)
+    monkeypatch.delenv("AGENT_REFLECT_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_BASE_URL", "https://dashscope.example/v1")
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    monkeypatch.setenv("LLM_MODEL", "qwen3-max")
+    monkeypatch.setenv("AGENT_REFLECT_MODEL", "glm-4.7-flash")
+
+    cfg = config.reflect_llm_config()
+    assert cfg.model == "glm-4.7-flash"                   # 写了的覆盖
+    assert cfg.base_url == "https://dashscope.example/v1"  # 没写的沿用
+    assert cfg.api_key == "k"
+
+
+def test_审核真的走了另一个客户端(parents, generator):
+    """规划轮与审核**确实是两个客户端**，不是只多了一个没人调用的属性。"""
+    reviewer = ScriptedLLM([_reflection(True)])
+    state, planner, *_ = run(
+        "问题",
+        [_assistant(calls=[("c1", SEARCH_LAW_NAME, {"query": "q"})])],
+        parents, generator, reflect_llm=reviewer,
+    )
+
+    assert len(planner.calls) == 1, "规划轮只该被问一次"
+    assert len(reviewer.calls) == 1, "审核走的是另一个客户端"
+    assert "审核" in reviewer.calls[0]["messages"][0]["content"]
+    assert state["reflections"][0]["sufficient"] is True

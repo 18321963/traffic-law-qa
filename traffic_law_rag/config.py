@@ -115,6 +115,32 @@ def llm_config() -> LLMConfig:
     )
 
 
+def reflect_llm_config() -> LLMConfig:
+    """审核节点的模型；**未配置时逐字段回退到 `llm_config()`**。
+
+    为什么值得单独一个模型：审核是整个循环里唯一一个「判断题 + 严格 JSON 输出」的节点，
+    也是实测下来唯一有明显判断缺口的地方（100 题里 162 次真判定有 64 次误报）；
+    规划轮反而很听话（第 2 轮检索词平均 68% 的字符落在上轮 `missing` 里），不需要换。
+
+    回退是**逐字段**的，不是「有一个没配就整体回退」：只想换模型名时写
+    `AGENT_REFLECT_MODEL` 一项即可，不必把 key 和 base_url 再抄一遍。
+    三项都不写 = 与单模型时逐位相同。
+
+    ⚠️ 但**模型名不跨家**：`glm-4.7-flash` 只能配智谱的 base_url。只写了模型名而
+    base_url 还是百炼的话，端点会回 400 —— 这个失败是响的（`ToolCallingLLM.chat`
+    重试后抛 `RuntimeError`），不会静默劣化。
+    """
+    base = llm_config()
+    return LLMConfig(
+        base_url=_env("AGENT_REFLECT_BASE_URL") or base.base_url,
+        api_key=_env("AGENT_REFLECT_API_KEY") or base.api_key,
+        model=_env("AGENT_REFLECT_MODEL") or base.model,
+        # 审核的温度不看这里：调用点写死 0.0（判断题，不要它发挥）。留着只为让
+        # LLMConfig 完整，不去动一个不影响任何行为的旋钮。
+        temperature=base.temperature,
+    )
+
+
 def embed_config() -> EmbedConfig:
     """向量模型配置；未单独配置时回退复用 LLM 端点。"""
     base_url = _env("EMBED_BASE_URL") or _env("LLM_BASE_URL", "https://api.deepseek.com/v1")

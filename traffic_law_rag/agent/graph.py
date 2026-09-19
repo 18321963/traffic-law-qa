@@ -45,6 +45,12 @@
 所以审核现在多答一个 `retrievable`（缺口在不在库内），路由只在它为真时才回边 ——
 提示词里因此要带上库的法规清单，否则审核无从判断「库内」的边界在哪。
 
+**但一个字段还不足以让它判得准**：审核每轮是从零重判的，手上没有「上一轮补上了没」这个依据。
+实测 62 对相邻审核里 45 对重复了同一个结论，`missing` 文案相似度中位 0.82 —— 第 2 轮检索
+基本没改变它的看法。而同一批数据里规划轮其实很听话（第 2 轮检索词平均 68% 的字符落在上轮
+`missing` 里）：缺口没补上不是没去查，是**查了也没有**。所以提示词还要它去看对话历史里
+自己上一轮写的那条「[检索审核] 还缺：」—— 同一个缺口连着两轮要不到，就是库外最直接的证据。
+
 **只用 LangGraph 的状态机，不用它的 LLM 抽象层。** 带工具的调用直接走 `openai` SDK
 （与 qa/generator.py 同一种写法），于是 state 里的 `messages` 就是 OpenAI 线上格式的
 `list[dict]`：`json.dumps` 直接可过，也不需要 `add_messages` 那层会改变消息形态的转换。
@@ -89,9 +95,9 @@ AGENT_SYSTEM_PROMPT = """你是交通法规问答的检索规划助手。你的�
 规则：
 1. 每次只发起一次检索（一个 search_law 调用）。
 2. **第一次检索原样使用用户的问题，不要改写。** 检索层已内置口语→法条用语的自动对齐
-   （醉驾→醉酒驾驶）与混合召回；把它拆成关键词反而会稀释信号，让真正相关的那条法条
-   掉出候选。实测过：同一道题，用原话检索命中了「处三百元罚款」那一条，
-   改写成关键词后反而没命中。
+   （醉驾→醉酒驾驶）与混合召回，改写是对一条已经处理好的查询再做一次有损加工。
+   100 题实测：原话 73/200 条命中，改写成关键词 72/200 —— **改写没换来收益**，
+   却让 agent 与线性管道的对照多出一个混淆变量。要换词的是后续轮次（见第 3 条）。
 3. 后续轮次只查**审核指出缺失的那一部分**，不要重检已经命中的内容 ——
    最终送进作答的条文数量是固定的，多余的检索会把真正相关的那几条挤出名额。
 4. 查询里带上法规名片段（如「深圳」「智能网联汽车」）能提高对应法规的权重；
@@ -117,6 +123,12 @@ sufficient = false 时，还必须回答第二个独立的问题：**这个缺�
 - 补不上（retrievable = false）：缺的东西**根本不在上面这几部法规里**。
   例如用户问的责任写在《治安管理处罚法》、是商业保险合同的约定、是紧急避险的免责，
   这些**再检索一百次也检不到** —— 应当就此停下去作答，不要再浪费一轮。
+
+**判断时先看一个具体事实：这个缺口，上一轮要过吗？**
+对话历史里可能有你自己上一轮写下的「[检索审核] 还缺：……」。同一个缺口已经要过一次、
+这一轮的新检索仍然没补上 —— 这是「库外」最直接的证据：库里有的东西，换个词通常就出来了；
+连着两轮要不到，多半是它根本不在这几部法规里。反过来，若这一轮补上了一部分、只差最后一小块，
+那就还值得再检一次。
 
 这一条**不要一律倒向某一边**，按你真实的把握判。判错的代价是双向的：判成 true 而其实
 检不到，白花一轮检索加两次模型调用；判成 false 而其实检得到，就少了一次本该做的检索。
@@ -768,8 +780,13 @@ def build_graph(
     cfg: config.AgentConfig,
     top_k: int,
     forced_intent: str | None = None,
+    reflect_llm: ToolCallingLLM | None = None,
 ):
     from langgraph.graph import END, START, StateGraph
+
+    # 审核可以挂另一个模型；不给就用规划轮那个。**默认必须是 `llm` 而不是新建一个
+    # 真客户端** —— 测试注入假 LLM 时，审核要是自己造一个，就会当场去打网络。
+    reflect_llm = reflect_llm or llm
 
     # 条号索引只建一次：classify / lookup_plan / tools 三个节点共用同一份。
     # 它是纯函数产物、构造后只读，所以共享是安全的，也避免三份各建一遍。
@@ -784,7 +801,7 @@ def build_graph(
     graph.add_node("lookup_plan", make_lookup_plan_node(parents, by_number))
     graph.add_node("agent", make_agent_node(llm, cfg))
     graph.add_node("tools", make_tools_node(rag, cfg, by_number))
-    graph.add_node("reflect", make_reflect_node(llm, cfg, laws))
+    graph.add_node("reflect", make_reflect_node(reflect_llm, cfg, laws))
     graph.add_node("finalize", make_finalize_node(rag, cfg, top_k))
 
     # 入口先定意图：条文定位走规则规划（零 LLM），其余才进 LLM 规划轮
@@ -830,6 +847,7 @@ class AgentRunner:
         rag: LegalRAG,
         *,
         llm: ToolCallingLLM | None = None,
+        reflect_llm: ToolCallingLLM | None = None,
         cfg: config.AgentConfig | None = None,
         forced_intent: str | None = None,
     ) -> None:
@@ -837,6 +855,9 @@ class AgentRunner:
         self.cfg = cfg or config.agent_config()
         self.forced_intent = forced_intent
         self.llm = llm or ToolCallingLLM(retries=self.cfg.retries)
+        # 不单独给就**跟着规划轮那个走**（含测试注入的假客户端）。
+        # 真实第二个客户端只在 `load()` 里造 —— 那里才知道该读 `AGENT_REFLECT_*`。
+        self.reflect_llm = reflect_llm or self.llm
         self._graph = None
 
     @property
@@ -858,10 +879,16 @@ class AgentRunner:
     ) -> "AgentRunner":
         # top_k 必须一路透到 LegalRAG：它是检索层的默认召回条数，
         # 只存在 AgentRunner 上的话，--top-k 会静默失效（检索仍按配置的 6 条走）。
+        agent_cfg = cfg or config.agent_config()
         return cls(
             LegalRAG.load(with_vector=with_vector, top_k=top_k),
-            cfg=cfg,
+            cfg=agent_cfg,
             forced_intent=forced_intent,
+            # 审核单独一个模型。`AGENT_REFLECT_*` 没配时它逐字段回退到 LLM_*，
+            # 于是这里多出来的只是**一个配置相同的客户端**，行为与单模型时逐位相同。
+            reflect_llm=ToolCallingLLM(
+                config.reflect_llm_config(), retries=agent_cfg.retries
+            ),
         )
 
     def graph(self):
