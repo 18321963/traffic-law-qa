@@ -106,14 +106,14 @@ class HybridRetriever:
         是把它从用户请求挪到启动阶段。命令行一次性调用不需要它：早晚都要付。
 
         **失败不是错**：检索层本来就有「向量端点不可用就退回 BM25」的降级路径
-        （见 `retrieve()` 里 embed_one 的 except）。预热同理 —— 这里吞掉异常，
+        （见 `retrieve()` 里 embed_query 的 except）。预热同理 —— 这里吞掉异常，
         真正的错误会在第一次真实检索时带着上下文报出来。
         """
         if self.embedder is None:
             return None
         started = time.perf_counter()
         try:
-            self.embedder.embed_one(probe)
+            self.embedder.embed_query(probe)
         except Exception:  # noqa: BLE001 - 外部依赖不可用；降级路径在 retrieve() 里
             return None
         return (time.perf_counter() - started) * 1000
@@ -190,7 +190,10 @@ class HybridRetriever:
                 notes.append("本次禁用了稠密向量，只用 BM25 召回")
             else:
                 try:
-                    dense_vector = self.embedder.embed_one(search_text)
+                    # 查询前缀只加在**这一条路径**上：search_text 在下面还以
+                    # query_text=search_text 喂给 BM25，往它身上拼前缀会把关键词
+                    # 通道的查询串一起污染。embed_query 内部处理，两路因此各得其宜。
+                    dense_vector = self.embedder.embed_query(search_text)
                 except Exception as exc:  # noqa: BLE001 - 向量端点是外部依赖
                     notes.append(f"查询向量化失败，本次只用 BM25：{exc}")
 

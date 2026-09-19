@@ -100,6 +100,9 @@ class EmbedConfig:
     model: str
     dim: int | None = None
     batch: int = 10
+    # 只加在**查询**上的指令前缀，段落侧绝不加。默认空 = 与不带前缀的模型逐位相同。
+    # 见 kb/indexer.py 的 embed_query，那里记着这个默认值的实测依据。
+    query_prefix: str = ""
 
     @property
     def ready(self) -> bool:
@@ -152,6 +155,7 @@ def embed_config() -> EmbedConfig:
         model=_env("EMBED_MODEL", "text-embedding-v4"),
         dim=int(dim_raw) if dim_raw.isdigit() else None,
         batch=_env_int("EMBED_BATCH", 10),
+        query_prefix=_env("EMBED_QUERY_PREFIX"),
     )
 
 

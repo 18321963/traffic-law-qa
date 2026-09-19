@@ -14,13 +14,19 @@ from traffic_law_rag.qa.retriever import HybridRetriever
 
 
 class _FakeEmbedder:
-    """记录调用次数的假 embedder。"""
+    """记录调用次数的假 embedder。
+
+    只实现 `embed_query`：检索层只会走这一个口子（预热与真实检索），段落侧的
+    `embed` 是建库阶段的事，这里到不了。记录的是**传进来的原文** ——
+    查询前缀在 EmbeddingClient 内部加，检索层原样转发，这正是下面
+    `test_预热文本可覆盖` 能断言 `calls == [probe]` 的原因。
+    """
 
     def __init__(self, *, exc: Exception | None = None) -> None:
         self.calls: list[str] = []
         self.exc = exc
 
-    def embed_one(self, text: str) -> list[float]:
+    def embed_query(self, text: str) -> list[float]:
         self.calls.append(text)
         if self.exc is not None:
             raise self.exc
