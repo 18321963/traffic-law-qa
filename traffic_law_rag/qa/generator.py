@@ -11,8 +11,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from . import config
-from .contracts import Answer, Evidence, Question, RetrievalResult
+from .. import config
+from ..contracts import Answer, Evidence, Question, RetrievalResult
 
 SYSTEM_PROMPT = """你是面向驾驶员、驾校学员与交管客服场景的交通法规问答助手。
 
@@ -38,7 +38,7 @@ USER_TEMPLATE = """问题：{question}
 # 同一句拒答在两个入口里措辞不同，用户会以为是两种不同的失败。
 EMPTY_RETRIEVAL_ANSWER = (
     "现有法规库中未检索到与问题相关的条文，无法给出有依据的回答。"
-    "建议补充更具体的违法情形、地点，或确认是否属于本知识库覆盖的 4 部法规范围。"
+    "建议补充更具体的违法情形、地点，或确认是否属于本知识库覆盖的 6 部法规范围。"
 )
 UNAVAILABLE_ANSWER = "（未配置大模型，下面只给出召回的法条）"
 

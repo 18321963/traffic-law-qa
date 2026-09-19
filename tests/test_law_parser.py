@@ -1,7 +1,7 @@
 """parse 层：docx → 法 → 章 → 节 → 条。
 
 这里的断言分两种：
-- **golden**（4 部 / 380 条 / 逐部条数）：知识库的真实规模。改动解析逻辑若改变了它们，
+- **golden**（6 部 / 508 条 / 逐部条数）：知识库的真实规模。改动解析逻辑若改变了它们，
   测试会红 —— 那正是提醒你确认改动是否有意为之。
 - **不变量**（leftovers 恒空、条号唯一、章标题归一）：这些任何情况下都该成立。
 """
@@ -12,8 +12,8 @@ import pytest
 
 from tests.conftest import EXPECTED_ARTICLE_COUNT, EXPECTED_ARTICLES_BY_LAW, EXPECTED_LAW_COUNT
 from traffic_law_rag.contracts import Paragraph
-from traffic_law_rag.docx_reader import DocxReader
-from traffic_law_rag.law_parser import (
+from traffic_law_rag.kb.docx_reader import DocxReader
+from traffic_law_rag.kb.law_parser import (
     LAW_ID_REGISTRY,
     LawLibrary,
     LawParser,
@@ -38,6 +38,8 @@ def test_逐部条数与版本(law_by_id):
     [
         ("road_traffic_safety_law", "2021-04-29"),
         ("road_traffic_safety_regulation", "2017-10-07"),
+        ("road_transport_regulation", "2026-01-30"),
+        ("traffic_insurance_regulation", "2019-03-02"),
         ("sz_icv_regulation", "2026-05-27"),
         ("sz_traffic_penalty_regulation", "2024-05-10"),
     ],
@@ -197,7 +199,7 @@ def test_refs_排除自引用(laws):
 
 
 def test_refs_是该条正文里真实出现过的条号(laws):
-    from traffic_law_rag.law_parser import RE_ARTICLE_REF
+    from traffic_law_rag.kb.law_parser import RE_ARTICLE_REF
 
     for law in laws:
         for article in law.articles:

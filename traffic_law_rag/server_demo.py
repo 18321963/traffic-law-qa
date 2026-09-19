@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 
 from .api import QaError, ReadyState, ensure_ready
 from .contracts import Question
+from .qa.rag import LegalRAG
 
 __all__ = ["app", "main"]
 
@@ -48,8 +49,7 @@ class Runtime:
     """进程级装配好的部件。lifespan 里建一次，所有请求复用。"""
 
     ready: ReadyState
-    retriever: object
-    generator: object
+    rag: LegalRAG
     boot_ms: float
 
 
@@ -80,22 +80,18 @@ app = FastAPI(
 
 
 def _boot() -> Runtime:
-    """就绪检查 + 装配检索器/生成器。这一步可能触发建库，慢是正常的。"""
-    from .generator import AnswerGenerator
-    from .retriever import HybridRetriever
-
+    """就绪检查 + 装配 RAG 工具。这一步可能触发建库，慢是正常的。"""
     started = time.perf_counter()
     ready = ensure_ready()
-    retriever = HybridRetriever.load()
-    generator = AnswerGenerator()
+    rag = LegalRAG.load()
     # 预热放在装配的最后、并且算进 boot_ms：它是装配的一部分，不是请求的一部分。
     # 不预热的话，embedding 端点的首次建连（实测 1.5~3s）会算在第一个用户头上。
-    warm_ms = retriever.warm()
+    warm_ms = rag.warm()
     boot_ms = (time.perf_counter() - started) * 1000
     print(f"[serve] 装配完成（{boot_ms / 1000:.2f}s）：{ready.describe()}")
     warm_note = f"{warm_ms:.0f}ms" if warm_ms is not None else "未执行（无 embedding 配置，检索只走 BM25）"
     print(f"[serve] 稠密通道预热 {warm_note}")
-    return Runtime(ready=ready, retriever=retriever, generator=generator, boot_ms=boot_ms)
+    return Runtime(ready=ready, rag=rag, boot_ms=boot_ms)
 
 
 # ------------------------------------------------------------------ 请求体
@@ -130,7 +126,7 @@ def health() -> dict:
         "rows": rt.ready.rows,
         "channels": "稠密+BM25" if rt.ready.dense else "纯 BM25",
         "index": rt.ready.action,
-        "llm_ready": bool(getattr(rt.generator, "available", False)),
+        "llm_ready": bool(getattr(rt.rag.generator, "available", False)),
     }
 
 
@@ -139,11 +135,11 @@ def ask(req: QaRequest) -> dict:
     """一次问答。mode=search 时只返回检索到的依据，不花 LLM 的钱。"""
     rt = _runtime()
     started = time.perf_counter()
-    retrieval = rt.retriever.search(req.question, top_k=req.top_k)
+    retrieval = rt.rag.search(req.question, top_k=req.top_k)
     if req.mode == "search":
         payload = retrieval.to_dict()
     else:
-        answer = rt.generator.generate(Question(text=req.question, top_k=req.top_k), retrieval)
+        answer = rt.rag.generator.generate(Question(text=req.question, top_k=req.top_k), retrieval)
         payload = answer.to_dict()
     # 每请求只做检索+生成；装配成本发生在启动时（见 /health 的 boot_ms）
     payload["request_ms"] = round((time.perf_counter() - started) * 1000, 2)
@@ -175,7 +171,7 @@ def ask_stream(req: QaRequest) -> StreamingResponse:
 def _sse_events(rt: Runtime, req: QaRequest):
     started = time.perf_counter()
     try:
-        retrieval = rt.retriever.search(req.question, top_k=req.top_k)
+        retrieval = rt.rag.search(req.question, top_k=req.top_k)
     except Exception as exc:  # noqa: BLE001 - 检索层失败要给用户一句话而不是断连
         yield _sse("error", {"message": f"检索失败：{exc}"})
         return
@@ -186,7 +182,7 @@ def _sse_events(rt: Runtime, req: QaRequest):
     parts: list[str] = []
     usage: dict = {}
     try:
-        for kind, payload in rt.generator.stream(question, retrieval):
+        for kind, payload in rt.rag.generator.stream(question, retrieval):
             if kind == "delta":
                 parts.append(payload)
                 yield _sse("delta", {"text": payload})
@@ -201,7 +197,7 @@ def _sse_events(rt: Runtime, req: QaRequest):
         {
             "question": req.question,
             "answer": "".join(parts),
-            "model": rt.generator.cfg.model,
+            "model": rt.rag.generator.cfg.model,
             "usage": usage,
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
             "citations": [hit.citation for hit in retrieval.articles],

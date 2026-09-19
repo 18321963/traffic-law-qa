@@ -19,8 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import config
-from .contracts import ChunkSet, IndexStats
+from .. import config
+from ..contracts import ChunkSet, IndexStats
 from .milvus_store import MilvusError, MilvusStore, row_of
 
 # 向量端点挂了时的降级标记，写进 index_meta.json 的 notes。
@@ -202,7 +202,7 @@ class Indexer:
 
 # ------------------------------------------------------------------ 调试入口
 def main(argv: list[str] | None = None) -> int:
-    """python -m traffic_law_rag.indexer [--no-vector] [--query 词]"""
+    """python -m traffic_law_rag.kb.indexer [--no-vector] [--query 词]"""
     import sys
 
     from .chunker import ChunkStage

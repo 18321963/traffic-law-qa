@@ -15,7 +15,7 @@ import pytest
 
 from traffic_law_rag.config import LLMConfig
 from traffic_law_rag.contracts import Question, RetrievalResult, RetrievedArticle
-from traffic_law_rag.generator import (
+from traffic_law_rag.qa.generator import (
     EMPTY_RETRIEVAL_ANSWER,
     SYSTEM_PROMPT,
     UNAVAILABLE_ANSWER,

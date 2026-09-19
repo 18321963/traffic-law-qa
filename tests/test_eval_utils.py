@@ -1,4 +1,4 @@
-"""eval 层的纯函数部分：法名归一、引用配对、域内判定、指标计算。
+"""eval 层的纯函数部分：法名归一、引用配对、语料切桶、指标计算。
 
 **不在这里测 `evaluate()`** —— 它每道题都走一遍真实检索（连 Milvus），
 属于 `@pytest.mark.integration` 的范畴。但这个模块里被 `evaluate` 复用的
@@ -12,21 +12,21 @@ import json
 
 import pytest
 
-from traffic_law_rag.chunker import ChunkStage
-from traffic_law_rag.eval import (
+from traffic_law_rag.eval.harness import (
     CITE_WINDOW,
     KS,
-    OUT_OF_DOMAIN_PREFIX,
     CaseResult,
     EvalCase,
     EvalReport,
     LawResolver,
+    ReferenceCase,
+    ReferenceReport,
     _cited_articles,
-    _is_out_of_domain,
     _kb_index,
     _normalize_law,
     build_cases,
 )
+from traffic_law_rag.kb.chunker import ChunkStage
 
 LAW = "中华人民共和国道路交通安全法"
 REGULATION = "中华人民共和国道路交通安全法实施条例"
@@ -135,40 +135,6 @@ def test_条号不匹配已归一化的法名时按全称返回(resolver):
     assert _cited_articles(f"《{_normalize_law(LAW)}》第九十一条", resolver) == [(LAW, "第九十一条")]
 
 
-# ------------------------------------------------------------------ 域内判定
-@pytest.mark.parametrize(
-    "question",
-    [
-        "醉驾怎么处罚",
-        "深圳 行人 在机动车道 罚款多少",
-        "第九十一条讲什么",  # 全中文数字，不该被当成英文
-        "智能网联汽车道路测试需要什么条件",
-    ],
-)
-def test_中文法条问题算域内(question):
-    assert _is_out_of_domain(question) is False
-
-
-@pytest.mark.parametrize(
-    "question",
-    [
-        "Waymo 在旧金山发生事故",
-        "Zoox 的自动驾驶车辆如何定责",
-        "Waymo 和 Nuro 谁更安全",
-        f"{OUT_OF_DOMAIN_PREFIX}：一辆卡车在高速上侧翻",
-    ],
-)
-def test_英文专名与事故叙述算域外(question):
-    """域外题占了评测集的整整一半，判据失效会把 hit@3 从 85.2% 拉到 45.1%。"""
-    assert _is_out_of_domain(question) is True
-
-
-def test_两个字母的英文不算域外():
-    """「≥3 个连续字母」是有意选的阈值：小于它的多是型号缩写，不足以判定域外。"""
-    assert _is_out_of_domain("AB 型车牌怎么规定") is False
-    assert _is_out_of_domain("ABC 型车牌怎么规定") is True
-
-
 # ------------------------------------------------------------------ build_cases
 def _corpus(tmp_path, items: list[dict]):
     path = tmp_path / "corpus.json"
@@ -231,6 +197,188 @@ def test_库外法条不算gold(tmp_path, resolver):
     assert no_gold == 1
 
 
+# ------------------------------------------------- include_leaked（规则取条臂的题集）
+def test_默认剔除泄漏桶_行为逐字节不变(tmp_path, resolver):
+    """不传 `include_leaked` 时，泄漏题既不进 cases 也不改变计数 —— 既有调用方不受影响。
+
+    这条是「`evaluate()` 零改动」的看门测试：改了默认行为，基线 hit@k 的分母就变了。
+    """
+    path = _corpus(
+        tmp_path,
+        [
+            {"instruction": "醉驾怎么处罚", "output": f"依据《{LAW}》第九十一条，处拘役。"},
+            {"instruction": "第九十一条讲什么", "output": f"《{LAW}》第九十一条规定…"},
+        ],
+    )
+    id_of = {(LAW, "第九十一条"): "a091"}
+
+    cases, no_gold, leaked = build_cases(path, resolver, id_of)
+
+    assert [case.question for case in cases] == ["醉驾怎么处罚"]
+    assert (no_gold, leaked) == (0, 1)
+
+
+def test_include_leaked把泄漏桶收进题集(tmp_path, resolver):
+    """开了之后泄漏题**进 cases**，而 `leaked` 计数照旧 —— 计数是语料体检，不是筛选结果。
+
+    这对规则取条臂是必要的：题面自己写着条号，检索指标对它毫无价值（BM25 必然命中），
+    但它正是「正则抽条号 → 条号索引定位」这条路的探针，而评测集那 135 题里含条号的是 0 道。
+    """
+    path = _corpus(
+        tmp_path,
+        [
+            {"instruction": "醉驾怎么处罚", "output": f"依据《{LAW}》第九十一条，处拘役。"},
+            {"instruction": "第九十一条讲什么", "output": f"《{LAW}》第九十一条规定…"},
+        ],
+    )
+    id_of = {(LAW, "第九十一条"): "a091"}
+
+    cases, no_gold, leaked = build_cases(path, resolver, id_of, include_leaked=True)
+
+    assert [case.question for case in cases] == ["醉驾怎么处罚", "第九十一条讲什么"]
+    assert (no_gold, leaked) == (0, 1)
+    # gold 照常解析 —— 收进来的是完整评测题，不是只有题面的残次品
+    assert cases[1].gold_ids == ("a091",)
+
+
+def test_include_leaked不改变无gold的判定(tmp_path, resolver):
+    """无 gold 的题仍然被剔除 —— 它对两条臂都没有意义，没人能判它答得对不对。"""
+    path = _corpus(
+        tmp_path,
+        [{"instruction": f"《{LAW}》第九十一条怎么规定", "output": "没有引用任何条号。"}],
+    )
+    cases, no_gold, leaked = build_cases(
+        path, resolver, {(LAW, "第九十一条"): "x"}, include_leaked=True
+    )
+
+    assert (len(cases), no_gold, leaked) == (0, 1, 0)
+
+
+# ------------------------------------------------- 规则取条臂的统计口径
+def _ref(question: str, *, gold: bool, located: bool, rank: int | None) -> ReferenceCase:
+    """造一条评测结果。`gold` 是「规则答对了」，**没触发就不可能答对** —— 这里强制这条不变量。
+
+    真实数据里 `located_is_gold=True` 蕴含 `located is not None`（没取到条就无从谈对错）。
+    让替身也能造出「没取到却答对了」这种状态，测出来的就是替身的 bug 而不是代码的。
+    """
+    return ReferenceCase(
+        question=question,
+        gold_citations=("《X法》第九条",),
+        located="《X法》第九条" if located else None,
+        located_is_gold=bool(located and gold),
+        baseline_rank=rank,
+    )
+
+
+def test_规则取条臂的三类互斥且穷尽():
+    """触发/回退、答对/答错 —— 报告里的每个数都是这三类的加减，不能有第四个去处。"""
+    report = ReferenceReport(
+        results=(
+            _ref("a", gold=True, located=True, rank=2),    # 规则答对，基线第 1 名不是它
+            _ref("b", gold=False, located=True, rank=1),   # 规则错取
+            _ref("c", gold=False, located=False, rank=1),  # 回退，基线第 1 名就是 gold
+            _ref("d", gold=False, located=False, rank=None),  # 回退，基线也没命中
+        ),
+        total_raw=4,
+        skipped_no_gold=0,
+        elapsed_ms=0.0,
+        baseline_ran=True,
+    )
+
+    assert [c.question for c in report.located] == ["a", "b"]
+    assert [c.question for c in report.fell_back] == ["c", "d"]
+    assert [c.question for c in report.correct] == ["a"]
+    assert [c.question for c in report.wrong] == ["b"]
+    assert len(report.located) + len(report.fell_back) == report.cases
+    assert len(report.correct) + len(report.wrong) == len(report.located)
+
+
+def test_回退不算答错但也是分母():
+    """回退的题**不算规则答对** —— 否则 93.9% 会被说成 99.5%，那是两回事。
+
+    触发率（93.9%）与触发后的精确率（99.5%）必须分开报：前者是覆盖率，
+    后者是「它开口时有多可靠」，合成一个数就会把回退偷偷算成成功。
+    """
+    report = ReferenceReport(
+        results=(
+            _ref("a", gold=True, located=True, rank=1),
+            _ref("b", gold=False, located=False, rank=1),   # 回退，基线能答对
+            _ref("c", gold=False, located=False, rank=None),
+            _ref("d", gold=False, located=False, rank=None),
+        ),
+        total_raw=4,
+        skipped_no_gold=0,
+        elapsed_ms=0.0,
+        baseline_ran=True,
+    )
+
+    assert report.cases == 4
+    assert len(report.correct) == 1                 # 不是 4，也不是 3
+    assert len(report.correct) / report.cases == 0.25
+    assert len(report.correct) / len(report.located) == 1.0   # 触发时 1/1 精确
+
+
+def test_互补性与合起来的上界():
+    """「触发就用、回退走检索」这个上线形态的收益，只能由互补性算出来。
+
+    规则独得 = 基线第 1 名拿不到而规则答对的；基线独得 = 规则回退而基线第 1 名就是 gold 的。
+    两个方向都要数 —— 只数一个方向就会把这一臂说成净赚。
+    """
+    report = ReferenceReport(
+        results=(
+            _ref("a", gold=True, located=True, rank=None),   # 规则独得（基线漏了）
+            _ref("b", gold=True, located=True, rank=1),      # 两者都行
+            _ref("c", gold=False, located=False, rank=1),    # 基线独得
+            _ref("d", gold=False, located=False, rank=None),  # 都没辙
+        ),
+        total_raw=4,
+        skipped_no_gold=0,
+        elapsed_ms=0.0,
+        baseline_ran=True,
+    )
+
+    assert [c.question for c in report.rule_only] == ["a"]
+    assert [c.question for c in report.baseline_only] == ["c"]
+    assert report.baseline_hits(1) == 2                  # b 和 c
+    assert report.combined_hits == 3                     # 规则答对 2 + 基线独得 1
+    # 合起来严格优于任何单独一条臂
+    assert report.combined_hits > len(report.correct)
+    assert report.combined_hits > report.baseline_hits(1)
+
+
+def test_基线未命中计入分母():
+    """`rank is None` 是**未命中**，不是「没跑」。混为一谈会把基线命中率抬高。"""
+    report = ReferenceReport(
+        results=(
+            _ref("a", gold=True, located=True, rank=1),
+            _ref("b", gold=False, located=False, rank=None),
+        ),
+        total_raw=2,
+        skipped_no_gold=0,
+        elapsed_ms=0.0,
+        baseline_ran=True,
+    )
+
+    assert report.baseline_hit_at(1) == 0.5    # 1/2，不是 1/1
+
+
+def test_基线没跑时不编造数字():
+    """Milvus 不可用时基线那一列整体缺席，不能悄悄按 0 算。"""
+    report = ReferenceReport(
+        results=(_ref("a", gold=True, located=True, rank=None),),
+        total_raw=1,
+        skipped_no_gold=0,
+        elapsed_ms=0.0,
+        baseline_ran=False,
+    )
+
+    assert report.baseline_hit_at(1) == 0.0
+    assert report.to_dict()["baseline_hit_at"] is None
+    rendered = report.render()
+    assert "基线对照未跑" in rendered
+    assert "hit@1" not in rendered   # 没跑就不该出现任何命中率数字
+
+
 def test_ground_truth取全部引用条号(tmp_path, resolver):
     """一条答案合法引用多条是常态，只认第一条会低估命中率。"""
     path = _corpus(
@@ -251,19 +399,6 @@ def test_ground_truth取全部引用条号(tmp_path, resolver):
     assert cases[0].gold_citations == (f"《{LAW}》第九十一条", f"《{SZ_PENALTY}》第二十六条")
 
 
-def test_域外题仍进入cases并被标记(tmp_path, resolver):
-    """域外题不是被剔除，而是标记后单独统计 —— 否则域内数字会被它们稀释。"""
-    path = _corpus(
-        tmp_path,
-        [{"instruction": "Waymo 的事故怎么判", "output": f"依据《{LAW}》第九十一条。"}],
-    )
-    cases, _, leaked = build_cases(path, resolver, {(LAW, "第九十一条"): "a091"})
-
-    assert leaked == 0
-    assert len(cases) == 1
-    assert cases[0].in_domain is False
-
-
 def test_空题面被跳过(tmp_path, resolver):
     path = _corpus(tmp_path, [{"instruction": "   ", "output": f"《{LAW}》第九十一条"}])
     cases, no_gold, _ = build_cases(path, resolver, {(LAW, "第九十一条"): "x"})
@@ -272,14 +407,13 @@ def test_空题面被跳过(tmp_path, resolver):
 
 
 # ------------------------------------------------------------------ 指标
-def _result(rank: int | None, *, in_domain: bool = True, laws=(LAW,)) -> CaseResult:
+def _result(rank: int | None, *, laws=(LAW,)) -> CaseResult:
     return CaseResult(
         case=EvalCase(
             question="q",
             gold_ids=("g",),
             gold_citations=(f"《{LAW}》第九十一条",),
             gold_laws=tuple(laws),
-            in_domain=in_domain,
         ),
         hit_ids=("h1", "h2"),
         hit_citations=(f"《{LAW}》第九十一条", f"《{LAW}》第九十二条"),
@@ -310,27 +444,17 @@ def test_hit_at与mrr():
 
 
 def test_空子集返回0而不是崩():
-    """域外题被筛空（--in-domain）时不能除零。"""
+    """空子集不能除零（命中率分母是题数，没有题时直接返回 0）。"""
     assert _report([]).hit_at(3) == 0.0
     assert _report([]).mrr() == 0.0
 
 
-def test_域内外分开统计():
-    report = _report([_result(1), _result(1, in_domain=False), _result(None, in_domain=False)])
-
-    assert len(report.in_domain()) == 1
-    assert len(report.out_of_domain()) == 2
-    assert report.hit_at(3, report.in_domain()) == 1.0
-    assert report.hit_at(3, report.out_of_domain()) == 0.5
-
-
-def test_按法规分组只统计域内且按hit3():
+def test_按法规分组且按hit3():
     report = _report(
         [
             _result(1, laws=(LAW,)),
             _result(4, laws=(LAW,)),          # 名次 4 → hit@3 不算命中
             _result(None, laws=(SZ_ICV,)),
-            _result(1, laws=(SZ_ICV,), in_domain=False),  # 域外不计入
         ]
     )
     assert report.by_law() == {LAW: (1, 2), SZ_ICV: (0, 1)}
@@ -361,16 +485,16 @@ def test_to_dict的hit_at键是字符串():
     """落 JSON 后键必是字符串，别处按 int 取会 KeyError。"""
     payload = _report([_result(1)]).to_dict()
 
-    assert set(payload["in_domain"]["hit_at"]) == {str(k) for k in KS}
+    assert set(payload["overall"]["hit_at"]) == {str(k) for k in KS}
     assert payload["total_raw"] == 10
     assert payload["by_law"][LAW] == {"hit3": 1, "cases": 1}
 
 
 def test_render_包含关键口径():
-    """render 是给人读的，题头必须同时出现域内外题数与实际检索通道。"""
-    text = _report([_result(1), _result(None, in_domain=False)]).render()
+    """render 是给人读的，题头必须同时出现题数与实际检索通道。"""
+    text = _report([_result(1), _result(None)]).render()
 
-    assert "域内 1 / 域外 1" in text
+    assert "检索评测：2 题" in text
     assert "稠密+BM25" in text
     assert "按法规" in text
 
@@ -378,7 +502,7 @@ def test_render_包含关键口径():
 def test_未命中清单可展开():
     text = _report([_result(1), _result(None)]).render(show_misses=5)
 
-    assert "域内未命中 1 题" in text
+    assert "未命中 1 题" in text
     assert "期望：" in text
 
 
@@ -393,7 +517,7 @@ def test_kb_index_覆盖全库(chunk_set, monkeypatch):
 
     _, known, id_of = _kb_index()
 
-    assert len(known) == len(id_of) == len(chunk_set.parents) == 380
+    assert len(known) == len(id_of) == len(chunk_set.parents) == 508
     assert (LAW, "第九十一条") in known
     assert id_of[(LAW, "第九十一条")].endswith("#a091")
 

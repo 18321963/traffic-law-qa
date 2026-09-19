@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from difflib import SequenceMatcher
 
-from .contracts import Query, RewrittenQuery
+from ..contracts import Query, RewrittenQuery
 
 # 口语 / 俗称 → 法条用语
 QUERY_ALIASES: dict[str, tuple[str, ...]] = {
@@ -80,6 +80,20 @@ GENERIC_FRAGMENTS = frozenset(
         "车辆",
         "汽车",
         "法",
+        # --- 2026-09 接入《道路运输条例》《交强险条例》时补的 ---
+        # 新法名与旧法名共享片段，会凭空造出假线索：问「道路交通安全法」的题
+        # 与「中华人民共和国道路运输条例」的最长公共片段是「中华人民共和国道路」，
+        # 于是**道交法的题被 ×1.5 加权到了道路运输条例头上**（实测 90 道）。
+        # 补进这里之前，先枚举过 4 部法下全语料实际产生过的 16 种线索片段，
+        # 这 8 个一个都不在其中 —— 所以对旧法规行为零影响，只掐新法名的假阳性。
+        "中华人民共和国道路",
+        "交通事故",
+        "交通事故责任",
+        "机动车交通事故",
+        "道路运输",
+        "运输",
+        "保险",
+        "机动",
     }
 )
 

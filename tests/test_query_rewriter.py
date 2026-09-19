@@ -1,6 +1,6 @@
 """rewrite 层：口语词 → 法条用语对齐 + 法名线索。
 
-这一层的两个修正都是**实测纠正过召回**的（README 第 5 节），
+这一层的两个修正都是**实测纠正过召回**的（docs/DESIGN.md 第 5 节），
 所以每条规则都值得一条回归断言，别让它们在后续改动中悄悄失效。
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from traffic_law_rag.contracts import Query
-from traffic_law_rag.query_rewriter import (
+from traffic_law_rag.qa.query_rewriter import (
     GENERIC_FRAGMENTS,
     MIN_HINT_LENGTH,
     QUERY_ALIASES,
@@ -31,7 +31,7 @@ def rewriter() -> QueryRewriter:
 
 # ------------------------------------------------------------------ 口语对齐
 def test_醉驾展开为醉酒驾驶(rewriter):
-    """README 记录的失败案例：问「醉驾」时法条写的是「醉酒驾驶」，
+    """docs/DESIGN.md 记录的失败案例：问「醉驾」时法条写的是「醉酒驾驶」，
     未处理时 BM25 只能靠「处罚」硬凑，Top-1 召回到「不按交通信号灯通行」。"""
     result = rewriter.rewrite(Query(text="醉驾怎么处罚"))
 
@@ -96,7 +96,7 @@ def test_describe_aliases_只在真改写时给提示(rewriter):
 
 # ------------------------------------------------------------------ 法名线索
 def test_深圳命中法名线索(rewriter):
-    """README 记录的第二个失败案例：问深圳的事却召回国家法律一般条款。"""
+    """docs/DESIGN.md 记录的第二个失败案例：问深圳的事却召回国家法律一般条款。"""
     result = rewriter.rewrite(Query(text="深圳 行人 在机动车道 罚款多少"))
     assert "深圳" in result.law_hints
 

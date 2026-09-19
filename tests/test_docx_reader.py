@@ -14,17 +14,19 @@ from pathlib import Path
 
 import pytest
 
-from traffic_law_rag.docx_reader import DocxReader
+from traffic_law_rag.kb.docx_reader import DocxReader
 
 # 真实知识库的段落规模（golden）。keep_empty=True 的数量另记，
 # 差值就是被丢弃的空段 —— 空段计数突变通常意味着排版或解析器行为变了。
 EXPECTED_PARAGRAPHS = {
     "中华人民共和国道路交通安全法_20210429.docx": 310,
     "中华人民共和国道路交通安全法实施条例_20171007.docx": 320,
+    "中华人民共和国道路运输条例_20260130.docx": 186,
+    "机动车交通事故责任强制保险条例_20190302.docx": 103,
     "深圳经济特区智能网联汽车管理条例_20260527.docx": 125,
     "深圳经济特区道路交通安全违法行为处罚条例_20240510.docx": 232,
 }
-EXPECTED_TOTAL = 987
+EXPECTED_TOTAL = 1276
 
 
 def test_逐份docx段落数(docx_files):
@@ -100,7 +102,7 @@ def test_以条号开头的段落数等于该法条数(docx_files):
     这是在 docx 层对上游解析结果做的一次独立交叉验证 —— 不经过 law_parser。
     """
     from tests.conftest import EXPECTED_ARTICLES_BY_LAW
-    from traffic_law_rag.law_parser import LAW_ID_REGISTRY, RE_ARTICLE
+    from traffic_law_rag.kb.law_parser import LAW_ID_REGISTRY, RE_ARTICLE
 
     got = {}
     for path in docx_files:

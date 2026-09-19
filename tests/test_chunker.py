@@ -1,7 +1,8 @@
 """chunk 层：条级父块 + 款级子块。
 
-**这个文件的重头戏是「无孤立列举项」** —— README 把它当作头条量化成果
-（「孤立子块从 248/867（29%）降至 0」），但此前没有任何自动化保护，
+**这个文件的重头戏是「无孤立列举项」** —— docs/DESIGN.md 把它当作头条量化成果
+（「孤立子块从 352/1164（30%）降至 0」，这是在 6 部法语料上重算的；
+4 部法时期那个数字是 248/867（29%）），但此前没有任何自动化保护，
 改动切分规则很容易悄悄退化回去。
 
 其余断言分两类：父子块结构不变量，以及三条切分规则各自的行为。
@@ -16,8 +17,8 @@ from tests.conftest import (
     EXPECTED_CHUNK_COUNT,
     EXPECTED_LAW_COUNT,
 )
-from traffic_law_rag.chunker import RE_LIST_MARKER, LawChunker
 from traffic_law_rag.contracts import Article, LawDocument
+from traffic_law_rag.kb.chunker import RE_LIST_MARKER, LawChunker
 
 
 def _law_with(article: Article) -> LawDocument:
@@ -45,14 +46,14 @@ def _article(paragraphs: tuple[str, ...], *, chapter: str | None = None) -> Arti
 
 # ------------------------------------------------------------------ golden
 def test_切块规模与README一致(chunk_set):
-    assert len(chunk_set.parents) == EXPECTED_ARTICLE_COUNT  # 380
-    assert len(chunk_set.chunks) == EXPECTED_CHUNK_COUNT  # 619
+    assert len(chunk_set.parents) == EXPECTED_ARTICLE_COUNT  # 508
+    assert len(chunk_set.chunks) == EXPECTED_CHUNK_COUNT  # 812
     assert chunk_set.stats["laws"] == EXPECTED_LAW_COUNT
 
 
 def test_平均块长(chunk_set):
-    """README 记录 79 字/块。块长失控会直接影响向量检索的信噪比。"""
-    assert chunk_set.stats["avg_chunk_chars"] == pytest.approx(79.0, abs=0.5)
+    """README 记录 78.8 字/块。块长失控会直接影响向量检索的信噪比。"""
+    assert chunk_set.stats["avg_chunk_chars"] == pytest.approx(78.8, abs=0.5)
 
 
 # ------------------------------------------------------------------ 头条声明
@@ -142,7 +143,7 @@ def test_每个子块都能回灌到父块(chunk_set):
 
 
 def test_每条法条至少产出一个子块(chunk_set):
-    """380 条 → 619 块，平均一条 1.63 款。没有任何条文应该产出零个子块。"""
+    """508 条 → 812 块，平均一条 1.60 款。没有任何条文应该产出零个子块。"""
     from collections import Counter
 
     per_parent = Counter(chunk.parent_id for chunk in chunk_set.chunks)

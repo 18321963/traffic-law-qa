@@ -11,6 +11,13 @@ Milvus 版本做了三件事，其余保持原样：
 
 `Query.channel_debug=True` 时会额外跑两次单通道检索，用来看某条法条是被
 向量捞到的还是被 BM25 捞到的（不开启则只有融合分）。
+
+**这一层是 `LegalRAG` 的实现细节，不是门面。** `store` / `chunks` / `rewriter`
+都是私有的：上层要什么能力，由 `LegalRAG` 以方法的形式给出（`expand` 如此、
+`stats` 如此），不要伸手进来取零件。构造参数仍然叫 `store=` / `chunks=` ——
+那是**注入点**（测试要塞替身），与「构造之后谁能看见」是两回事。
+`parents` 与 `embedder` 是例外，保持公开：前者是语料本身、门面会原样再暴露，
+后者有测试在断言预热前后是同一个对象。
 """
 
 from __future__ import annotations
@@ -18,16 +25,17 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 
-from . import config
-from .contracts import (
+from .. import config
+from ..contracts import (
     Chunk,
     ChunkSet,
+    CorpusStats,
     ParentChunk,
     Query,
     RetrievalResult,
     RetrievedArticle,
 )
-from .milvus_store import MilvusStore
+from ..kb.milvus_store import MilvusStore
 from .query_rewriter import QueryRewriter
 
 
@@ -52,12 +60,12 @@ class HybridRetriever:
         cfg: config.RetrieveConfig | None = None,
         rewriter: QueryRewriter | None = None,
     ) -> None:
-        self.store = store
+        self._store = store
         self.parents = parents
-        self.chunks = chunks
+        self._chunks = chunks
         self.embedder = embedder
         self.cfg = cfg or config.retrieve_config()
-        self.rewriter = rewriter or QueryRewriter(
+        self._rewriter = rewriter or QueryRewriter(
             law_names=tuple(dict.fromkeys(p.law_name for p in parents.values()))
         )
 
@@ -73,8 +81,8 @@ class HybridRetriever:
         embedder=None,
     ) -> "HybridRetriever":
         """从 Milvus + 本地块文件装配检索器。"""
-        from .chunker import ChunkStage
-        from .indexer import EmbeddingClient
+        from ..kb.chunker import ChunkStage
+        from ..kb.indexer import EmbeddingClient
 
         chunk_set = chunk_set or ChunkStage(verbose=False).load()
         store = store or MilvusStore(verbose=False)
@@ -110,14 +118,59 @@ class HybridRetriever:
             return None
         return (time.perf_counter() - started) * 1000
 
+    # -------------------------------------------------------------- 门面支撑
+    def expand(self, text: str) -> str:
+        """复算改写器的口语对齐，返回**真正会被拿去检索的那串词**。
+
+        **为什么需要它**：摘要在法条原文里开一个窗口，窗口按什么词定位决定了
+        模型看得见什么。原话里的口语词在法条里压根不出现 —— 实测「深圳开车玩手机」
+        与第十三条的唯一字面重叠只有「罚款」二字，窗口于是停在开头，而真正说明
+        这条与问题有关的那一项「（七）手动操作移动电话、电子设备」落在窗口之外。
+        用对齐后的词（…拨打接听手持电话、移动电话、电子设备…）才能把窗口移到第七项。
+
+        确实是把刚算过的东西又算了一遍。可以接受，是因为 `QueryRewriter.rewrite`
+        是**纯函数**（查表 + 最长公共子串，无状态、无随机），复算结果与检索时那次
+        逐字相同。**若将来改写器变成有状态或依赖外部输入，这里必须改成由
+        `retrieve()` 回传**，不能继续复算。
+
+        **为什么放在这一层**：它就是改写器的产物，出去也只有这一个用途。
+        从前由 `agent_tools.expand_query` 用 `getattr(retriever, "rewriter")` 摸进来取，
+        于是「改写器改名」这种事不会报错、只会让窗口**静默**退回到修好之前的位置。
+        放在这里，改名的代价是一次 `AttributeError`，不是一次性能静默劣化。
+        """
+        return self._rewriter.rewrite(Query(text=text)).expanded
+
+    def stats(self) -> CorpusStats:
+        """语料规模与通道状态。**唯一一处**吞 Milvus 连接的异常。
+
+        从前 `rag.describe()` 与 `agent.describe()` 各写一遍同样的 try/except，
+        于是「连不上时显示什么」有两个真源。
+
+        `collection` 只读配置、不查库，所以放在 try 外面：连不上 Milvus 时
+        它照样是准的，不该跟着一起变成「未知」。
+
+        **不缓存探测结果**：缓存 `None` 就等于「Milvus 没起过一次，这一辈子
+        都说它没起」，而这条路径常在服务启动时被调用来做健康检查。
+        """
+        try:
+            dense: bool | None = self._store.has_dense_field()
+        except Exception:  # noqa: BLE001 - 外部依赖不可用，状态未知不是错误
+            dense = None
+        return CorpusStats(
+            articles=len(self.parents),
+            chunks=len(self._chunks),
+            dense=dense,
+            collection=self._store.collection,
+        )
+
     # -------------------------------------------------------------- 主接口
     def retrieve(self, query: Query) -> RetrievalResult:
         query = query.normalized()
         started = time.perf_counter()
         notes: list[str] = []
 
-        rewritten = self.rewriter.rewrite(query)
-        alias_note = self.rewriter.describe_aliases(rewritten)
+        rewritten = self._rewriter.rewrite(query)
+        alias_note = self._rewriter.describe_aliases(rewritten)
         if alias_note:
             notes.append(alias_note)
         hints = set(rewritten.law_hints)
@@ -131,7 +184,7 @@ class HybridRetriever:
         # 稠密通道：没配 embedding 或集合里没建稠密字段时自动只走 BM25
         dense_vector: list[float] | None = None
         if query.use_vector:
-            if not self.store.has_dense_field():
+            if not self._store.has_dense_field():
                 notes.append("集合未建稠密向量字段（纯 BM25 模式），本次只用 BM25 召回")
             elif self.embedder is None:
                 notes.append("本次禁用了稠密向量，只用 BM25 召回")
@@ -143,11 +196,11 @@ class HybridRetriever:
 
         if not query.use_bm25 and dense_vector is not None:
             notes.append("已禁用 BM25 通道，本次仅用稠密向量")
-            hits = self.store.dense_search(
+            hits = self._store.dense_search(
                 dense_vector, limit=query.candidates, filter_expr=filter_expr
             )
         else:
-            hits = self.store.hybrid_search(
+            hits = self._store.hybrid_search(
                 query_text=search_text,
                 dense_vector=dense_vector,
                 limit=query.candidates,
@@ -197,11 +250,11 @@ class HybridRetriever:
         channels: list[tuple[str, list[tuple[str, float]]]] = []
         if dense_vector is not None:
             channels.append(
-                ("dense", self.store.dense_search(dense_vector, limit=query.candidates, filter_expr=filter_expr))
+                ("dense", self._store.dense_search(dense_vector, limit=query.candidates, filter_expr=filter_expr))
             )
         if query.use_bm25:
             channels.append(
-                ("bm25", self.store.sparse_search(search_text, limit=query.candidates, filter_expr=filter_expr))
+                ("bm25", self._store.sparse_search(search_text, limit=query.candidates, filter_expr=filter_expr))
             )
         if not channels:
             notes.append("通道明细不可用：既没有稠密通道也没有 BM25 通道")
@@ -228,7 +281,7 @@ class HybridRetriever:
         """
         grouped: dict[str, list[tuple[str, float]]] = defaultdict(list)
         for chunk_id, score in hits:
-            chunk = self.chunks.get(chunk_id)
+            chunk = self._chunks.get(chunk_id)
             if chunk is None:  # 集合与本地块文件不同步
                 continue
             grouped[chunk.parent_id].append((chunk_id, score))

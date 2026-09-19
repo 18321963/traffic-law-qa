@@ -24,8 +24,8 @@ import re
 import sys
 from pathlib import Path
 
-from . import config
-from .contracts import Chunk, ChunkSet, LawDocument, ParentChunk
+from .. import config
+from ..contracts import Chunk, ChunkSet, LawDocument, ParentChunk
 from .law_parser import LawLibrary
 
 RE_ARTICLE_PREFIX = re.compile(r"^第[零一二三四五六七八九十百千]+条[\s　]*")
@@ -238,7 +238,7 @@ class ChunkStage:
 
 # ------------------------------------------------------------------ 调试入口
 def main(argv: list[str] | None = None) -> int:
-    """python -m traffic_law_rag.chunker [--show 条号]"""
+    """python -m traffic_law_rag.kb.chunker [--show 条号]"""
     args = list(sys.argv[1:] if argv is None else argv)
     chunk_set = ChunkStage().run()
 

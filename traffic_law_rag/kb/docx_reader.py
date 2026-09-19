@@ -15,7 +15,7 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from .contracts import Paragraph
+from ..contracts import Paragraph
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 DOCUMENT_XML = "word/document.xml"
@@ -113,8 +113,8 @@ def _paragraph_style(p: ET.Element) -> str | None:
 
 # ------------------------------------------------------------------ 调试入口
 def main(argv: list[str] | None = None) -> int:
-    """python -m traffic_law_rag.docx_reader [docx 路径 ...]"""
-    from . import config
+    """python -m traffic_law_rag.kb.docx_reader [docx 路径 ...]"""
+    from .. import config
 
     args = list(sys.argv[1:] if argv is None else argv)
     targets = [Path(a) for a in args] if args else sorted(config.DOCX_DIR.glob("*.docx"))

@@ -13,18 +13,20 @@ from __future__ import annotations
 import pytest
 
 from traffic_law_rag import config
-from traffic_law_rag.chunker import ChunkStage, LawChunker
 from traffic_law_rag.contracts import ChunkSet, LawDocument
-from traffic_law_rag.law_parser import LawLibrary
+from traffic_law_rag.kb.chunker import ChunkStage, LawChunker
+from traffic_law_rag.kb.law_parser import LawLibrary
 
 # 知识库的真实规模（golden）。改动解析/切块逻辑若改变了它们，
 # 这些测试会红 —— 那正是提醒你确认改动是否有意为之。
-EXPECTED_LAW_COUNT = 4
-EXPECTED_ARTICLE_COUNT = 380
-EXPECTED_CHUNK_COUNT = 619
+EXPECTED_LAW_COUNT = 6
+EXPECTED_ARTICLE_COUNT = 508
+EXPECTED_CHUNK_COUNT = 812
 EXPECTED_ARTICLES_BY_LAW = {
     "road_traffic_safety_law": 124,
     "road_traffic_safety_regulation": 115,
+    "road_transport_regulation": 82,
+    "traffic_insurance_regulation": 46,
     "sz_icv_regulation": 64,
     "sz_traffic_penalty_regulation": 77,
 }
@@ -44,7 +46,7 @@ def laws() -> list[LawDocument]:
     """结构层产物（法 → 章 → 节 → 条）。约 7ms。"""
     loaded = LawLibrary().load_all()
     if not loaded:
-        pytest.skip("结构层产物缺失，请先运行 python -m traffic_law_rag.law_parser")
+        pytest.skip("结构层产物缺失，请先运行 python -m traffic_law_rag.kb.law_parser")
     return loaded
 
 

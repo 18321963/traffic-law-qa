@@ -18,8 +18,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config
-from .contracts import Article, Heading, LawDocument, Paragraph
+from .. import config
+from ..contracts import Article, Heading, LawDocument, Paragraph
 from .docx_reader import DocxReader
 
 # ---------------------------------------------------------------- 正则与常量
@@ -44,6 +44,8 @@ LAW_ID_REGISTRY: dict[str, str] = {
     "中华人民共和国道路交通安全法实施条例": "road_traffic_safety_regulation",
     "深圳经济特区智能网联汽车管理条例": "sz_icv_regulation",
     "深圳经济特区道路交通安全违法行为处罚条例": "sz_traffic_penalty_regulation",
+    "中华人民共和国道路运输条例": "road_transport_regulation",
+    "机动车交通事故责任强制保险条例": "traffic_insurance_regulation",
 }
 
 
@@ -443,7 +445,7 @@ class ParseStage:
 
 # ------------------------------------------------------------------ 调试入口
 def main(argv: list[str] | None = None) -> int:
-    """python -m traffic_law_rag.law_parser [--force] [--only law_id]"""
+    """python -m traffic_law_rag.kb.law_parser [--force] [--only law_id]"""
     args = list(sys.argv[1:] if argv is None else argv)
     only = args[args.index("--only") + 1] if "--only" in args else None
     ParseStage().run(force="--force" in args, only=only)

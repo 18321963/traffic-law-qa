@@ -24,7 +24,7 @@ dependencies = [
 # Agentic RAG：LangGraph 编排 + LangChain 的 OpenAI 兼容模型封装
 #
 # langchain-openai 的下限卡在 1.5.1 而不是 1.0：1.5.0 之前的版本把 openai SDK
-# 锁在 <3.0.0，装上会把基础依赖里的 openai 从 3.x 降级，而 generator.py 直接
+# 锁在 <3.0.0，装上会把基础依赖里的 openai 从 3.x 降级，而 qa/generator.py 直接
 # 用 `from openai import OpenAI`，不能跟着降。
 # langgraph-prebuilt 与 langgraph 核心版本要一起动（它不声明对核心的依赖），
 # 所以这里都按 1.2 线钉住。

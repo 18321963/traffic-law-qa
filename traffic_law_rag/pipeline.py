@@ -12,37 +12,32 @@
 | retrieve | `HybridRetriever`  | `Query`                         | `RetrievalResult`           |
 | generate | `AnswerGenerator`  | `Question` + `RetrievalResult`  | `Answer`                    |
 
-命令行用法：
+命令行用法（只管知识库本身；**问答统一走 `python -m traffic_law_rag "问题"`** ——
+那条路带一致性检查与自动重建，这里的 build/status/layers 都只管建库和查状态）：
     python -m traffic_law_rag.pipeline build  [--force] [--no-vector]
-    python -m traffic_law_rag.pipeline ask    "醉驾怎么处罚" [--top-k 6] [--json]
-    python -m traffic_law_rag.pipeline search "智能网联汽车 道路测试"
     python -m traffic_law_rag.pipeline layers | status
 """
 
 from __future__ import annotations
 
-import json
 import sys
 import time
 
 from . import config
-from .chunker import ChunkStage
 from .contracts import (
-    Answer,
     ChunkSet,
     IndexStats,
     LawDocument,
     Paragraph,
     PipelineReport,
-    Question,
-    RetrievalResult,
     StageReport,
 )
-from .docx_reader import DocxReader
-from .generator import AnswerGenerator
-from .indexer import Indexer
-from .law_parser import LawLibrary, LawParser, ParseStage
-from .rag import LegalRAG
+from .kb.chunker import ChunkStage
+from .kb.docx_reader import DocxReader
+from .kb.indexer import Indexer
+from .kb.law_parser import LawLibrary, LawParser, ParseStage
+from .qa.generator import AnswerGenerator
+from .qa.rag import LegalRAG
 
 
 class RagPipeline:
@@ -105,28 +100,16 @@ class RagPipeline:
         return self._index_stats
 
     def rag_tool(self, *, with_vector: bool = True) -> LegalRAG:
-        """层 5+6 的门面（懒加载并缓存；向量开关变化时自动重建）。"""
+        """层 5+6 的门面（懒加载并缓存；向量开关变化时自动重建）。
+
+        `generator=self.generator` 必须显式传：`LegalRAG.load()` 自己会 new 一个
+        `AnswerGenerator`，不传就等于把管道持有的那一个（含测试注入的替身、
+        含 `status()` 打印的模型名）静默丢掉。
+        """
         if self._rag is None or self._rag_with_vector != with_vector:
-            self._rag = LegalRAG(_load_retriever(with_vector=with_vector), self.generator)
+            self._rag = LegalRAG.load(with_vector=with_vector, generator=self.generator)
             self._rag_with_vector = with_vector
         return self._rag
-
-    def search(
-        self,
-        question: str,
-        *,
-        top_k: int | None = None,
-        with_vector: bool = True,
-        channel_debug: bool = False,
-    ) -> RetrievalResult:
-        """层 5：只检索。"""
-        return self.rag_tool(with_vector=with_vector).search(
-            question, top_k=top_k, channel_debug=channel_debug
-        )
-
-    def ask(self, question: str | Question, *, top_k: int | None = None, with_vector: bool = True) -> Answer:
-        """层 5+6：检索并生成答案。"""
-        return self.rag_tool(with_vector=with_vector).ask(question, top_k=top_k)
 
     # ============================================================== 全流程
     def build(self, *, force: bool = False, with_vector: bool = True) -> PipelineReport:
@@ -228,13 +211,6 @@ class RagPipeline:
         return "\n".join(lines)
 
 
-def _load_retriever(*, with_vector: bool = True):
-    """延迟导入检索器，避免管道模块在导入阶段就连 Milvus / 加载块文件。"""
-    from .retriever import HybridRetriever
-
-    return HybridRetriever.load(with_vector=with_vector)
-
-
 # ================================================================== CLI
 USAGE = __doc__
 
@@ -243,32 +219,19 @@ def _flag(args: list[str], name: str) -> bool:
     return name in args
 
 
-def _option(args: list[str], name: str, default: str | None = None) -> str | None:
-    return args[args.index(name) + 1] if name in args and args.index(name) + 1 < len(args) else default
-
-
-def _positional(args: list[str]) -> list[str]:
-    known_with_value = {"--top-k", "--only"}
-    result: list[str] = []
-    skip = False
-    for token in args[1:]:
-        if skip:
-            skip = False
-            continue
-        if token in known_with_value:
-            skip = True
-            continue
-        if token.startswith("--"):
-            continue
-        result.append(token)
-    return result
-
-
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+
+    # --help 必须在 command 推断之前拦掉。原来没有这个分支，而
+    # `command = args[0] if ... not startswith("--") else "build"` 会把 `--help`
+    # 当成「无子命令」→ 直接跑 build，也就是一次完整的重新切块 + 重新 embedding。
+    # 查一次用法花掉一次 embedding 钱，这个坑踩过一次。
+    if any(a in ("--help", "-h", "help") for a in args):
+        print(USAGE)
+        return 0
+
     command = args[0] if args and not args[0].startswith("--") else "build"
     pipeline = RagPipeline()
-    payload = _positional(args)
 
     if command == "layers":
         print(pipeline.layers())
@@ -282,43 +245,6 @@ def main(argv: list[str] | None = None) -> int:
         report = pipeline.build(force=_flag(args, "--force"), with_vector=not _flag(args, "--no-vector"))
         print("\n管道执行结果：")
         print(report.render())
-        return 0
-
-    if command == "search":
-        if not payload:
-            print("用法：python -m traffic_law_rag.pipeline search \"问题\"")
-            return 2
-        result = pipeline.search(
-            payload[0],
-            with_vector=not _flag(args, "--no-vector"),
-            channel_debug=_flag(args, "--debug"),
-        )
-        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2) if _flag(args, "--json") else result.render())
-        return 0
-
-    if command == "ask":
-        if not payload:
-            print("用法：python -m traffic_law_rag.pipeline ask \"问题\"")
-            return 2
-        top_k = _option(args, "--top-k")
-        try:
-            answer = pipeline.ask(
-                payload[0],
-                top_k=int(top_k) if top_k and top_k.isdigit() else None,
-                with_vector=not _flag(args, "--no-vector"),
-            )
-        except Exception as exc:  # noqa: BLE001 - CLI 只展示一行原因，不要把堆栈糊在脸上
-            print(f"问答失败：{exc}")
-            return 1
-        if _flag(args, "--json"):
-            print(json.dumps(answer.to_dict(), ensure_ascii=False, indent=2))
-        else:
-            print(answer.render())
-            if answer.usage and answer.retrieval is not None:
-                print(
-                    f"\n[tokens] {answer.usage} | 检索 {answer.retrieval.elapsed_ms:.0f}ms "
-                    f"| 总计 {answer.elapsed_ms:.0f}ms"
-                )
         return 0
 
     print(USAGE)

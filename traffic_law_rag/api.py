@@ -59,8 +59,8 @@ class ReadyState:
 # ================================================================== 就绪检查
 def ensure_ready(*, with_vector: bool = True, rebuild: bool = False) -> ReadyState:
     """确保 Milvus 里有一套与 docx 当前内容一致的索引；只在必要时重建。"""
-    from .indexer import Indexer
-    from .milvus_store import MilvusStore
+    from .kb.indexer import Indexer
+    from .kb.milvus_store import MilvusStore
 
     docx_files = sorted(config.DOCX_DIR.glob("*.docx"))
     if not docx_files:
@@ -104,7 +104,7 @@ def ensure_ready(*, with_vector: bool = True, rebuild: bool = False) -> ReadySta
 
 def _ping(store) -> str:
     """探活；连不上时把 MilvusError 换成一行中文提示。"""
-    from .milvus_store import MilvusError
+    from .kb.milvus_store import MilvusError
 
     try:
         return store.ping()
@@ -121,7 +121,7 @@ def _stale_reason(store, stats, *, want_dense: bool) -> str | None:
     只在「该有稠密却没有」时算过期；反过来（索引有稠密、本次只查 BM25）不算 ——
     查询通道可以少用，不该为此把索引重建弱。
     """
-    from .law_parser import LawLibrary, sha1_of
+    from .kb.law_parser import LawLibrary, sha1_of
 
     library = LawLibrary()
     entries = library.manifest().get("laws", [])
@@ -159,7 +159,7 @@ def _stale_reason(store, stats, *, want_dense: bool) -> str | None:
         return f"集合行数（{actual}）与索引快照（{stats.rows}）不一致"
 
     if want_dense and not stats.vector_enabled:
-        from .indexer import EMBED_FAILED_NOTE_PREFIX, Indexer
+        from .kb.indexer import EMBED_FAILED_NOTE_PREFIX, Indexer
 
         notes = Indexer(verbose=False).load_notes()
         if any(note.startswith(EMBED_FAILED_NOTE_PREFIX) for note in notes):
@@ -173,7 +173,7 @@ def _stale_reason(store, stats, *, want_dense: bool) -> str | None:
 
 def _manifest_counts() -> tuple[int, int]:
     """清单里的（法规部数, 条文数）。"""
-    from .law_parser import LawLibrary
+    from .kb.law_parser import LawLibrary
 
     entries = LawLibrary().manifest().get("laws", [])
     return len(entries), sum(int(item.get("articles", 0)) for item in entries)
@@ -211,18 +211,16 @@ def qa(
     state = ensure_ready(with_vector=with_vector, rebuild=rebuild)
     _announce(state, debug)
 
-    from .retriever import HybridRetriever
+    from .qa.rag import LegalRAG
 
-    retriever = HybridRetriever.load(with_vector=with_vector)
-    retrieval = retriever.search(question, top_k=top_k, channel_debug=debug)
+    rag = LegalRAG.load(with_vector=with_vector)
+    # 两步拆开写，而不是调 LegalRAG.ask：debug 模式下要拿到双通道排名，
+    # 而 ask() 不把 channel_debug 透给检索层（它也不需要透 —— 生成时用不上排名）。
+    retrieval = rag.search(question, top_k=top_k, channel_debug=debug)
     if mode == MODE_SEARCH:
         return retrieval
 
-    # 不走 LegalRAG.ask：那条路径不把 channel_debug 透给检索层，
-    # debug 模式下拿不到双通道排名。这里只是同样的两步编排。
-    from .generator import AnswerGenerator
-
-    return AnswerGenerator().generate(Question(text=question, top_k=top_k), retrieval)
+    return rag.generator.generate(Question(text=question, top_k=top_k), retrieval)
 
 
 _announced = False

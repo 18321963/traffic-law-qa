@@ -32,6 +32,9 @@ TEXT_DIR = KB_DIR / "text"          # 人读层：法条 Markdown
 PARSED_DIR = KB_DIR / "parsed"      # 结构层：法→章→节→条
 CHUNK_DIR = KB_DIR / "chunks"       # 检索层：父子块 jsonl
 INDEX_DIR = KB_DIR / "index"        # 索引层：index_meta.json 快照（数据在 Milvus）
+# 上游原始素材（下载来的 pdf），**不属于管道** —— 管道只读 docx。放在这里只是不让
+# 散件堆到仓库根目录；要入库得先转成 docx 放进 docx/。因为代码不读它，不进 ALL_DIRS。
+PDF_DIR = KB_DIR / "pdf"
 
 MANIFEST_PATH = PARSED_DIR / "manifest.json"
 CHUNKS_PATH = CHUNK_DIR / "chunks.jsonl"
@@ -42,6 +45,9 @@ INDEX_META_PATH = INDEX_DIR / "index_meta.json"
 # 它参与版本管理（1.5MB），评测结果的可复现性依赖它逐字节不变。
 DATA_DIR = ROOT / "data"
 EVAL_CORPUS_PATH = DATA_DIR / "eval_corpus.json"
+# 跨法规多跳题集：由 eval/multihop.py 从条文反向生成，护栏见该模块。
+# 与 eval_corpus.json 一样进版本管理 —— 生成要花 API 钱，成品必须可复现、可复核。
+EVAL_MULTIHOP_PATH = DATA_DIR / "eval_multihop.json"
 # 向量数据存在 Milvus 里（docker-compose.yml 起服务），index/ 只留一份元信息快照
 
 ALL_DIRS = (DOCX_DIR, TEXT_DIR, PARSED_DIR, CHUNK_DIR, INDEX_DIR)
@@ -137,6 +143,38 @@ def retrieve_config() -> RetrieveConfig:
         candidates=_env_int("RAG_CANDIDATES", 20),
         rrf_k=_env_int("RAG_RRF_K", 60),
         law_hint_boost=_env_float("RAG_LAW_HINT_BOOST", 1.5),
+    )
+
+
+# ---------------------------------------------------------------- Agent
+@dataclass(frozen=True)
+class AgentConfig:
+    """Agent 循环的参数（阶段二）。
+
+    与 RetrieveConfig 的分工：这里只管**循环**（跑几轮、给模型看多少字），
+    检索本身的参数（top_k / candidates / rrf_k / booster）仍由 RetrieveConfig 说了算 ——
+    只有一份真源，Agent 不许悄悄换一套检索参数，否则和基线的对照就不是同一个检索了。
+    """
+
+    # 规划轮数上限（= LLM 调用次数上限）。**3 曾经是默认值，是实测把它降到 2 的**：
+    # 100 题多跳集上，第 2 轮把「条目级命中」从 72/200 抬到 78/200，第 3 轮只再抬 2 条
+    # （78→80），却多花 35 次检索 + 35 次规划调用 + 35 次审核。第 3 轮的边际已经接近零。
+    max_steps: int = 2
+    max_evidence: int = 0     # 最终证据条数；0 = 沿用 RetrieveConfig.top_k
+    snippet_chars: int = 120  # 检索结果里每条法条的摘要字数
+    article_chars: int = 400  # 精确取条（get_article）时的摘要字数，比检索摘要大
+    temperature: float = 0.0  # 规划轮的温度：要它稳定选词，不要它发挥
+    retries: int = 2
+
+
+def agent_config() -> AgentConfig:
+    return AgentConfig(
+        max_steps=_env_int("AGENT_MAX_STEPS", 2),
+        max_evidence=_env_int("AGENT_MAX_EVIDENCE", 0),
+        snippet_chars=_env_int("AGENT_SNIPPET_CHARS", 120),
+        article_chars=_env_int("AGENT_ARTICLE_CHARS", 400),
+        temperature=_env_float("AGENT_TEMPERATURE", 0.0),
+        retries=_env_int("AGENT_RETRIES", 2),
     )
 
 

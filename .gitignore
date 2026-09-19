@@ -51,9 +51,17 @@ desktop.ini
 *.rar
 *.tar.gz
 
-# --- RAG 管道生成的检索产物（用 python -m tools.pipeline build 重建）---
+# --- RAG 管道生成的检索产物（用 python -m traffic_law_rag.pipeline build 重建）---
 法规知识库/chunks/
 法规知识库/index/
+
+# --- 评测跑出来的轨迹（几十到几百 K 的 JSON，随时能用 --trace 重跑）---
+data/traces/
+
+# --- 上游原始素材（下载件）---
+# 管道只读 docx，pdf 谁都不读；要入库得先转成 docx 放进 docx/。
+# 它是可重新下载的，不像 docx 那样是「改过就没了」的真源，所以不占版本库。
+法规知识库/pdf/
 
 # --- Milvus 容器数据卷（docker compose 生成，体积大且可重建）---
 volumes/

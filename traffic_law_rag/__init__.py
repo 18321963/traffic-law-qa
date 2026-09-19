@@ -17,12 +17,18 @@
                 -> query_rewriter -> retriever -> generator
               （由 pipeline.RagPipeline 编排，rag.LegalRAG 是管道级门面）
 
-每个模块都可以单独作为脚本执行，便于分步调试：
+**「门面」是字面意思**：`retriever` 那一层是 `LegalRAG` 的实现细节 ——
+`qa/rag.py` 是包内唯一 import 它的模块（有测试钉住），它的 `store` / `chunks` /
+`rewriter` 都是私有属性。上层要什么能力，就在 `LegalRAG` 上加一个方法。
+所以 `qa()`、`RagPipeline`、`AgentRunner`、FastAPI demo 调的都是同一个 `LegalRAG`，
+四家不各拿一份检索器。
 
-    python -m traffic_law_rag.docx_reader
-    python -m traffic_law_rag.law_parser --force
-    python -m traffic_law_rag.chunker --show 第八条
-    python -m traffic_law_rag.indexer --query 醉驾
+每个模块都可以单独作为脚本执行，便于分步调试 —— **子包名就是包路径的一部分**：
+
+    python -m traffic_law_rag.kb.docx_reader
+    python -m traffic_law_rag.kb.law_parser --force
+    python -m traffic_law_rag.kb.chunker --show 第八条
+    python -m traffic_law_rag.kb.indexer --query 醉驾
     python -m traffic_law_rag.pipeline build | status | layers
 """
 

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-18T06:15:09+00:00",
+  "generated_at": "2026-09-19T04:01:43+00:00",
   "docx_dir": "D:\\projects\\交通法规问答agent\\法规知识库\\docx",
   "cross_check": false,
   "laws": [
@@ -28,6 +28,32 @@
       "sections": 7,
       "leftovers": 0,
       "generated_at": "2026-09-17T16:22:45+00:00"
+    },
+    {
+      "law_id": "road_transport_regulation",
+      "law_name": "中华人民共和国道路运输条例",
+      "version": "2026-01-30",
+      "file": "中华人民共和国道路运输条例_20260130.docx",
+      "sha1": "6fc103a126bcabad58da4e0b55f89130834c6f10",
+      "articles": 82,
+      "chars": 9738,
+      "chapters": 7,
+      "sections": 3,
+      "leftovers": 0,
+      "generated_at": "2026-09-19T01:39:26+00:00"
+    },
+    {
+      "law_id": "traffic_insurance_regulation",
+      "law_name": "机动车交通事故责任强制保险条例",
+      "version": "2019-03-02",
+      "file": "机动车交通事故责任强制保险条例_20190302.docx",
+      "sha1": "167517c65f868b5ddbd998cd5b26b0b6006d466e",
+      "articles": 46,
+      "chars": 5423,
+      "chapters": 5,
+      "sections": 0,
+      "leftovers": 0,
+      "generated_at": "2026-09-19T01:39:26+00:00"
     },
     {
       "law_id": "sz_icv_regulation",

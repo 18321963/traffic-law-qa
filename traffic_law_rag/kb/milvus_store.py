@@ -22,8 +22,8 @@ import json
 import time
 from typing import Any, Iterable, cast
 
-from . import config
-from .contracts import Chunk
+from .. import config
+from ..contracts import Chunk
 
 # 集合字段名（改这里要同步 row_of / _output_fields）
 F_CHUNK_ID = "chunk_id"

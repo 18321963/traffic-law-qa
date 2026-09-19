@@ -555,6 +555,26 @@ class PipelineReport:
         return "\n".join(lines)
 
 
+# ============================================================ 8. 门面层
+@dataclass(frozen=True)
+class CorpusStats:
+    """已装配语料的规模与通道状态（`LegalRAG.stats()` 的产物）。
+
+    这是上层唯一被允许知道的「检索器内部情况」—— 它只是几个数，
+    不含任何 Milvus 句柄，于是门面之外不需要认识存储层就能自述。
+
+    `dense` 三态：True / False 是**探到过**的真实状态，None 是**探不到**
+    （Milvus 连不上）。写成 `bool | None` 而不是一句中文，是因为
+    「未知（Milvus 未连接）」是**渲染**、不是状态 —— 把渲染塞进数据层，
+    每个消费者就得去比中文字符串。
+    """
+
+    articles: int
+    chunks: int
+    dense: bool | None
+    collection: str
+
+
 # ============================================================ jsonl 工具
 def _write_jsonl(path: Path, rows: Iterable[dict]) -> None:
     with path.open("w", encoding="utf-8", newline="\n") as fh:
@@ -592,4 +612,5 @@ __all__ = [
     "Answer",
     "StageReport",
     "PipelineReport",
+    "CorpusStats",
 ]
