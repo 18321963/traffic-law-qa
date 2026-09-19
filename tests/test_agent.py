@@ -790,3 +790,33 @@ def test_审核真的走了另一个客户端(parents, generator):
     assert len(reviewer.calls) == 1, "审核走的是另一个客户端"
     assert "审核" in reviewer.calls[0]["messages"][0]["content"]
     assert state["reflections"][0]["sufficient"] is True
+
+
+# ================================================================== 16. top_k 同源
+def test_单题自带的_top_k_管到收尾(parents, generator):
+    """`top_k` 在 state 与闭包里各有一份，**两个节点必须同源**。
+
+    `tools_node` 读 state、`finalize_node` 曾经读闭包：调用方传进来的 `Question`
+    自带 `top_k` 时，循环按查询自己的条数召回、收尾却按 runner 的条数合并 ——
+    而收尾这个还决定最终证据条数，正是最不该错的地方。
+
+    两个真实调用点（CLI、multihop）都传字符串，所以这条是**潜伏**的，不是活的；
+    但 `invoke()` 是公开入口，`Question(text=..., top_k=N)` 就触发。
+
+    **问题里不能带条号**：那会被 `classify_intent` 判成条文定位，走零检索的
+    `get_article` 路径，证据恒为 1 条，截断根本没机会发生（这条测试第一版就是这么
+    写错的 —— 顺手拿了 `ARTICLE_Q`）。
+    """
+    llm = ScriptedLLM([
+        _assistant(calls=[("c1", SEARCH_LAW_NAME, {"query": "q"})]),
+        _reflection(True),
+    ])
+    # 候选(4) 必须比最终证据(2) 多 —— 不截断就看不出 max_evidence 取的是哪一份
+    retriever = FakeRetriever(parents, hits=4)
+    rag = LegalRAG(retriever, generator, top_k=6)        # runner 的 top_k = 闭包那份
+    runner = A.AgentRunner(rag, llm=llm, cfg=config.AgentConfig(max_steps=2))
+
+    state = runner.invoke(Question(text="醉驾怎么处罚", top_k=2))   # ← 单题覆盖
+
+    assert state["top_k"] == 2
+    assert len(state["answer"].retrieval.articles) == 2, "收尾该跟着单题的 top_k 走，不是 runner 的"

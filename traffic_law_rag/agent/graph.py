@@ -698,21 +698,29 @@ def make_finalize_node(
 ):
     """收尾：把累积的证据合并回一个 RetrievalResult，交给既有生成器。
 
-    读：question / history / search_log / steps / max_steps / usage
+    读：question / history / search_log / steps / max_steps / usage / top_k
     写：{"answer": Answer, "search_log": [兜底检索那一行，否则 []]}
 
     **这里不喂工具历史、也不 bind_tools** —— 从零重建一次「问题 + 依据」的提示词。
     这样既绕开了可能残留的悬空 tool_calls，又让提示词与线性管道逐字节相同。
+
+    `top_k` 参数只作**兜底**：真正取值从 `state["top_k"]`，与 `tools_node` 同源。
+    两处曾经各取各的（这里读闭包、那里读 state），只在调用方传进来的 `Question`
+    自带 `top_k` 时才分叉 —— 那时循环按查询自己的条数召回，收尾却按 runner 的条数
+    合并，而收尾这个还决定最终证据条数。两个真实调用点都传字符串，所以是潜伏的。
     """
 
     def finalize_node(state: AgentState) -> dict:
+        # 与 tools_node 同源。`state["top_k"]` 由 invoke 写成 `query.top_k or runner.top_k`，
+        # 单题覆盖就落在它上面；闭包那份是 runner 的，仅供 state 缺字段时兜底。
+        active_top_k = state.get("top_k", top_k)
         logs = list(state.get("search_log") or ())
         extra: list[dict] = []
         notes: list[str] = []
 
         if not logs:
             # 模型一次都没检索 → 按单轮管道兜底。这一条保证 Agent 严格增量，不比基线差。
-            result = rag.search(state["question"], top_k=top_k)
+            result = rag.search(state["question"], top_k=active_top_k)
             logs = [result.to_dict()]
             extra = list(logs)
             notes.append("本轮未取到任何证据（未调用工具，或工具调用全部失败），已按单轮管道兜底检索一次")
@@ -721,14 +729,17 @@ def make_finalize_node(
             logs,
             question=state["question"],
             parents=rag.parents,
-            max_evidence=cfg.max_evidence or top_k,
+            max_evidence=cfg.max_evidence or active_top_k,
         )
         notes.extend(_trajectory_notes(state, merged, cfg))
 
         question = Question(
             text=state["question"],
             history=tuple(tuple(pair) for pair in state.get("history") or ()),
-            top_k=top_k,
+            # 生成器今天并不读 `Question.top_k`（`build_evidence` 用的是 `show_top`），
+            # 所以这一行不改变任何行为；跟着 `active_top_k` 走只为不再留两个 top_k ——
+            # 哪天生成器开始读它，不会把这个坑悄悄带回来。
+            top_k=active_top_k,
         )
         # 既有入口，零改动：Agent 的答案与线性管道的答案是同一段代码产出的
         answer = rag.generator.generate(question, merged)
