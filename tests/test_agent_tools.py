@@ -62,7 +62,7 @@ def test_parse_article_no_rejects(raw):
 
 
 # ================================================================== 条号索引
-def test_index_is_keyed_by_law_and_number(parents, index):
+def test_index_is_keyed_by_law_and_number(index):
     """键是 `(law_id, 条号)`，不是 `article_index`。
 
     后者是**位置序号**（law_parser 里 `pending_index = len(articles) + 1`），

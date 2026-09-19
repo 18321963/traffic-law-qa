@@ -161,7 +161,7 @@ def _row_of(report: str, side: str) -> list[str]:
     raise AssertionError(f"汇总里没有 {side} 那一行：\n{report}")
 
 
-def test_全预算汇总的引用要认得出来(library: Library):
+def test_全预算汇总的引用要认得出来():
     """**这条是回归**：汇总里那张 parent_id → citation 的表一度建反了方向。
 
     gold 给的是 parent_id，答案的 `cited` 是引用串，得拿前者去比后者。反着建不会报错，
@@ -179,7 +179,7 @@ def test_全预算汇总的引用要认得出来(library: Library):
     assert _row_of(report, "agent") == ["agent", "2/2", "1/2", "1.0"], report
 
 
-def test_全预算汇总要拆出首次检索(library: Library):
+def test_全预算汇总要拆出首次检索():
     """agent 多查一轮才捞到的那条，不能算进「首次就查得更准」。"""
     row = _trace_row(
         gold=["a#1", "b#1"],

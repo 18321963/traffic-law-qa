@@ -166,12 +166,17 @@ def generator():
 
 def run(
     question, script, parents, generator, *,
-    forced=None, max_steps=2, retriever=None, reflect_llm=None,
+    forced=None, max_steps=None, retriever=None, reflect_llm=None,
 ):
     """跑一次完整图，返回 (终态, 假 LLM, 假检索器, 提示词记录器)。
 
-    默认值跟着 `AgentConfig` 的默认走（2，实测定的）—— 两边不一致的话，
-    测试跑的就不是**出厂的那条路**，改了默认值也不会有人发现。要别的轮数就显式传。
+    **不传 `max_steps` 就取 `AgentConfig` 的出厂默认值**（现在是 2，实测定的）。
+    这里曾经写死一个字面量 `2`，注释却声称「跟着 AgentConfig 的默认走」—— 承诺和实现
+    是两回事：默认值改成 3，红的只有下面那条钉默认值的守卫 `test_默认轮数上限是2`，
+    跑图的测试一条都不会红 —— 它们仍然全在测 2 轮那条路。现在改默认值会连带震动一批
+    跑图的测试（实测把默认压到 1，本文件 9 条图测试立刻红），那才是「跟着默认走」。
+    取的是 `config.AgentConfig()` 的 dataclass 默认，**不是 `agent_config()`** ——
+    后者读环境变量，本机配了 `AGENT_MAX_STEPS` 就该听本机的，测试不该被它左右。
 
     第三个返回值仍然是**那个假检索器**（不是 rag），这样各处
     `retriever.queries` / `retriever.expanded` 的断言一行都不用动。
@@ -183,12 +188,13 @@ def run(
     llm = ScriptedLLM(script)
     retriever = retriever or FakeRetriever(parents)
     rag = LegalRAG(retriever, generator, top_k=6)
+    if max_steps is None:
+        max_steps = config.AgentConfig().max_steps
     cfg = config.AgentConfig(max_steps=max_steps)
     graph = A.build_graph(
         rag=rag,
         llm=llm,
         cfg=cfg,
-        top_k=6,
         forced_intent=forced,
         reflect_llm=reflect_llm,
     )
@@ -341,7 +347,7 @@ def test_every_tool_call_gets_exactly_one_tool_message(parents, generator):
     assert len(asked) == 2
 
 
-def test_budget_exhausted_still_goes_through_tools(parents, generator):
+def test_budget_exhausted_still_goes_through_tools():
     """预算已满时 `route_after_agent` 仍必须返回 tools。
 
     绝不能在这里看预算直接跳 finalize —— 那样就留下悬空的 tool_call。
@@ -354,7 +360,7 @@ def test_budget_exhausted_still_goes_through_tools(parents, generator):
     assert A.route_after_agent(state) == "tools"
 
 
-def test_route_after_agent_without_tool_calls(parents, generator):
+def test_route_after_agent_without_tool_calls():
     assert A.route_after_agent({"messages": [{"role": "assistant", "content": "够了"}]}) == "finalize"
 
 
@@ -615,7 +621,8 @@ def test_库外缺口直接收尾不回边(parents, generator):
     """审核说「不够，但库里没有」→ 收尾，不回边。
 
     回边只会白烧一轮检索加两次模型调用 —— 缺口在库外（这里是《治安管理处罚法》，
-    不在库内那 6 部法里），再检一百次也检不到。实测 100 题里这类白跑占全部审核轮次的 29%。
+    不在库内那 6 部法里），再检一百次也检不到。100 题那次审核跑了 207 轮，其中 162 轮真的调了
+    模型（另 45 轮预算已尽短路），白跑就烧在这 162 轮里。
     """
     script = [
         _assistant(calls=[("c1", SEARCH_LAW_NAME, {"query": "阻碍执行职务"})]),
@@ -721,7 +728,7 @@ def test_检索工具的措辞不许和第一轮用原话那条打架():
 
 def test_审核提示词让它拿上一轮的要过没当证据(parents, generator):
     """`retrievable` 光有字段不够：审核每轮从零重判，手上没有「上轮补上了没」这个依据，
-    于是实测 62 对相邻审核里 45 对重复了同一个结论、`missing` 相似度中位 0.82。
+    于是实测 45 对相邻的「不够」判定里，`missing` 相似度中位 0.82、24 对在 0.8 以上。
 
     对话历史里那条「[检索审核] 还缺：」是它自己写的，提示词必须点明去看它 ——
     连着两轮要不到，才是「库外」最直接的证据。引用要逐字对上 `reflect_node` 注入的写法，
@@ -794,11 +801,12 @@ def test_审核真的走了另一个客户端(parents, generator):
 
 # ================================================================== 16. top_k 同源
 def test_单题自带的_top_k_管到收尾(parents, generator):
-    """`top_k` 在 state 与闭包里各有一份，**两个节点必须同源**。
+    """单题自带的 `top_k` 必须一路管到收尾 —— 两个节点同源。
 
-    `tools_node` 读 state、`finalize_node` 曾经读闭包：调用方传进来的 `Question`
-    自带 `top_k` 时，循环按查询自己的条数召回、收尾却按 runner 的条数合并 ——
-    而收尾这个还决定最终证据条数，正是最不该错的地方。
+    `finalize_node` 曾经读闭包（runner 的条数），`tools_node` 读 state：调用方传进来的
+    `Question` 自带 `top_k` 时，循环按查询自己的条数召回、收尾却按 runner 的条数合并 ——
+    而收尾这个还决定最终证据条数，正是最不该错的地方。那个闭包参数现在删掉了，
+    两边都读 `state["top_k"]`、兜底都读 config（见 `_make_finalize_node`）。
 
     两个真实调用点（CLI、multihop）都传字符串，所以这条是**潜伏**的，不是活的；
     但 `invoke()` 是公开入口，`Question(text=..., top_k=N)` 就触发。
@@ -813,7 +821,7 @@ def test_单题自带的_top_k_管到收尾(parents, generator):
     ])
     # 候选(4) 必须比最终证据(2) 多 —— 不截断就看不出 max_evidence 取的是哪一份
     retriever = FakeRetriever(parents, hits=4)
-    rag = LegalRAG(retriever, generator, top_k=6)        # runner 的 top_k = 闭包那份
+    rag = LegalRAG(retriever, generator, top_k=6)   # runner 的条数；单题那份要盖过它
     runner = A.AgentRunner(rag, llm=llm, cfg=config.AgentConfig(max_steps=2))
 
     state = runner.invoke(Question(text="醉驾怎么处罚", top_k=2))   # ← 单题覆盖

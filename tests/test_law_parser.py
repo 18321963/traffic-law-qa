@@ -119,7 +119,7 @@ def test_manifest_缺失时不报错只是空清单(tmp_path):
     assert manifest["generated_at"] is None
 
 
-def test_manifest_记录了sha1用于增量门控(tmp_path, docx_files):
+def test_manifest_记录了sha1用于增量门控(docx_files):
     """manifest 的 sha1 是「docx 没变就跳过解析」的判据，必须真的落进去。"""
     law = LawParser().parse_docx(docx_files[0])
     entry = LawLibrary.entry_of(law, docx_files[0], "deadbeef")

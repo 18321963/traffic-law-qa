@@ -118,7 +118,7 @@ def test_线索长度门槛():
     assert QueryRewriter.find_law_hints("的", LAW_NAMES) == []
 
 
-def test_线索去重(rewriter):
+def test_线索去重():
     """「深圳」能同时匹配两部深圳法规，但只该出现一次。"""
     hints = QueryRewriter.find_law_hints("深圳 智能网联汽车", LAW_NAMES)
     assert len(hints) == len(set(hints))
@@ -129,7 +129,7 @@ def test_智能网联汽车命中对应法规(rewriter):
     assert result.law_hints, "问智能网联汽车却没有任何法名线索"
 
 
-def test_没有法名时线索为空(rewriter):
+def test_没有法名时线索为空():
     assert QueryRewriter.find_law_hints("醉酒驾驶怎么处理", LAW_NAMES) == []
 
 

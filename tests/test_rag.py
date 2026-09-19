@@ -121,13 +121,13 @@ def test_parents_is_the_retrievers_corpus(rag, retriever):
 
 
 # ================================================================== stats 与自述
-def test_stats_reports_the_three_states(retriever, generator):
+def test_stats_reports_the_three_states(generator):
     assert LegalRAG(RecordingRetriever(), generator).stats().dense is True
     assert LegalRAG(RecordingRetriever(dense=False), generator).stats().dense is False
     assert LegalRAG(RecordingRetriever(dense=None), generator).stats().dense is None
 
 
-def test_describe_says_unknown_when_the_store_is_unreachable(retriever, generator):
+def test_describe_says_unknown_when_the_store_is_unreachable(generator):
     """连不上 Milvus 时只说「未知」，不抛异常 —— 而且 search 照样能用。"""
     rag = LegalRAG(RecordingRetriever(dense=None), generator)
     text = rag.describe()

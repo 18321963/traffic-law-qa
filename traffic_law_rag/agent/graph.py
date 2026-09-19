@@ -41,15 +41,17 @@
 其中「补不补得上」（`retrievable`）是后来实测补上的。原先审核只答「证据够不够回答问题」，
 而路由把它当成了「要不要再检索一次」—— 这两件事并不等价。用户问到**库外**的东西时
 （《治安管理处罚法》的责任、商业保险的合同约定、紧急避险的免责），审核诚实地答「不够」，
-循环就去再检一次，可那个缺口再检一百次也补不上。实测 100 题里这类白跑占全部审核轮次的 29%。
+循环就去再检一次，可那个缺口再检一百次也补不上。100 题那次审核一共跑了 **207 轮**，其中
+**162 轮**是真的调了模型（另 45 轮预算已尽、reflect 短路，压根没问）—— 白跑就烧在这 162 轮里。
 所以审核现在多答一个 `retrievable`（缺口在不在库内），路由只在它为真时才回边 ——
 提示词里因此要带上库的法规清单，否则审核无从判断「库内」的边界在哪。
 
 **但一个字段还不足以让它判得准**：审核每轮是从零重判的，手上没有「上一轮补上了没」这个依据。
-实测 62 对相邻审核里 45 对重复了同一个结论，`missing` 文案相似度中位 0.82 —— 第 2 轮检索
-基本没改变它的看法。而同一批数据里规划轮其实很听话（第 2 轮检索词平均 68% 的字符落在上轮
-`missing` 里）：缺口没补上不是没去查，是**查了也没有**。所以提示词还要它去看对话历史里
-自己上一轮写的那条「[检索审核] 还缺：」—— 同一个缺口连着两轮要不到，就是库外最直接的证据。
+实测 45 对相邻的「不够」判定里，`missing` 文案相似度中位 0.82、24 对在 0.8 以上 —— 第 2 轮检索
+基本没改变它的看法。而同一批数据里规划轮其实很听话（有第 2 轮的 62 道题里，检索词平均 68% 的
+字符落在上轮 `missing` 里，48 道覆盖率 ≥50%）：缺口没补上不是没去查，是**查了也没有**。
+所以提示词还要它去看对话历史里自己上一轮写的那条「[检索审核] 还缺：」—— 同一个缺口
+连着两轮要不到，就是库外最直接的证据。
 
 **只用 LangGraph 的状态机，不用它的 LLM 抽象层。** 带工具的调用直接走 `openai` SDK
 （与 qa/generator.py 同一种写法），于是 state 里的 `messages` 就是 OpenAI 线上格式的
@@ -88,6 +90,37 @@ from .tools import (
     resolve_law_id,
     tool_message,
 )
+
+# 公开面 = **这个文件之外真的会 import 的名字**。全仓没有一处 `import *`，
+# 所以这份表不改变任何运行时行为，它的用处是让「入口」与「零件」一眼可分。
+#
+# 分层：入口（外面会 import 的）、被测试单独钉住的行为、可调文本。
+# `build_graph` 严格说只被测试 import，但它是整个集成测试套件的入口，留着。
+# 节点的工厂与路由函数里，只有 `build_graph` 自己用的那几个已经加了 `_` 前缀；
+# `make_classify_node` / `make_lookup_plan_node` / `route_after_agent` 不加 ——
+# 它们各有测试单独调用，属于真有外部消费者的那一半。
+#
+# 测试会直接戳 `_parse_reflection` 这类内部件，那是测试的特权，不算公开面。
+__all__ = [
+    # 入口
+    "AgentRunner",
+    "build_graph",
+    "main",
+    "ToolCallingLLM",
+    "render_trace",
+    "AgentState",
+    # 被测试单独钉住的行为
+    "classify_intent",
+    "make_classify_node",
+    "make_lookup_plan_node",
+    "route_after_agent",
+    "INTENT_LOOKUP",
+    "INTENT_SEARCH",
+    # 可调文本
+    "AGENT_SYSTEM_PROMPT",
+    "REFLECT_SYSTEM_PROMPT",
+    "TOOLS",
+]
 
 AGENT_SYSTEM_PROMPT = """你是交通法规问答的检索规划助手。你的任务是决定**这一轮检索什么**。
 判断「够不够、要不要继续」是另一个节点的职责，你只管把这一轮该查的查好。
@@ -217,7 +250,7 @@ def classify_intent(
     return INTENT_SEARCH
 
 
-def route_after_classify(state: AgentState) -> Literal["lookup_plan", "agent"]:
+def _route_after_classify(state: AgentState) -> Literal["lookup_plan", "agent"]:
     return "lookup_plan" if state.get("intent") == INTENT_LOOKUP else "agent"
 
 
@@ -441,7 +474,7 @@ class ToolCallingLLM:
 
 
 # ============================================================ 节点
-def make_agent_node(llm: ToolCallingLLM, cfg: config.AgentConfig):
+def _make_agent_node(llm: ToolCallingLLM, cfg: config.AgentConfig):
     """规划轮。
 
     读：question / history / messages / max_steps
@@ -463,7 +496,7 @@ def make_agent_node(llm: ToolCallingLLM, cfg: config.AgentConfig):
     return agent_node
 
 
-def make_tools_node(
+def _make_tools_node(
     rag: LegalRAG,
     cfg: config.AgentConfig,
     index: dict[tuple[str, int], ParentChunk],
@@ -583,7 +616,7 @@ def make_tools_node(
     return tools_node
 
 
-def make_reflect_node(llm: ToolCallingLLM, cfg: config.AgentConfig, laws: list[str]):
+def _make_reflect_node(llm: ToolCallingLLM, cfg: config.AgentConfig, laws: list[str]):
     """审核：现有证据够不够回答问题，以及不够的那部分补不补得上。
 
     读：question / history / messages / steps / max_steps / search_log
@@ -673,7 +706,7 @@ def _trajectory_notes(state: AgentState, merged: RetrievalResult, cfg: config.Ag
     parts += [f"{reviews} 轮审核", f"证据 {len(merged.articles)} 条"]
     notes = ["Agent：" + " / ".join(parts)]
 
-    # 「被迫收尾」的判据要与 route_after_reflect 逐字同源：审核说了不够、且预算真的见底。
+    # 「被迫收尾」的判据要与 _route_after_reflect 逐字同源：审核说了不够、且预算真的见底。
     # 光看 steps >= max_steps 不够 —— 规则取条那条路根本不缺轮次，它是**按设计**一轮结束的。
     #
     # 收尾有三种成因，轨迹里要分得开，否则「为什么 2 轮就停了」没法解释：
@@ -691,10 +724,9 @@ def _trajectory_notes(state: AgentState, merged: RetrievalResult, cfg: config.Ag
     return notes
 
 
-def make_finalize_node(
+def _make_finalize_node(
     rag: LegalRAG,
     cfg: config.AgentConfig,
-    top_k: int,
 ):
     """收尾：把累积的证据合并回一个 RetrievalResult，交给既有生成器。
 
@@ -704,16 +736,16 @@ def make_finalize_node(
     **这里不喂工具历史、也不 bind_tools** —— 从零重建一次「问题 + 依据」的提示词。
     这样既绕开了可能残留的悬空 tool_calls，又让提示词与线性管道逐字节相同。
 
-    `top_k` 参数只作**兜底**：真正取值从 `state["top_k"]`，与 `tools_node` 同源。
-    两处曾经各取各的（这里读闭包、那里读 state），只在调用方传进来的 `Question`
-    自带 `top_k` 时才分叉 —— 那时循环按查询自己的条数召回，收尾却按 runner 的条数
-    合并，而收尾这个还决定最终证据条数。两个真实调用点都传字符串，所以是潜伏的。
+    **不接 `top_k` 参数**：那曾是 runner 的条数，只在 `state` 缺字段时兜底，
+    而 `AgentRunner.invoke()` 必然写 `state["top_k"]` —— 它一次都没生效过，
+    却让同一个函数里坐着两个 `top_k`（收尾读闭包、工具轮读 state），
+    调用方传进来的 `Question` 自带 `top_k` 时两者就分叉。现在兜底直接读 config。
     """
 
     def finalize_node(state: AgentState) -> dict:
-        # 与 tools_node 同源。`state["top_k"]` 由 invoke 写成 `query.top_k or runner.top_k`，
-        # 单题覆盖就落在它上面；闭包那份是 runner 的，仅供 state 缺字段时兜底。
-        active_top_k = state.get("top_k", top_k)
+        # `state["top_k"]` 由 invoke 写成 `query.top_k or runner.top_k`，单题覆盖落在它上面。
+        # 兜底读 config 而不另接参数：这个值的真源只有 config 一处，与 tools_node 同款。
+        active_top_k = state.get("top_k", config.retrieve_config().top_k)
         logs = list(state.get("search_log") or ())
         extra: list[dict] = []
         notes: list[str] = []
@@ -759,7 +791,7 @@ def route_after_agent(state: AgentState) -> Literal["tools", "finalize"]:
     return "tools" if messages and messages[-1].get("tool_calls") else "finalize"
 
 
-def route_after_reflect(state: AgentState) -> Literal["agent", "finalize"]:
+def _route_after_reflect(state: AgentState) -> Literal["agent", "finalize"]:
     """审核说不够、缺口补得上、且还有预算 → 回规划轮再查一次；否则收尾。
 
     三个条件是与的关系，缺一不可：
@@ -767,7 +799,8 @@ def route_after_reflect(state: AgentState) -> Literal["agent", "finalize"]:
     1. **够不够**（`sufficient`）：证据已覆盖问题要素就没必要再查。
     2. **补不补得上**（`retrievable`）：缺口若落在库外（用户问的责任写在
        《治安管理处罚法》、是商业保险的合同约定……），再检索一百次也检不到，
-       回边只会白烧一轮检索加两次模型调用。实测 100 题里这类白跑占全部审核轮次的 29%。
+       回边只会白烧一轮检索加两次模型调用。100 题那次审核跑了 207 轮，其中 162 轮真的调了
+       模型（另 45 轮预算已尽、reflect 短路），白跑就烧在这 162 轮里。
     3. **还有没有预算**：预算在这里现算（`max_steps - steps`），不落进 state：需要
        「递减」的字段在 operator.add reducer 下是读-改-写，写错就是双倍消耗，
        而且路由器是纯函数、本来就没有写权限。
@@ -789,7 +822,6 @@ def build_graph(
     rag: LegalRAG,
     llm: ToolCallingLLM,
     cfg: config.AgentConfig,
-    top_k: int,
     forced_intent: str | None = None,
     reflect_llm: ToolCallingLLM | None = None,
 ):
@@ -810,15 +842,15 @@ def build_graph(
     graph = StateGraph(AgentState)
     graph.add_node("classify", make_classify_node(parents, by_number, forced_intent))
     graph.add_node("lookup_plan", make_lookup_plan_node(parents, by_number))
-    graph.add_node("agent", make_agent_node(llm, cfg))
-    graph.add_node("tools", make_tools_node(rag, cfg, by_number))
-    graph.add_node("reflect", make_reflect_node(reflect_llm, cfg, laws))
-    graph.add_node("finalize", make_finalize_node(rag, cfg, top_k))
+    graph.add_node("agent", _make_agent_node(llm, cfg))
+    graph.add_node("tools", _make_tools_node(rag, cfg, by_number))
+    graph.add_node("reflect", _make_reflect_node(reflect_llm, cfg, laws))
+    graph.add_node("finalize", _make_finalize_node(rag, cfg))
 
     # 入口先定意图：条文定位走规则规划（零 LLM），其余才进 LLM 规划轮
     graph.add_edge(START, "classify")
     graph.add_conditional_edges(
-        "classify", route_after_classify, {"lookup_plan": "lookup_plan", "agent": "agent"}
+        "classify", _route_after_classify, {"lookup_plan": "lookup_plan", "agent": "agent"}
     )
     # lookup_plan 与 agent 共用一条出边：**判据只有「有没有 tool_calls」，与预算无关**。
     # 共用而不是各写一条，是为了让「有 tool_calls 必去 tools」这条不变量只有一个实现。
@@ -833,7 +865,7 @@ def build_graph(
     # 回边指向 agent 而不是 classify：意图只在入口定一次。第二轮再分类一遍纯属浪费，
     # 而且可能分到不同意图导致循环抖动。
     graph.add_conditional_edges(
-        "reflect", route_after_reflect, {"agent": "agent", "finalize": "finalize"}
+        "reflect", _route_after_reflect, {"agent": "agent", "finalize": "finalize"}
     )
     graph.add_edge("finalize", END)
     return graph.compile()
@@ -848,6 +880,8 @@ class AgentRunner:
 
     **依赖的是 `LegalRAG`，不是检索器**：生成器与 top_k 都从 rag 上取，不另存一份 ——
     存两份就迟早不一致（`--linear` 退回线性管道时要用的正是同一个 rag）。
+    组图这一侧照同一条走：`build_graph` 与各节点工厂都不接 `top_k` 参数，
+    条数只从 `state["top_k"]` 取、兜底读 `config`，真源始终只有一处。
     """
 
     input_desc = "问题 (str) / Question"
@@ -909,7 +943,6 @@ class AgentRunner:
                 rag=self.rag,
                 llm=self.llm,
                 cfg=self.cfg,
-                top_k=self.top_k,
                 forced_intent=self.forced_intent,
             )
         return self._graph
