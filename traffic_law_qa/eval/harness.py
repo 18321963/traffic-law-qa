@@ -48,13 +48,12 @@ ground truth 取答案里引用的**全部**本库条号，不是只取第一条
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from .. import config
 from ..contracts import RetrievalResult
@@ -664,6 +663,26 @@ def evaluate_reference(
 USAGE = __doc__
 
 
+def _parser() -> argparse.ArgumentParser:
+    """只做校验的解析器（`--help` 由 main 开头那个分支打印 `USAGE`，所以 `add_help=False`）。
+
+    注意这里**没有** `or not args` 那条：不带参数就是跑全量 82 道，这是这个入口的
+    默认用法（`python -m traffic_law_qa.eval`），与其余几个「不给参数就打说明书」的
+    入口刻意不同。解析器只把「不认识的开关」和「取不到值的开关」变成错误。
+    """
+    parser = argparse.ArgumentParser(prog="python -m traffic_law_qa.eval", add_help=False)
+    parser.add_argument("--reference", action="store_true", help="规则取条臂：测定位，不是检索")
+    parser.add_argument("--no-compare", action="store_true", help="连基线对照都不跑")
+    parser.add_argument("--no-vector", action="store_true", help="只走 BM25，做 A/B 对照")
+    parser.add_argument("--quiet", action="store_true", help="不打印逐题进度")
+    parser.add_argument("--json", action="store_true", help="输出机器可读的报告")
+    parser.add_argument("--data", default=None, help="换一份语料（默认 data/eval_corpus.json）")
+    parser.add_argument("--limit", type=int, default=None, help="只跑前 N 道")
+    parser.add_argument("--top-k", type=int, default=None, help="覆盖默认召回条数")
+    parser.add_argument("--show-misses", type=int, default=None, help="打印 N 道没命中的题")
+    return parser
+
+
 def main(argv: list[str] | None = None) -> int:
     import sys
 
@@ -674,54 +693,49 @@ def main(argv: list[str] | None = None) -> int:
         print(USAGE)
         return 0
 
-    def option(name: str, cast: Callable[[str], Any] = int) -> Any:
-        """取 `--name value` 里的 value 并按 `cast` 转一下；没给这个开关就返回 None。
+    try:
+        options = _parser().parse_args(args)
+    except SystemExit as exc:
+        # argparse 在参数不认识 / 取不到值时直接 SystemExit。收回成返回值，
+        # 保住「main() 返回 int、调用方 raise SystemExit(main())」这条全仓一致的契约。
+        return exc.code if isinstance(exc.code, int) else 0
 
-        返回 `Any` 是有意的：这一个 helper 同时服务 `--limit`（int）与 `--data`（str），
-        用联合类型标注只会让每个调用点都要再窄化一次。
-        """
-        if name not in args or args.index(name) + 1 >= len(args):
-            return None
-        return cast(args[args.index(name) + 1])
-
-    def data_path() -> Path | None:
-        raw = option("--data", str)
-        return Path(raw) if raw else None
+    data_path = Path(options.data) if options.data else None
 
     try:
-        if "--reference" in args:
+        if options.reference:
             # 规则取条臂：测的是**定位**，不是检索。默认那一支的行为逐字节不变。
             reference = evaluate_reference(
-                data_path=data_path(),
-                limit=option("--limit"),
-                top_k=option("--top-k"),
-                with_vector="--no-vector" not in args,
-                compare_baseline="--no-compare" not in args,
-                verbose="--quiet" not in args,
+                data_path=data_path,
+                limit=options.limit,
+                top_k=options.top_k,
+                with_vector=not options.no_vector,
+                compare_baseline=not options.no_compare,
+                verbose=not options.quiet,
             )
             print()
-            if "--json" in args:
+            if options.json:
                 print(json.dumps(reference.to_dict(), ensure_ascii=False, indent=2))
             else:
                 print(reference.render())
             return 0
 
         report = evaluate(
-            data_path=data_path(),
-            limit=option("--limit"),
-            top_k=option("--top-k"),
-            with_vector="--no-vector" not in args,
-            verbose="--quiet" not in args,
+            data_path=data_path,
+            limit=options.limit,
+            top_k=options.top_k,
+            with_vector=not options.no_vector,
+            verbose=not options.quiet,
         )
     except QaError as exc:
         print(str(exc))
         return 1
 
-    if "--json" in args:
+    if options.json:
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
     else:
         print()
-        print(report.render(show_misses=option("--show-misses") or 0))
+        print(report.render(show_misses=options.show_misses or 0))
     return 0
 
 

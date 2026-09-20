@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -56,9 +57,10 @@ class _FakeClient:
         self.chat = SimpleNamespace(completions=self.completions)
 
 
-def _generator(*, api_key: str = "test-key", retries: int = 2) -> AnswerGenerator:
+def _generator(*, api_key: str = "test-key", retries: int = 2, client: Any = None) -> AnswerGenerator:
+    """假客户端**在构造时**注入，不是构造完再塞进属性里 —— 见 `AnswerGenerator.__init__`。"""
     cfg = LLMConfig(base_url="http://fake", api_key=api_key, model="qwen-plus", temperature=0.0)
-    return AnswerGenerator(cfg=cfg, retries=retries)
+    return AnswerGenerator(cfg=cfg, retries=retries, client=client)
 
 
 @pytest.fixture
@@ -103,8 +105,8 @@ def _deltas(gen: AnswerGenerator, retrieval: RetrievalResult, question=QUESTION)
 def test_流式与非流式发同一份提示词(retrieval):
     """两条路径必须构造出逐字相同的 messages —— 否则同一个问题在
     `/qa` 与 `/qa/stream` 两个入口会得到不同的答案。"""
-    gen = _generator()
-    gen._client = client = _FakeClient([_chunk("答案")])
+    client = _FakeClient([_chunk("答案")])
+    gen = _generator(client=client)
 
     gen.generate(QUESTION, retrieval)
     _deltas(gen, retrieval)
@@ -120,8 +122,8 @@ def test_流式与非流式发同一份提示词(retrieval):
 
 
 def test_提示词里带上依据(retrieval):
-    gen = _generator()
-    gen._client = client = _FakeClient([_chunk("答案")])
+    client = _FakeClient([_chunk("答案")])
+    gen = _generator(client=client)
 
     gen.generate(QUESTION, retrieval)
     user = client.completions.calls[0]["messages"][-1]["content"]
@@ -133,8 +135,7 @@ def test_提示词里带上依据(retrieval):
 
 # ------------------------------------------------------------------ 流式
 def test_流式拼接结果完整(retrieval):
-    gen = _generator()
-    gen._client = _FakeClient([_chunk("依据"), _chunk("[依据1]"), _chunk("应处拘役。")])
+    gen = _generator(client=_FakeClient([_chunk("依据"), _chunk("[依据1]"), _chunk("应处拘役。")]))
 
     text, _ = _deltas(gen, retrieval)
 
@@ -143,8 +144,7 @@ def test_流式拼接结果完整(retrieval):
 
 def test_跳过空delta(retrieval):
     """OpenAI 兼容端点的首块常常只有 role 没有 content —— 不能因此吐出 None。"""
-    gen = _generator()
-    gen._client = _FakeClient([_chunk(None), _chunk("正文")])
+    gen = _generator(client=_FakeClient([_chunk(None), _chunk("正文")]))
 
     text, _ = _deltas(gen, retrieval)
 
@@ -152,8 +152,7 @@ def test_跳过空delta(retrieval):
 
 
 def test_末块usage被读出(retrieval):
-    gen = _generator()
-    gen._client = _FakeClient([_chunk("正文"), _chunk(usage=(11, 22, 33))])
+    gen = _generator(client=_FakeClient([_chunk("正文"), _chunk(usage=(11, 22, 33))]))
 
     _, usage = _deltas(gen, retrieval)
 
@@ -162,8 +161,7 @@ def test_末块usage被读出(retrieval):
 
 def test_端点不给usage时如实返回空(retrieval):
     """流式下 usage 只在末块出现，且不是所有兼容端点都会给（DashScope 就不给）。"""
-    gen = _generator()
-    gen._client = _FakeClient([_chunk("正文")])
+    gen = _generator(client=_FakeClient([_chunk("正文")]))
 
     _, usage = _deltas(gen, retrieval)
 
@@ -172,8 +170,8 @@ def test_端点不给usage时如实返回空(retrieval):
 
 # ------------------------------------------------------------------ 兜底路径
 def test_检索为空时流式不调模型():
-    gen = _generator()
-    gen._client = client = _FakeClient([_chunk("不该被调用")])
+    client = _FakeClient([_chunk("不该被调用")])
+    gen = _generator(client=client)
 
     text, usage = _deltas(gen, EMPTY)
 
@@ -184,15 +182,14 @@ def test_检索为空时流式不调模型():
 
 def test_检索为空时两条路径文案一致():
     """同一句拒答在两个入口里措辞不同，用户会以为是两种不同的失败。"""
-    gen = _generator()
-    gen._client = _FakeClient()
+    gen = _generator(client=_FakeClient())
 
     assert _deltas(gen, EMPTY)[0] == gen.generate(QUESTION, EMPTY).text
 
 
 def test_未配置LLM时两条路径文案一致(retrieval):
-    gen = _generator(api_key="")
-    gen._client = client = _FakeClient()
+    client = _FakeClient()
+    gen = _generator(api_key="", client=client)
 
     assert _deltas(gen, retrieval)[0] == UNAVAILABLE_ANSWER
     assert gen.generate(QUESTION, retrieval).text == UNAVAILABLE_ANSWER
@@ -209,8 +206,7 @@ def test_未配置LLM时仍给出召回的法条(retrieval):
 
 # ------------------------------------------------------------------ 失败语义
 def test_流式首字节前失败抛可读错误(retrieval):
-    gen = _generator()
-    gen._client = _FakeClient(error=RuntimeError("connection reset"))
+    gen = _generator(client=_FakeClient(error=RuntimeError("connection reset")))
 
     with pytest.raises(RuntimeError, match="调用 qwen-plus 失败"):
         next(gen.stream(QUESTION, retrieval))
@@ -218,8 +214,8 @@ def test_流式首字节前失败抛可读错误(retrieval):
 
 def test_流式不重试(retrieval):
     """已经吐出去的 token 收不回来，重试会得到拼接了两次的答案。"""
-    gen = _generator(retries=3)
-    gen._client = client = _FakeClient(error=RuntimeError("boom"))
+    client = _FakeClient(error=RuntimeError("boom"))
+    gen = _generator(retries=3, client=client)
 
     with pytest.raises(RuntimeError):
         next(gen.stream(QUESTION, retrieval))
@@ -229,8 +225,8 @@ def test_流式不重试(retrieval):
 
 def test_同步路径仍然重试(retrieval):
     """非流式没有「已经吐出去」的问题，重试仍然是对的。"""
-    gen = _generator(retries=3)
-    gen._client = client = _FakeClient(error=RuntimeError("boom"))
+    client = _FakeClient(error=RuntimeError("boom"))
+    gen = _generator(retries=3, client=client)
 
     with pytest.raises(RuntimeError, match="调用 qwen-plus 失败"):
         gen.generate(QUESTION, retrieval)

@@ -36,6 +36,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 from collections.abc import Sequence
@@ -828,6 +829,29 @@ def full_budget_summary(rows: list[dict]) -> str:
 USAGE = __doc__
 
 
+def _parser() -> argparse.ArgumentParser:
+    """只做校验的解析器（`--help` 与「不带参数」由 main 开头那个分支打印 `USAGE`，
+    所以 `add_help=False`）。
+
+    模式是四个**平级的布尔开关**，不是子命令 —— 所以谁都没给时会落到末尾打印说明书，
+    这个形状与改动前一致。解析器只负责把「不认识的开关」和「取不到值的开关」变成错误：
+    `--target` 敲错一个字母静默退回 100 道，和 singlehop 那边 `--limit` 敲错退回全量
+    是同一类错误，只是贵在 LLM 那一步。
+    """
+    parser = argparse.ArgumentParser(prog="python -m traffic_law_qa.eval.multihop", add_help=False)
+    parser.add_argument("--check", action="store_true", help="复跑护栏，全离线")
+    parser.add_argument("--generate", action="store_true", help="调 LLM 造题并落盘（花钱）")
+    parser.add_argument("--trace", action="store_true", help="跑 rag/agent 两臂并落盘轨迹（花钱）")
+    parser.add_argument("--compare", action="store_true", help="= --trace + 全预算汇总")
+    parser.add_argument("--diagnose", action="store_true", help="在 --check 里追加基线诊断")
+    parser.add_argument("--quiet", action="store_true", help="不打印逐题进度")
+    parser.add_argument("--limit", type=int, default=None, help="只跑前 N 道（默认 10）")
+    parser.add_argument("--target", type=int, default=None, help="--generate 的目标题数（默认 100）")
+    parser.add_argument("--top-k", type=int, default=None, help="覆盖默认召回条数（6）")
+    parser.add_argument("--out", default=None, help="产物落盘路径")
+    return parser
+
+
 def main(argv: list[str] | None = None) -> int:
     import sys
 
@@ -836,14 +860,16 @@ def main(argv: list[str] | None = None) -> int:
         print(USAGE)
         return 0
 
-    def option(name: str, cast: Any = int) -> Any:
-        if name not in args or args.index(name) + 1 >= len(args):
-            return None
-        return cast(args[args.index(name) + 1])
-
-    out = Path(option("--out", str)) if option("--out", str) else None
     try:
-        if "--check" in args:
+        options = _parser().parse_args(args)
+    except SystemExit as exc:
+        # argparse 在参数不认识 / 取不到值时直接 SystemExit。收回成返回值，
+        # 保住「main() 返回 int、调用方 raise SystemExit(main())」这条全仓一致的契约。
+        return exc.code if isinstance(exc.code, int) else 0
+
+    out = Path(options.out) if options.out else None
+    try:
+        if options.check:
             library = Library.load()
             cases, dropped = load_cases(out or config.EVAL_MULTIHOP_PATH, library=library)
             print(summarize(cases, library=library))
@@ -851,26 +877,26 @@ def main(argv: list[str] | None = None) -> int:
             print(defect_diagnostic(cases, library))
             if dropped:
                 print(f"  （去重丢掉 {dropped} 条重复题面）")
-            if "--diagnose" in args:
-                baseline_diagnostic(cases, top_k=option("--top-k") or 6)
+            if options.diagnose:
+                baseline_diagnostic(cases, top_k=options.top_k or 6)
             return 0
 
-        if "--generate" in args:
+        if options.generate:
             generate(
-                target=option("--target") or 100,
+                target=options.target or 100,
                 out=out or config.EVAL_MULTIHOP_PATH,
-                verbose="--quiet" not in args,
+                verbose=not options.quiet,
             )
             return 0
 
-        if "--trace" in args or "--compare" in args:
+        if options.trace or options.compare:
             rows = trace(
-                limit=option("--limit") or 10,
+                limit=options.limit or 10,
                 out=out,
-                top_k=option("--top-k") or 6,
-                verbose="--quiet" not in args,
+                top_k=options.top_k or 6,
+                verbose=not options.quiet,
             )
-            if "--compare" in args:
+            if options.compare:
                 print()
                 print(full_budget_summary(rows))
             return 0

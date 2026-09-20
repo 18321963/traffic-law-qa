@@ -1,7 +1,7 @@
 """Agent 循环：意图识别、两条路径、悬空工具调用、预算、提示词一致性。
 
 **全部离线**：不连 Milvus、不发网络请求。Milvus 用替身换掉，LLM 用按脚本弹消息的
-替身换掉，生成器是真的 `AnswerGenerator` 只是把它的 `_client` 换成记录器 ——
+替身换掉，生成器是真的 `AnswerGenerator`、只是在构造时注入一个假客户端 ——
 所以「Agent 的答案与线性管道的答案是同一段代码产出的」这句话是被**断言**过的，
 不是被相信的。
 
@@ -169,17 +169,21 @@ def by_number(parents):
 
 
 @pytest.fixture
-def generator():
-    gen = AnswerGenerator(FAKE_LLM_CFG)
-    gen._client = RecordingClient()
-    return gen
+def client() -> RecordingClient:
+    """假 openai 客户端。测试自己持有它 —— 不去 Generator 里把私有的那份掏出来。"""
+    return RecordingClient()
+
+
+@pytest.fixture
+def generator(client) -> AnswerGenerator:
+    return AnswerGenerator(FAKE_LLM_CFG, client=client)
 
 
 def run(
     question, script, parents, generator, *,
     forced=None, max_steps=None, retriever=None, reflect_llm=None, tracer=None,
 ):
-    """跑一次完整图，返回 (终态, 假 LLM, 假检索器, 提示词记录器)。
+    """跑一次完整图，返回 (终态, 假 LLM, 假检索器)。
 
     **不传 `max_steps` 就取 `AgentConfig` 的出厂默认值**（现在是 2，实测定的）。
     这里曾经写死一个字面量 `2`，注释却声称「跟着 AgentConfig 的默认走」—— 承诺和实现
@@ -225,36 +229,36 @@ def run(
         },
         config={"recursion_limit": 3 * max_steps + 6},
     )
-    return state, llm, retriever, generator._client
+    return state, llm, retriever
 
 
 ARTICLE_Q = "《深圳经济特区道路交通安全违法行为处罚条例》第十三条怎么规定的"
 
 
 # ================================================================== 1. 头条：提示词逐字一致
-def test_agent_prompt_is_byte_identical_to_linear_pipeline(parents, generator):
+def test_agent_prompt_is_byte_identical_to_linear_pipeline(parents, generator, client):
     """**这是整个设计的验收标准**：Agent 的答案与线性管道的答案是同一段代码产出的。
 
     做法不是「读代码确认」，而是把两边真正发给模型的 `messages` 抓出来逐字比。
     如果收尾节点偷偷往证据里加了一句、或换了证据顺序，这条会红。
     """
     state, *_ = run(ARTICLE_Q, [_reflection(True)], parents, generator)
-    agent_prompt = generator._client.requests[-1]["messages"]
+    agent_prompt = client.requests[-1]["messages"]
 
     # 用同一个 search_log 独立重算一遍合并结果，再走一次同一个生成器
     merged = merge_retrievals(
         state["search_log"], question=ARTICLE_Q, parents=parents, max_evidence=6
     )
     generator.generate(Question(text=ARTICLE_Q, top_k=6), merged)
-    linear_prompt = generator._client.requests[-1]["messages"]
+    linear_prompt = client.requests[-1]["messages"]
 
     assert agent_prompt == linear_prompt
 
 
-def test_prompt_carries_the_retrieved_article_text(parents, generator):
+def test_prompt_carries_the_retrieved_article_text(parents, generator, client):
     """逐字一致的对比不能是「两边都空」——顺带确认提示词里真有法条正文。"""
     state, *_ = run(ARTICLE_Q, [_reflection(True)], parents, generator)
-    prompt = generator._client.requests[-1]["messages"]
+    prompt = client.requests[-1]["messages"]
     blob = "\n".join(m.get("content") or "" for m in prompt)
     assert "第十三条" in blob
     assert state["answer"].evidences, "证据不该为空"
@@ -288,7 +292,7 @@ def test_classify_intent_is_pure(parents, by_number):
 # ================================================================== 3. 条文定位全链路
 def test_lookup_path_skips_retrieval_entirely(parents, generator):
     """条文定位这条路：零检索调用、零 LLM 规划调用，证据就是点名的那一条。"""
-    state, llm, retriever, _ = run(ARTICLE_Q, [_reflection(True)], parents, generator)
+    state, llm, retriever = run(ARTICLE_Q, [_reflection(True)], parents, generator)
 
     assert state["intent"] == intent.INTENT_LOOKUP
     assert retriever.queries == [], "不该走向量/BM25 检索"
@@ -327,9 +331,7 @@ def test_intent_is_actually_written_to_state(parents, generator):
 
 def test_forced_intent_overrides_the_rule(parents, generator):
     """`--intent` 对照用：强行按「法规检索」跑同一道题，就必须真的走检索。"""
-    state, llm, retriever, _ = run(
-        ARTICLE_Q, [_reflection(True)], parents, generator, forced=intent.INTENT_SEARCH
-    )
+    state, llm, retriever = run(ARTICLE_Q, [_reflection(True)], parents, generator, forced=intent.INTENT_SEARCH)
     assert state["intent"] == intent.INTENT_SEARCH
     assert retriever.queries, "强制走检索时应当真的检索了"
 
@@ -384,7 +386,7 @@ def test_budget_exhaustion_still_produces_an_answer(parents, generator):
         script.append(_assistant(calls=[(f"c{index}", SEARCH_LAW_NAME, {"query": f"词{index}"})]))
         script.append(_reflection(False, "还不够"))
 
-    state, llm, retriever, _ = run("永远查不够的问题", script, parents, generator, max_steps=3)
+    state, llm, retriever = run("永远查不够的问题", script, parents, generator, max_steps=3)
 
     assert state["steps"] == 3
     assert state["answer"] is not None
@@ -504,7 +506,7 @@ def test_get_article_failure_is_fed_back(parents, generator):
 def test_no_evidence_falls_back_to_the_linear_pipeline(parents, generator):
     """模型一次工具都没调 → 按单轮管道兜底检索，保证 Agent 严格增量。"""
     script = [_assistant(content="我直接回答"), _reflection(True)]
-    state, llm, retriever, _ = run("域外问题", script, parents, generator)
+    state, llm, retriever = run("域外问题", script, parents, generator)
 
     assert retriever.queries, "兜底应当真的检索一次"
     assert len(state["search_log"]) == 1
@@ -687,7 +689,7 @@ def test_库外缺口直接收尾不回边(parents, generator):
         _assistant(calls=[("c1", SEARCH_LAW_NAME, {"query": "阻碍执行职务"})]),
         _reflection(False, "缺《治安管理处罚法》的责任条款", retrievable=False),
     ]
-    state, llm, retriever, _ = run("阻碍交警执法怎么罚", script, parents, generator)
+    state, llm, retriever = run("阻碍交警执法怎么罚", script, parents, generator)
 
     assert len(retriever.queries) == 1, "库外缺口不该触发第二次检索"
     assert state["steps"] == 1
@@ -712,33 +714,48 @@ def test_库内缺口照旧回边(parents, generator, retrievable):
     # max_steps 显式给 3：这里要的是**跑满两轮且第二轮审核真的调了模型**。
     # 用默认的 2 的话，第二轮末尾预算已尽，reflect 会短路不调模型 ——
     # 那样就分不清「回边生效了」和「只是没轮到短路」，测不到想测的东西。
-    state, llm, retriever, _ = run("超员怎么罚", script, parents, generator, max_steps=3)
+    state, llm, retriever = run("超员怎么罚", script, parents, generator, max_steps=3)
 
     assert len(retriever.queries) == 2
     assert state["steps"] == 2
     assert len(llm.calls) == 4
 
 
-def test_parse_reflection_的三种输入():
-    """解析层的默认值单独钉一遍 —— 图跑一整套代价太高，而这里是最容易被改错的一行。"""
-    assert reflect._parse_reflection('{"sufficient": false, "retrievable": false}')["retrievable"] is False
-    assert reflect._parse_reflection('{"sufficient": false, "retrievable": true}')["retrievable"] is True
-    assert reflect._parse_reflection('{"sufficient": false}')["retrievable"] is True
+def _审核(reply: str | None) -> dict:
+    """跑一次**审核节点**，返回它写进 state 的那条结论。
+
+    走公开的 `make_reflect_node`，不碰里面的解析函数：`reflections[0]` 就是解析结果本身，
+    所以断言的精度和直接调解析函数一样，但换掉解析实现时这些断言不会跟着红。
+    图跑一整套代价太高，这里只建节点。
+
+    `laws=[]` 合法 —— 库边界只进提示词，与这里要钉的默认值无关。
+    """
+    node = reflect.make_reflect_node(ScriptedLLM([_assistant(reply)]), config.AgentConfig(max_steps=2), [])
+    return node({"question": "问题", "max_steps": 2})["reflections"][0]
+
+
+def test_审核输出的默认值_三种输入():
+    """默认值单独钉一遍 —— 图跑一整套代价太高，而这里是最容易被改错的一行。"""
+    assert _审核('{"sufficient": false, "retrievable": false}')["retrievable"] is False
+    assert _审核('{"sufficient": false, "retrievable": true}')["retrievable"] is True
+    assert _审核('{"sufficient": false}')["retrievable"] is True
     # 解析不出来 → 按已足够处理（停止），此时也谈不上回边
-    assert reflect._parse_reflection("我不知道")["sufficient"] is True
+    assert _审核("我不知道")["sufficient"] is True
+    # 模型一条 content 都没给（None）也要走同一条路，不能炸在 `.strip()` 上
+    assert _审核(None)["sufficient"] is True
 
 
-def test_parse_reflection_的_next_query_缺了就是空串():
+def test_审核没写_next_query_时就是空串():
     """`next_query` 是给下一轮的**补充信息**，不是决策依据，所以缺了给空串而不是别的。
 
     空串 = 回灌时那半句不出现 = 与加这个字段之前逐字相同。给成 `None` 或占位文案
     都会让「模型没写」变成一句要发给模型的话。
     """
-    assert reflect._parse_reflection('{"sufficient": false, "next_query": "记多少分？"}')["next_query"] == "记多少分？"
-    assert reflect._parse_reflection('{"sufficient": false}')["next_query"] == ""
-    assert reflect._parse_reflection("我不知道")["next_query"] == ""
+    assert _审核('{"sufficient": false, "next_query": "记多少分？"}')["next_query"] == "记多少分？"
+    assert _审核('{"sufficient": false}')["next_query"] == ""
+    assert _审核("我不知道")["next_query"] == ""
     # 模型写了空值/纯空白，与没写同义
-    assert reflect._parse_reflection('{"sufficient": false, "next_query": "   "}')["next_query"] == ""
+    assert _审核('{"sufficient": false, "next_query": "   "}')["next_query"] == ""
 
 
 def test_审核提示词带着库的边界(parents, generator):

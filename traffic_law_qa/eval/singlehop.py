@@ -21,9 +21,9 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
-from typing import Any
 
 __all__ = ["run", "metrics", "main"]
 
@@ -124,31 +124,50 @@ def metrics(rows: list[dict], *, top_k: int = 6) -> str:
 USAGE = __doc__
 
 
+def _parser() -> argparse.ArgumentParser:
+    """只做校验的解析器（`--help` 与「不带参数」由 main 开头那个分支打印 `USAGE`，
+    所以 `add_help=False`）。
+
+    它唯一的职责是把「不认识的开关」和「取不到值的开关」变成错误。原先的 `option()`
+    只做 `if name in args`，两样都静默忽略 —— 而这里的安静是有价格的：
+    `--limit` 敲错一个字母，`option()` 返回 None，`run(limit=None)` 就是**全量 82 道**，
+    两条臂都真调 LLM。文档里那句「先跑 5 道看链路」于是变成一次全额付费。
+    """
+    parser = argparse.ArgumentParser(prog="python -m traffic_law_qa.eval.singlehop", add_help=False)
+    parser.add_argument("--compare", action="store_true", help="跑两臂对照（不给这个就跑说明书，因为要花钱）")
+    parser.add_argument("--quiet", action="store_true", help="不打印逐题进度")
+    parser.add_argument("--limit", type=int, default=None, help="只跑前 N 道（不给=全量 82 道）")
+    parser.add_argument("--top-k", type=int, default=None, help="覆盖默认召回条数（6）")
+    parser.add_argument("--out", default=None, help="把逐题原始产物落盘到该路径")
+    return parser
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if "-h" in args or "--help" in args or not args:
         print(USAGE)
         return 0
 
-    def option(name: str, cast: Any = int) -> Any:
-        if name not in args or args.index(name) + 1 >= len(args):
-            return None
-        return cast(args[args.index(name) + 1])
+    try:
+        options = _parser().parse_args(args)
+    except SystemExit as exc:
+        # argparse 在参数不认识 / 取不到值时直接 SystemExit。收回成返回值，
+        # 保住「main() 返回 int、调用方 raise SystemExit(main())」这条全仓一致的契约。
+        return exc.code if isinstance(exc.code, int) else 0
 
     # 与多跳那套同一个约定：跑一次要花钱，所以得**显式**点名 `--compare`，不给就跑说明书。
-    if "--compare" not in args:
+    if not options.compare:
         print(USAGE)
         return 0
 
     from .multihop import full_budget_summary
 
-    raw_out = option("--out", str)
-    top_k = option("--top-k") or 6
+    top_k = options.top_k or 6
     rows = run(
-        limit=option("--limit"),
+        limit=options.limit,
         top_k=top_k,
-        out=Path(raw_out) if raw_out else None,
-        verbose="--quiet" not in args,
+        out=Path(options.out) if options.out else None,
+        verbose=not options.quiet,
     )
     print()
     print(metrics(rows, top_k=top_k))

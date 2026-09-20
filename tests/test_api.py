@@ -1,4 +1,4 @@
-"""`api._stale_reason` 的离线用例 —— 只测「要不要重建索引」这一个判断。
+"""`api.stale_reason` 的离线用例 —— 只测「要不要重建索引」这一个判断。
 
 判错的两个方向代价不对称，所以两个方向都要钉：
 
@@ -23,7 +23,7 @@ from traffic_law_qa.kb.law_parser import LawLibrary
 
 
 class _假Store:
-    """只提供 `_stale_reason` 真正用到的两样东西；不连 Milvus。"""
+    """只提供 `stale_reason` 真正用到的两样东西；不连 Milvus。"""
 
     collection = "traffic_law"
 
@@ -74,7 +74,7 @@ def test_换向量模型会被判为过期(落盘产物, chunk_set):
     rows = len(chunk_set.chunks)
     stats = _快照(rows, "text-embedding-v4@https://dashscope.aliyuncs.com/compatible-mode/v1")
 
-    reason = api._stale_reason(_假Store(rows), stats, want_dense=True)
+    reason = api.stale_reason(_假Store(rows), stats, want_dense=True)
 
     assert reason is not None, "换了向量模型却没报过期，旧向量会被静默继续用"
     assert "text-embedding-v4" in reason, "原因里要写清楚是哪个旧模型，否则看不懂为什么要重建"
@@ -85,4 +85,4 @@ def test_向量模型一致时不重建(落盘产物, chunk_set):
     rows = len(chunk_set.chunks)
     stats = _快照(rows, EmbeddingClient().model_label)
 
-    assert api._stale_reason(_假Store(rows), stats, want_dense=True) is None
+    assert api.stale_reason(_假Store(rows), stats, want_dense=True) is None

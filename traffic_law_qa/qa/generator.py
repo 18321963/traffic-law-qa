@@ -54,11 +54,22 @@ class AnswerGenerator:
     input_desc = "Question + RetrievalResult"
     output_desc = "Answer"
 
-    def __init__(self, cfg: config.LLMConfig | None = None, *, retries: int = 2, show_top: int = 0) -> None:
+    def __init__(
+        self,
+        cfg: config.LLMConfig | None = None,
+        *,
+        retries: int = 2,
+        show_top: int = 0,
+        client: Any = None,
+    ) -> None:
         self.cfg = cfg or config.llm_config()
         self.retries = retries
         self.show_top = show_top  # 0 表示全部依据都给 LLM
-        self._client = None
+        # `client` 是**构造期注入点**（测试要塞替身），与「构造之后谁能看见」是两件事：
+        # 属性仍叫 `_client`、仍是私有的。公开一个懒建的缓存位等于邀请调用方在构造之后
+        # 改它 —— 这条是有前科的，见 `qa/rag.py` 开头 `_generator` 那段。
+        # 不传（None）就与没有这个参数逐位相同：首次调用时按 cfg 懒建。
+        self._client = client
 
     @property
     def available(self) -> bool:

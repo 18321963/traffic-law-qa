@@ -24,7 +24,10 @@ from dataclasses import dataclass
 from . import config
 from .contracts import Answer, Question, RetrievalResult
 
-__all__ = ["qa", "QaError", "ReadyState", "ensure_ready", "render", "MODE_ASK", "MODE_SEARCH"]
+# `stale_reason` 公开、但**不是给用户的**（用户面是 qa / render / ensure_ready）。
+# 公开是因为它有测试单独调用 —— 同 `agent/graph.py` 里 `route_after_agent` 公开、
+# `_route_after_classify` 私有：加 `_` 的意思是「只有本模块用，随便改」，它不是。
+__all__ = ["qa", "QaError", "ReadyState", "ensure_ready", "render", "stale_reason", "MODE_ASK", "MODE_SEARCH"]
 
 MODE_ASK = "ask"
 MODE_SEARCH = "search"
@@ -77,7 +80,7 @@ def ensure_ready(*, with_vector: bool = True, rebuild: bool = False) -> ReadySta
         with_vector or bool(stats is not None and stats.vector_enabled)
     )
 
-    reason = "指定了 rebuild=True" if rebuild else _stale_reason(store, stats, want_dense=build_dense)
+    reason = "指定了 rebuild=True" if rebuild else stale_reason(store, stats, want_dense=build_dense)
     if reason is not None:
         print(f"[qa] 索引需要重建（{reason}），开始建库；首次约 30~60 秒…")
         from .pipeline import RagPipeline
@@ -114,8 +117,11 @@ def _ping(store) -> str:
         ) from None
 
 
-def _stale_reason(store, stats, *, want_dense: bool) -> str | None:
+def stale_reason(store, stats, *, want_dense: bool) -> str | None:
     """比对 docx / 本地产物 / Milvus 集合；返回需要重建的原因，None 表示可直接复用。
+
+    判错两个方向的代价不对称：漏判 = 旧向量被静默继续用、召回悄悄变差（不报错、
+    不失败，只是变差）；误判 = 每问一句都先全库重建。所以两个方向各有测试分别钉着。
 
     want_dense：本次是否打算建稠密向量（由 ensure_ready 的 build_dense 传入）。
     只在「该有稠密却没有」时算过期；反过来（索引有稠密、本次只查 BM25）不算 ——
