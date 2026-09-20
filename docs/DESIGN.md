@@ -5,6 +5,39 @@
 >
 > 文中「第 N 节」指的都是本文档自己的章节。
 
+## 目录
+
+- [总览](#总览)
+- [技术栈](#技术栈)
+- [1. 管道分层（每层一个类，输入输出固定）](#1-管道分层每层一个类输入输出固定)
+- [2. 目录结构](#2-目录结构)
+- [3. 快速开始](#3-快速开始)
+- [4. 一键使用（一个接口）](#4-一键使用一个接口)
+- [5. 检索设计（决定效果的五件事）](#5-检索设计决定效果的五件事)
+- [6. 离线评测](#6-离线评测)
+- [7. 设计取舍](#7-设计取舍)
+- [8. 工程化：打包、测试、HTTP 服务](#8-工程化打包测试http-服务)
+  - [打包](#打包)
+  - [测试](#测试)
+  - [HTTP 服务](#http-服务)
+  - [Docker](#docker)
+- [9. Agentic RAG（阶段二）](#9-agentic-rag阶段二)
+  - [图](#图)
+  - [两个工具](#两个工具)
+  - [评测：两条臂，测的不是同一件事](#评测两条臂测的不是同一件事)
+  - [单跳题上的 rag vs agent：加了多少，又花了多少](#单跳题上的-rag-vs-agent加了多少又花了多少)
+  - [跨法多跳：63 道新题，gold 是模型给的](#跨法多跳63-道新题gold-是模型给的)
+  - [跨法多跳上的 rag vs agent：增益全部来自「多查一轮」](#跨法多跳上的-rag-vs-agent增益全部来自多查一轮)
+  - [已知限制](#已知限制)
+  - [一个值得记的坑](#一个值得记的坑)
+- [10. 待办](#10-待办)
+  - [评测](#评测)
+  - [架构](#架构)
+  - [还没动的大件](#还没动的大件)
+  - [已经从 README 挪过来、且已经做完的](#已经从-readme-挪过来且已经做完的)
+
+## 总览
+
 面向驾驶员 / 驾校学员 / 交管客服的交通法规问答。**RAG 只是管道里的一个工具**，
 交付物是完整管道：`docx → 结构层 → 检索层 → 索引 → 检索工具 → 生成`。
 
@@ -25,10 +58,10 @@
 
 | 题集 | 题数 | gold 是什么 | 测什么 | 命令 |
 |---|---|---|---|---|
-| 既有域内题 | 82 | 单条法条 | **检索**：hit@k / MRR | `python -m traffic_law_rag.eval` |
-| 点名桶（题面自带条号或法名） | 112 | 单条法条 | **规则取条**能否唯一定位 | `python -m traffic_law_rag.eval --reference` |
-| 单跳题 · 两臂并排（同第 1 行那 82 道） | 82 | 单条法条 | agent 值不值：同预算比 hit@k、全预算看轮数 | `python -m traffic_law_rag.eval.singlehop --compare` |
-| 跨法多跳 | 63 | **两部法规各一条** | agent 与 rag 的**跨法**对照 | `python -m traffic_law_rag.eval.multihop --check`（护栏，全离线）<br>`python -m traffic_law_rag.eval.multihop --compare`（对照，花钱） |
+| 既有域内题 | 82 | 单条法条 | **检索**：hit@k / MRR | `python -m traffic_law_qa.eval` |
+| 点名桶（题面自带条号或法名） | 112 | 单条法条 | **规则取条**能否唯一定位 | `python -m traffic_law_qa.eval --reference` |
+| 单跳题 · 两臂并排（同第 1 行那 82 道） | 82 | 单条法条 | agent 值不值：同预算比 hit@k、全预算看轮数 | `python -m traffic_law_qa.eval.singlehop --compare` |
+| 跨法多跳 | 63 | **两部法规各一条** | agent 与 rag 的**跨法**对照 | `python -m traffic_law_qa.eval.multihop --check`（护栏，全离线）<br>`python -m traffic_law_qa.eval.multihop --compare`（对照，花钱） |
 
 前两行出自同一个文件 `data/eval_corpus.json`（475 条 = **239 道题面**，每道题存了两遍），
 按「有无 gold」「题面是否自带定位信息」切成三份：82 道留下当检索评测集，112 道因题面自带
@@ -49,7 +82,7 @@
 | 向量库 | Milvus **2.6** standalone —— etcd + MinIO + Milvus 三容器，docker compose 起 |
 | 中文分词 | Milvus **服务端**内置 jieba analyzer（`MILVUS_ANALYZER`），**本地不装 jieba** |
 | BM25 | Milvus 服务端 `FunctionType.BM25` + `RRFRanker` 融合，**本地不装 rank_bm25** |
-| 服务层 | FastAPI + uvicorn，单文件 [server.py](../traffic_law_rag/server.py)，`/qa/stream` 走 SSE |
+| 服务层 | FastAPI + uvicorn，单文件 [server.py](../traffic_law_qa/server.py)，`/qa/stream` 走 SSE |
 | 部署 | 单镜像 Dockerfile + compose，容器内跑 uvicorn（见第 8 节） |
 
 **模型**（外部 HTTP API，全部走 OpenAI 兼容协议）
@@ -82,18 +115,18 @@
 **几条定调的技术选择**（取舍理由见第 7 节）：
 
 - **不用 LangChain 搭 RAG。** 七层管道是手写的，每层一个类、输入输出固定。LangGraph 只用在
-  agent 那一层的状态机上，**不用它的 LLM 抽象层** —— [agent/graph.py](../traffic_law_rag/agent/graph.py)
+  agent 那一层的状态机上，**不用它的 LLM 抽象层** —— [agent/graph.py](../traffic_law_qa/agent/graph.py)
   直接走 `openai` SDK，换来的是 state 里的 `messages` 就是 OpenAI 线上格式的 `list[dict]`，
   `json.dumps` 直接可过，不需要 `add_messages` 那层会改变消息形态的转换。
   代码里**一个 `langchain` 的 import 都没有**（只有 `from langgraph.graph import StateGraph`）；
   `[agent]` 组里的 `langchain-core` / `langchain-openai` 是 langgraph 拖进来的传递依赖，
   单独钉住是为了挡住它们把 `openai` 从 3.x 降级 —— 详见 `pyproject.toml` 的注释。
 - **docx 解析不引 python-docx。** 标准库 `zipfile` + `ElementTree` 直读，精度最高、依赖最轻。
-- **契约单一真源。** [contracts.py](../traffic_law_rag/contracts.py) 管住所有磁盘 JSON 格式，
+- **契约单一真源。** [contracts.py](../traffic_law_qa/contracts.py) 管住所有磁盘 JSON 格式，
   改格式只动这一个文件。
 - **边界靠 AST 钉住，不靠自觉。** `HybridRetriever` / `AnswerGenerator` / `QueryRewriter` 只准门面与
   定义处（生成器多一个自己造它的 `pipeline.py`）import、`agent/tools.py` 不准依赖 langgraph、
-  `import traffic_law_rag` 不准拉 langgraph —— 每条都有测试守着。
+  `import traffic_law_qa` 不准拉 langgraph —— 每条都有测试守着。
 
 ## 1. 管道分层（每层一个类，输入输出固定）
 
@@ -115,10 +148,10 @@
 索引的存储侧（集合 schema / BM25 函数 / `hybrid_search`）在 `kb/milvus_store.py`，
 它不是一层，是 `index` 与 `retrieve` 共用的底座。
 
-层间契约全部定义在 `traffic_law_rag/contracts.py`（含各对象的 JSON 读写），
-**磁盘格式变更只需改这一个文件**。查看层表：`python -m traffic_law_rag.pipeline layers`。
+层间契约全部定义在 `traffic_law_qa/contracts.py`（含各对象的 JSON 读写），
+**磁盘格式变更只需改这一个文件**。查看层表：`python -m traffic_law_qa.pipeline layers`。
 
-七层之上只开一个口子：`from traffic_law_rag import qa`，一次调用拿到结果（见第 4 节）。
+七层之上只开一个口子：`from traffic_law_qa import qa`，一次调用拿到结果（见第 4 节）。
 
 ## 2. 目录结构
 
@@ -127,12 +160,16 @@
 ```
 docker-compose.yml      # Milvus Standalone（etcd + MinIO + Milvus）+ 无状态的应用容器
 Dockerfile              # 应用镜像；.dockerignore 挡住密钥与 162M 的 volumes/
-pyproject.toml          # 打包与依赖，pip install -e ".[all]" 一次装齐
+pyproject.toml          # 打包与依赖（唯一真源），pip install -e ".[all]" 一次装齐
+requirements.txt        # 只镜像基础依赖，给「不想装包、只想装依赖」的场景
 
 data/
 ├── eval_corpus.json    # 评测语料（475 条 instruction/output，用前必须先筛，见第 6 节）
 ├── eval_multihop.json  # 跨法多跳题集（63 道，生成产物，见第 9 节）
 └── traces/             # --trace / --compare 落盘的轨迹（gitignore：跑出来的，可重跑）
+
+docs/
+└── DESIGN.md           # 就是这份文档
 
 examples/
 └── quickstart.py       # 4 个典型问题跑一遍：问题 → 命中条号 → 答案要点
@@ -141,13 +178,14 @@ tests/                  # 离线测试：不连 Milvus、不发网络请求（�
 
 volumes/                # Milvus 数据卷（docker compose 生成，162M，gitignore）
 
-traffic_law_rag/
+traffic_law_qa/
 ├── api.py                 # 对外唯一入口：qa()（确保索引就绪 + 检索 + 生成）
-├── __main__.py            # python -m traffic_law_rag "问题"：命令行版的一次 qa() 调用
+├── __main__.py            # python -m traffic_law_qa "问题"：命令行版的一次 qa() 调用
 ├── server.py              # 单文件 HTTP 服务：/qa、/qa/stream（SSE）、/health（见第 8 节）
 ├── pipeline.py            # 编排 + CLI
 ├── config.py              # 目录布局 + 模型端点 + Milvus + 检索参数（全部走环境变量）
 ├── contracts.py           # 层间数据契约（唯一真源）
+├── obs.py                 # 耗时观测：Tracer 是空实现，Recorder 才记账（见第 9 节 --timing）
 │
 ├── kb/                    # 建库：docx 进，Milvus 集合出。只在 pipeline build 时跑
 │   ├── docx_reader.py     #   read    层：标准库 zipfile + ElementTree 直读 docx
@@ -163,14 +201,23 @@ traffic_law_rag/
 │   └── rag.py             #   管道级门面：LegalRAG（search / ask / expand / stats，不含建库）
 │
 ├── agent/                 # Agentic RAG（需 langgraph，见第 9 节）
-│   ├── graph.py           #   图、节点、AgentRunner、ToolCallingLLM
+│   ├── graph.py           #   状态机装配（6 节点 + 4 路由）+ 门面 AgentRunner
+│   ├── state.py           #   AgentState：图里流转的全部字段（唯一真源）
+│   ├── nodes.py           #   规划轮 / 工具轮 / 收尾轮 + TOOLS
+│   ├── reflect.py         #   审核轮（**不绑工具**，只答两个判断题）
+│   ├── intent.py          #   意图分类 + 条文定位那条路的两个节点
+│   ├── prompts.py         #   两份系统提示词（规划轮、审核轮）
+│   ├── llm.py             #   ToolCallingLLM（**不依赖** langgraph）
 │   ├── tools.py           #   两个工具：search_law / get_article（**不依赖** langgraph）
-│   └── __main__.py        #   python -m traffic_law_rag.agent "问题"
+│   ├── trace.py           #   两个渲染器：决策链、耗时表
+│   ├── cli.py             #   python -m traffic_law_qa.agent "问题"
+│   └── __main__.py        #   转发到 cli.main
 │
 └── eval/                  # 离线评测：题集 A/B 见第 6 节，题集 C 见第 9 节
     ├── harness.py         #   题集 A/B：hit@k / MRR，外加「规则取条」探针臂
+    ├── singlehop.py       #   同题集上 rag 与 agent 并排对照（--compare）
     ├── multihop.py        #   题集 C：跨法多跳的生成器 / 护栏 / --check / --compare
-    └── __main__.py        #   python -m traffic_law_rag.eval [--reference]
+    └── __main__.py        #   python -m traffic_law_qa.eval [--reference]
 
 法规知识库/
 ├── pdf/                # 上游原始素材（下载件）。**不属于管道** —— 管道只读 docx，
@@ -185,9 +232,9 @@ traffic_law_rag/
 进版本管理的是 **docx + text + parsed + 两份题集**；`chunks/`、`index/`、`traces/`、`pdf/`、
 `volumes/` 五处被 gitignore —— 前两个能重建，后三个是跑出来的或可重新下载的。
 
-`traffic_law_rag/` 下四个子包的 `__init__.py` **一律只写文档字符串、不做 re-export**。
+`traffic_law_qa/` 下四个子包的 `__init__.py` **一律只写文档字符串、不做 re-export**。
 理由有两条，都不是洁癖：一是 `kb/` 一导出就会让「只想用切块器」的调用方连带拖上 pymilvus；
-二是 `agent/` 一导出就会把 langgraph 拉进 `import traffic_law_rag`（有一条测试专门钉着这件事）。
+二是 `agent/` 一导出就会把 langgraph 拉进 `import traffic_law_qa`（有一条测试专门钉着这件事）。
 **包路径即语义**，要用哪个就 import 哪个。
 
 ## 3. 快速开始
@@ -208,24 +255,24 @@ Copy-Item .env.example .env
 #   而集合是按 EMBED_MODEL 建的：换向量模型 = 全库重建 + 既有基线全部作废。
 
 # 4) 建库（重建 Milvus 集合；docx 的 sha1 未变则自动跳过解析）
-python -m traffic_law_rag.pipeline build
+python -m traffic_law_qa.pipeline build
 
 # 5) 问答 / 检索 / 状态
-python -m traffic_law_rag "醉驾怎么处罚"
-python -m traffic_law_rag "深圳 行人 在机动车道 罚款多少" --search --debug
-python -m traffic_law_rag.pipeline status
+python -m traffic_law_qa "醉驾怎么处罚"
+python -m traffic_law_qa "深圳 行人 在机动车道 罚款多少" --search --debug
+python -m traffic_law_qa.pipeline status
 ```
 
 `--debug` 会额外跑两次单通道检索（稠密、BM25 各一次），把每条法条是被哪一路捞到的、
 各自排名多少都打出来，调检索时很有用。
 
 > **`pipeline` 子命令只管建库和查状态，不再有 `ask` / `search`。** 这两个曾经存在，
-> 是 `qa()` 之前的遗留入口：能力是 `python -m traffic_law_rag` 的真子集（没有
+> 是 `qa()` 之前的遗留入口：能力是 `python -m traffic_law_qa` 的真子集（没有
 > `--search` / `--debug` / `--rebuild`），而且**少了 `ensure_ready()`** —— 索引缺失或过期时，
 > 它们不会自动重建，而是直接撞到 pymilvus 的堆栈上。统一入口做出来之后它们就是两条
 > 行为不一致的路，故删。现在问一句只有一条命令。
 
-> **`python -m traffic_law_rag.pipeline --help` 现在是安全的，但它曾经不是。**
+> **`python -m traffic_law_qa.pipeline --help` 现在是安全的，但它曾经不是。**
 > 命令推断写的是 `args[0] if args and not args[0].startswith("--") else "build"`，
 > `--help` 以 `--` 开头 → 落进 `else "build"` → **真的跑了一次完整重建**（42 秒、812 行
 > 重新 embedding）。想查用法，付出的是一次 embedding 的钱。现在 `--help` / `-h` / `help`
@@ -236,7 +283,7 @@ python -m traffic_law_rag.pipeline status
 也可以只用管道的一部分：
 
 ```python
-from traffic_law_rag.pipeline import RagPipeline
+from traffic_law_qa.pipeline import RagPipeline
 
 pipe = RagPipeline()
 pipe.build()                                   # 建库
@@ -250,14 +297,14 @@ print(answer.render())                         # 正文 + 参考文献 + 提示
 对外只开 `qa()` 一个口子：不必先手动 `build`，也不必自己装配检索器。
 
 ```python
-from traffic_law_rag import qa
+from traffic_law_qa import qa
 
 qa("醉驾怎么处罚")                        # 确保索引就绪 → 混合检索 → 生成（返回 Answer）
 qa("深圳 行人 在机动车道", mode="search")  # 只检索，不花 LLM 的钱（返回 RetrievalResult）
 qa("醉驾怎么处罚", debug=True)            # 附每条被向量 / BM25 各排到第几
 ```
 
-命令行等价于一次 `qa()` 调用：`python -m traffic_law_rag "醉驾怎么处罚"`，加 `--search --debug`
+命令行等价于一次 `qa()` 调用：`python -m traffic_law_qa "醉驾怎么处罚"`，加 `--search --debug`
 只看检索（不花 LLM 的钱，约 3 秒；再加 `--no-vector` 走纯 BM25 是毫秒级），
 加 `--rebuild` 强制重建。`python examples/quickstart.py` 则把 4 个典型问题依次跑一遍，
 打印「问题 → 命中条号 → 答案要点」，一条命令看完全貌。
@@ -285,8 +332,8 @@ qa("醉驾怎么处罚", debug=True)            # 附每条被向量 / BM25 各�
 ## 6. 离线评测
 
 ```powershell
-python -m traffic_law_rag.eval                 # 全量 82 题，约 15 秒
-python -m traffic_law_rag.eval --no-vector     # 只走 BM25，做 A/B 对照
+python -m traffic_law_qa.eval                 # 全量 82 题，约 15 秒
+python -m traffic_law_qa.eval --no-vector     # 只走 BM25，做 A/B 对照
 ```
 
 语料 `data/eval_corpus.json`（475 条 instruction/output）**不是评测集**，必须先筛 ——
@@ -344,7 +391,7 @@ MRR −0.022，只换回 hit@6 +2.3pp（那组数同属上面那行 ※ 的口�
 训练，加上之后 hit@1 +1.2pp、hit@6 +3.7pp、MRR +0.016，hit@3 持平（上表第 1 行
 vs 第 2 行）。前缀走 `EMBED_QUERY_PREFIX`、默认空，换回不吃前缀的 v4 时留空即可。
 **它只加在查询侧**：`search_text` 在 retriever 里还要以 `query_text=` 喂给 BM25
-（`qa/retriever.py:204`），把前缀拼在它身上会连关键词通道一起污染 —— 所以前缀加在
+（`qa/retriever.py:207`），把前缀拼在它身上会连关键词通道一起污染 —— 所以前缀加在
 `EmbeddingClient.embed_query` 内部，不在调用点。
 
 **稠密通道在这套题上不赚，换成本地之后干脆是倒亏**：本地混合比纯 BM25 少 2.5pp
@@ -410,11 +457,11 @@ gold 是从模型生成的 `output` 里解析出来的，不是人工标注，�
 | `pip install -e ".[dev]"` | 加 `pytest` + `ruff` |
 | `pip install -e ".[all]"` | 全部 |
 
-命令行入口：`tlr-qa "醉驾怎么处罚"`、`tlr-serve`。
+命令行入口：`tlq-qa "醉驾怎么处罚"`、`tlq-serve`。
 
 ### 测试
 
-358 个测试，**全部离线可跑**（不连 Milvus、不发网络请求），`pytest -q` 约 13 秒：
+364 个测试，**全部离线可跑**（不连 Milvus、不发网络请求），`pytest -q` 约 3 分钟：
 
 ```powershell
 python -m pytest -q
@@ -456,12 +503,12 @@ import 检索器、伸手取 `.store` / `.chunks` / `.rewriter`，自述是假�
 入参），写错就是一个必炸的 `TypeError`，而没有任何一条既有测试会红。
 
 Agent 那层另有两组：`test_agent_tools.py`（工具层，47 条，**不需要 langgraph**）与
-`test_agent.py`（图与分支，33 条，`importorskip("langgraph")`）。图那组的头条是
+`test_agent.py`（图与分支，55 条，`importorskip("langgraph")`）。图那组的头条是
 **提示词逐字一致**：Agent 路径与直接调 `generate(question, merge_retrievals(同一批 logs))`
 发给假 client 的 `messages` 必须完全相等 —— 这条一旦断了，Agent 就不再是「管道之上的一层」，
 而变成了一条悄悄改了提示词的平行实现。
 
-多跳题集那层是 `test_multihop.py`（32 条）。它的**负向用例比正向重要** —— 题集的 gold 是模型
+多跳题集那层是 `test_multihop.py`（33 条）。它的**负向用例比正向重要** —— 题集的 gold 是模型
 给的，护栏是它唯一的可信度来源，所以必须证明「gold 全在同一部法」「题面写了第X条」「题面写了
 法名简称」「gold 是立法依据条」都会被拒。其中一条专门钉住一个**差点写错的判据**：纯适用范围条
 的识别不能按「含『适用本条例』」来判 —— 那会误伤《交强险条例》第二条，而它是全库被当作 gold
@@ -475,8 +522,8 @@ Agent 那层另有两组：`test_agent_tools.py`（工具层，47 条，**不需
 单文件，把 `qa()` 包成 FastAPI：
 
 ```powershell
-uvicorn traffic_law_rag.server:app --port 8000
-# 或：tlr-serve --port 8000
+uvicorn traffic_law_qa.server:app --port 8000
+# 或：tlq-serve --port 8000
 
 curl localhost:8000/health
 curl -X POST localhost:8000/qa -H 'Content-Type: application/json' -d '{"question":"醉驾怎么处罚"}'
@@ -580,8 +627,8 @@ chunk 619 个 → 向量化 → 建出 619 行稠密+BM25 集合」。其中 par
 ## 9. Agentic RAG（阶段二）
 
 **不是替代，是在管道之上加的一层。** `qa(mode="ask")` 仍是默认路径且行为逐字节不变；
-Agent 是 `python -m traffic_law_rag.agent` 这条独立入口，装 `[agent]` 可选组才有。
-`import traffic_law_rag` 永远不触发 langgraph 导入（有测试钉住）。
+Agent 是 `python -m traffic_law_qa.agent` 这条独立入口，装 `[agent]` 可选组才有。
+`import traffic_law_qa` 永远不触发 langgraph 导入（有测试钉住）。
 
 ### 图
 
@@ -602,6 +649,13 @@ START → classify ─(条文定位)→ lookup_plan ─┐
 
 回边指向 `agent` 而不是 `classify`：意图只在入口定一次，第二轮再分类一遍纯属浪费，
 还可能分到不同意图导致循环抖动。
+
+**审核独立成节点，是这张图与标准 ReAct 最不一样的一处。** 标准 ReAct 让绑着工具的模型
+自己判断「够了没」：不产生 `tool_call` 就是停止信号。本图刻意不那么做 —— 工具就摆在手边时，
+模型有很强的调用倾向，**等于把停止设计成最不自然的那条路**。审核节点有两个别的节点给不了
+的性质：它没有可调用的东西（调用倾向无从产生），而且它是被直接问一个 yes/no（靠结构化输出
+表态，不用靠「什么都没做」来暗示）。循环的终止判断也天然落在这里：「够不够」「再检一次补不
+补得上」「还剩几轮」本来就是同一个决策的几半。
 
 **`reflect` 回边的条件是三个「与」**：证据不够、**缺口补得上**、还有预算。
 
@@ -653,12 +707,8 @@ START → classify ─(条文定位)→ lookup_plan ─┐
 > 第五十六条」会让人对到错的那一部上去。
 
 > **但 `refs` 的覆盖率只有 27/508（5.3%）** —— 508 条里只有 27 条写了「相关条」引用。
-> 更要紧的是分布：实测这 42 条引用边**全部落在同一部法规内部，跨法边 0 条**。跨法的引用
-> 只有 9 条，且一律是概括性转致（「依照《道路交通安全法》的规定处十五日以下拘留」）——
-> **只点名法规、不点名条号**。
->
 > 所以「跟随 refs 多跳」这条故事线是**能力有、触发面窄、而且只在法内**。如实记一笔。
-> 「跨**法规**多跳」因此没有机械 gold 源，只能从条文反向生成 —— 见下面第 9 节。
+> 那 42 条引用边的完整分布（跨法边 0 条）在下面「跨法多跳」那节，这里不重复。
 
 ### 评测：两条臂，测的不是同一件事
 
@@ -670,8 +720,8 @@ START → classify ─(条文定位)→ lookup_plan ─┐
 是下面"基线 hit@1"那一行的口径，两者不是同一件事。
 
 ```powershell
-python -m traffic_law_rag.eval --reference               # 探针臂全量
-python -m traffic_law_rag.eval --reference --no-compare  # 纯离线，不连 Milvus
+python -m traffic_law_qa.eval --reference               # 探针臂全量
+python -m traffic_law_qa.eval --reference --no-compare  # 纯离线，不连 Milvus
 ```
 
 | 臂 | 题集 | 结果 |
@@ -733,8 +783,8 @@ python -m traffic_law_rag.eval --reference --no-compare  # 纯离线，不连 Mi
 agent 侧跑完整的多轮循环。
 
 ```powershell
-python -m traffic_law_rag.eval.singlehop --compare --limit 5   # 先跑 5 道看链路
-python -m traffic_law_rag.eval.singlehop --compare             # 全量 82 道（调 LLM，花钱）
+python -m traffic_law_qa.eval.singlehop --compare --limit 5   # 先跑 5 道看链路
+python -m traffic_law_qa.eval.singlehop --compare             # 全量 82 道（调 LLM，花钱）
 ```
 
 **两条口径必须分开报**，混在一起就是拿"多打几枪"冒充"打得准"：
@@ -771,13 +821,31 @@ hit@1 高 3.7pp、MRR 高 0.021 —— 两样都只来自**同样的 3 道题**�
 > 不贵，也不赚。真正需要多轮的是下一节那种「一个答案横跨两部法」的题，
 > 但那一节的题集完全不同，**两边的数不可比**。
 
+#### 「花了多少」是怎么数出来的
+
+每次运行都会往 `Answer.notes` 里写一行 `Agent：N 轮 LLM 规划 / N 次检索 / N 次精确取条 /
+N 轮审核 / 证据 N 条`。**这三类计数刻意来自三个不同的源**，因为它们各自会被别的口径骗：
+
+- **规划轮数取 `usage` 的行数**（只有 `agent` 节点写它），**不是 `steps`**。`steps` 是**预算**，
+  规则取条也消耗一轮（那是有意的）；拿它当「LLM 规划了几轮」会虚报 —— 条文定位那条路
+  一次 LLM 都没调，却会报「1 轮规划」。
+- **检索/取条次数从助手消息里的 `tool_call` 名字数**，**不是 `search_log` 的行数**。
+  `get_article` 的产物与 `search_law` 同形状，但它一次检索都没做，embedding 与 BM25 都没碰。
+  用「1 次检索」解释一次零检索的运行，成本归因就错了。
+- **审核轮数取 `reflections` 的长度**，三者互不同源，各自准确。
+
+收尾原因也分三种，轨迹里必须分得开，否则「为什么 2 轮就停了」没法解释：**审核说够了** /
+**审核判定缺口在库外**（再检索也补不上，提前收尾）/ **预算耗尽**（强制作答）。判据要与
+`_route_after_reflect` 逐字同源 —— 光看 `steps >= max_steps` 不够，规则取条那条路根本不缺
+轮次，它是**按设计**一轮结束的。
+
 ### 跨法多跳：63 道新题，gold 是模型给的
 
 上面两条臂的 gold 都是**单条或同法内几条**，没有任何一题要求答案横跨两部法规。
 补这一臂时先撞上一件必须先说清的事：**跨法多跳没有机械 gold 源**。
 
 - 全库 27 条带 `refs`、共 42 条引用边，**100% 同法**，跨法边 **0 条**；
-- 跨法的引用只点名**法规**、不点名条号，形态一律是概括性转致
+- 跨法的引用**只有 9 条**，且只点名**法规**、不点名条号，形态一律是概括性转致
   （「依照《中华人民共和国道路交通安全法》的规定处十五日以下拘留」）——
   它给的是法规级关系，仍然产不出条级 gold；
 - 现语料按题面去掉重复的 239 道里，gold 有 ≥2 条的只有 **5 道**，**跨 ≥2 部法规的 0 道**
@@ -795,9 +863,9 @@ hit@1 高 3.7pp、MRR 高 0.021 —— 两样都只来自**同样的 3 道题**�
 | G5 | 立法依据条（「根据《X》，制定本条例」）不能当 gold —— 它不含任何实质规则 |
 
 ```powershell
-python -m traffic_law_rag.eval.multihop --check                 # 全离线复跑护栏
-python -m traffic_law_rag.eval.multihop --generate --target 100 # 花钱，产物进版本管理
-python -m traffic_law_rag.eval.multihop --compare --limit 100   # agent/rag 对照（= --trace + 汇总）
+python -m traffic_law_qa.eval.multihop --check                 # 全离线复跑护栏
+python -m traffic_law_qa.eval.multihop --generate --target 100 # 花钱，产物进版本管理
+python -m traffic_law_qa.eval.multihop --compare --limit 100   # agent/rag 对照（= --trace + 汇总）
 ```
 
 `--generate` 那次实测产出：**尝试 101 次 → 采用 100 道（失败 1 次）**，每题 gold 恰好跨 2 部法。
@@ -843,10 +911,10 @@ python -m traffic_law_rag.eval.multihop --compare --limit 100   # agent/rag 对�
    落在纯适用范围条上**（「……都应当遵守本法。」这类，只有管辖、没有规则），而同为第二条的
    《交强险条例》第二条是**投保义务**条款，按关键字拦会把它连同 18 条正当 gold 一起杀光。
 
-#### rag vs agent 对照：增益全部来自「多查一轮」，不是「查得更准」
+### 跨法多跳上的 rag vs agent：增益全部来自「多查一轮」
 
 ```powershell
-python -m traffic_law_rag.eval.multihop --compare --limit 63 --out data/traces/hop63.json
+python -m traffic_law_qa.eval.multihop --compare --limit 63 --out data/traces/hop63.json
 ```
 
 2026-09-19 实测（63 题 × 2 条 gold = 126 条）：
@@ -900,11 +968,37 @@ python -m traffic_law_rag.eval.multihop --compare --limit 63 --out data/traces/h
 
 ## 10. 待办
 
+### 评测
+
 - 评测集的 gold 噪声较大（从模型 output 解析），需人工校验一批或改为「从条文反向造题」
   —— **跨法多跳那 63 道已经改用了反向造题**（见 §9），但换掉的只是"从模型 output 里解析 gold"
   这一层噪声，"模型断言这条真的必要"这一层还在。单跳那 82 道本身**未改动**（只是把同题的
   两次生成合并了），这条待办对它仍然成立
 - 口语题评测集：这 82 道全是从法条原文生成的，测不出稠密通道的价值
 - 生成侧指标：引用命中率、答案正确率（要接 LLM 评判）
+
+### 架构
+
 - 多轮对话（`Question.history` 已预留）
 - Agentic RAG 的后续：`refs` 覆盖面上不去的话，多跳这条线就只是「能跑通」
+- langgraph 图结构感觉可以优化：现在能跑通，但节点与路由还有收紧的余地
+- 调整目录结构，分层封装 —— **注意这条与 §2 的现状有张力**：`kb/` `qa/` `eval/` `agent/`
+  现在是平的四个子包，「子包只按路径说话」那条规矩也是按平铺写的；单独把 `agent/` 套一层
+  会与其余三个不一致。要动就得四个一起动，否则是改现状不是改这条
+- 测试黑盒：现在大量测试直接戳内部函数（如 `_parse_reflection`），改成只打公开面
+  —— 这会牺牲一部分定位精度，换的是「重构不红」。值得做，但不是免费的
+
+### 还没动的大件
+
+- 微调 / RL
+- 生成侧换本地模型：现在一直换免费模型，麻烦且不好比对效果（向量侧已经是本地
+  `bge-large-zh-v1.5`，见 §6）
+- 一个「理论上能大幅提高跨法多跳」的设计：已成型，**还没测**
+
+### 已经从 README 挪过来、且已经做完的
+
+- README 太长太「AI」、不够清晰 → 已重写，162 行收到 97 行，删掉自证式的加粗与警告块
+- 行数虚高、注释过时误导 model → 已随 `agent/graph.py` 拆分重写：设计论证搬进本文档，
+  代码里只留「这行为什么这样」的一句话（见 §2 / §9）
+
+> 以上可以用 skillcreator、grillme 辅助。
