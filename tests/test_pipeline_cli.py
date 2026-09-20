@@ -1,6 +1,6 @@
 """pipeline 命令行的入口测试 —— 全部离线。
 
-存在的理由只有一个：`python -m traffic_law_rag.pipeline --help` 曾经不是「查用法」，
+存在的理由只有一个：`python -m traffic_law_qa.pipeline --help` 曾经不是「查用法」，
 而是**一次完整的重新切块 + 重新 embedding**。原因是命令推断写成
 `args[0] if args and not args[0].startswith("--") else "build"`，`--help` 以 `--` 开头，
 于是落进了 `else "build"`。查一次用法花掉一次 embedding 钱（约 42 秒、812 行）。
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from traffic_law_rag import pipeline
+from traffic_law_qa import pipeline
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def 禁止构造管道(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_帮助直接打印用法且不构造管道(argv, 禁止构造管道, capsys):
     assert pipeline.main(argv) == 0
     out = capsys.readouterr().out
-    assert "python -m traffic_law_rag.pipeline build" in out
+    assert "python -m traffic_law_qa.pipeline build" in out
     assert "layers | status" in out
 
 

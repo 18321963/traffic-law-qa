@@ -21,14 +21,14 @@ WORKDIR /app
 
 # 先拷依赖清单 + 源码再装。
 COPY pyproject.toml README.md ./
-COPY traffic_law_rag/ ./traffic_law_rag/
+COPY traffic_law_qa/ ./traffic_law_qa/
 # 只装 [api]：agent 组（LangGraph）服务层用不到，dev 组（pytest/ruff）更不该进生产镜像。
 # 不是 editable 安装 —— 装的是依赖，顺带把包本体也复制了一份进 site-packages。
 #
 # 那个 site-packages 副本是**不生效的**，实测确认过：`python -m` 会把 CWD（=WORKDIR=/app）
-# 放在 sys.path[0]，于是 /app/traffic_law_rag/ 盖过 site-packages，
+# 放在 sys.path[0]，于是 /app/traffic_law_qa/ 盖过 site-packages，
 # 真正加载的是这里 COPY 进来的源码。留一份死副本不优雅，但删掉源码目录反而是错的方向 ——
-# 你 exec 进容器改 /app/traffic_law_rag/*.py 会立即生效，便于现场排查。
+# 你 exec 进容器改 /app/traffic_law_qa/*.py 会立即生效，便于现场排查。
 # 唯一的硬约束：**改了代码必须重新 build**，镜像里没有指向宿主机的链路。
 RUN pip install --no-cache-dir ".[api]" \
  && rm -rf /app/build /app/*.egg-info
@@ -57,4 +57,4 @@ EXPOSE 8000
 
 # --host 0.0.0.0 是必须的：server 的默认值是 127.0.0.1（对本地裸跑是安全的默认），
 # 容器里保持默认的话，宿主机映射过来的端口连不上 —— 这是容器化最经典的坑。
-CMD ["python", "-m", "uvicorn", "traffic_law_rag.server:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "traffic_law_qa.server:app", "--host", "0.0.0.0", "--port", "8000"]

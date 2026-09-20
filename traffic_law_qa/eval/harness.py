@@ -1,15 +1,15 @@
 """离线检索评测：data/eval_corpus.json（指令语料）→ hit@1/@3/@6 + MRR。
 
-    python -m traffic_law_rag.eval                    # 跑全部可用评测题（82 道）
-    python -m traffic_law_rag.eval --limit 20         # 先跑 20 条看链路
-    python -m traffic_law_rag.eval --no-vector        # 只走 BM25，用来 A/B 对比混合检索
-    python -m traffic_law_rag.eval --show-misses 10   # 打印没命中的题，便于定位
-    python -m traffic_law_rag.eval --json             # 机器可读
+    python -m traffic_law_qa.eval                    # 跑全部可用评测题（82 道）
+    python -m traffic_law_qa.eval --limit 20         # 先跑 20 条看链路
+    python -m traffic_law_qa.eval --no-vector        # 只走 BM25，用来 A/B 对比混合检索
+    python -m traffic_law_qa.eval --show-misses 10   # 打印没命中的题，便于定位
+    python -m traffic_law_qa.eval --json             # 机器可读
 
 另一条臂（测「条文定位」而不是检索）：
 
-    python -m traffic_law_rag.eval --reference        # 题面含条号那批题 → 规则取条能否唯一定位
-    python -m traffic_law_rag.eval --reference --no-compare   # 连基线对照都不跑，纯离线
+    python -m traffic_law_qa.eval --reference        # 题面含条号那批题 → 规则取条能否唯一定位
+    python -m traffic_law_qa.eval --reference --no-compare   # 连基线对照都不跑，纯离线
 
 为什么需要第二条臂：构造评测题时会**剔除**题面自带条号或法名的题（查询里已经给了定位信息，检索必然命中），
 所以评测集那 82 道里含「第…条」的是 0 道 —— 检索指标在结构上永远衡量不到规则取条这条新路径。

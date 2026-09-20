@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from traffic_law_rag.kb.docx_reader import DocxReader
+from traffic_law_qa.kb.docx_reader import DocxReader
 
 # 真实知识库的段落规模（golden）。keep_empty=True 的数量另记，
 # 差值就是被丢弃的空段 —— 空段计数突变通常意味着排版或解析器行为变了。
@@ -102,7 +102,7 @@ def test_以条号开头的段落数等于该法条数(docx_files):
     这是在 docx 层对上游解析结果做的一次独立交叉验证 —— 不经过 law_parser。
     """
     from tests.conftest import EXPECTED_ARTICLES_BY_LAW
-    from traffic_law_rag.kb.law_parser import LAW_ID_REGISTRY, RE_ARTICLE
+    from traffic_law_qa.kb.law_parser import LAW_ID_REGISTRY, RE_ARTICLE
 
     got = {}
     for path in docx_files:

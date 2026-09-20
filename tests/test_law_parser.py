@@ -11,9 +11,9 @@ from __future__ import annotations
 import pytest
 
 from tests.conftest import EXPECTED_ARTICLE_COUNT, EXPECTED_ARTICLES_BY_LAW, EXPECTED_LAW_COUNT
-from traffic_law_rag.contracts import Paragraph
-from traffic_law_rag.kb.docx_reader import DocxReader
-from traffic_law_rag.kb.law_parser import (
+from traffic_law_qa.contracts import Paragraph
+from traffic_law_qa.kb.docx_reader import DocxReader
+from traffic_law_qa.kb.law_parser import (
     LAW_ID_REGISTRY,
     LawLibrary,
     LawParser,
@@ -199,7 +199,7 @@ def test_refs_排除自引用(laws):
 
 
 def test_refs_是该条正文里真实出现过的条号(laws):
-    from traffic_law_rag.kb.law_parser import RE_ARTICLE_REF
+    from traffic_law_qa.kb.law_parser import RE_ARTICLE_REF
 
     for law in laws:
         for article in law.articles:

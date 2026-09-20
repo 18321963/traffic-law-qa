@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import pytest
 
-from traffic_law_rag import api, config
-from traffic_law_rag.contracts import IndexStats
-from traffic_law_rag.kb.indexer import EmbeddingClient
-from traffic_law_rag.kb.law_parser import LawLibrary
+from traffic_law_qa import api, config
+from traffic_law_qa.contracts import IndexStats
+from traffic_law_qa.kb.indexer import EmbeddingClient
+from traffic_law_qa.kb.law_parser import LawLibrary
 
 
 class _假Store:

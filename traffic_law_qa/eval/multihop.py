@@ -25,10 +25,10 @@
    等于把题集调成「rag 必输」，agent/rag 对比就失去意义。`--check` 会打印每条 gold
    在基线 top-k 里的位置分布，供判断，但不据此增删。
 
-    python -m traffic_law_rag.eval.multihop --check                 # 全离线，复跑护栏
-    python -m traffic_law_rag.eval.multihop --generate --target 100 # 花钱调 LLM
-    python -m traffic_law_rag.eval.multihop --trace --limit 10 --out data/traces/hop10.json
-    python -m traffic_law_rag.eval.multihop --compare --limit 100 --out data/traces/hop100.json
+    python -m traffic_law_qa.eval.multihop --check                 # 全离线，复跑护栏
+    python -m traffic_law_qa.eval.multihop --generate --target 100 # 花钱调 LLM
+    python -m traffic_law_qa.eval.multihop --trace --limit 10 --out data/traces/hop10.json
+    python -m traffic_law_qa.eval.multihop --compare --limit 100 --out data/traces/hop100.json
                                                                     # = --trace + 全预算汇总
 
 `data/traces/` 被 gitignore —— 轨迹是跑出来的，不是手工维护的，且随时能重跑。
@@ -44,7 +44,9 @@ from pathlib import Path
 from typing import Any
 
 from .. import config
+from ..agent.llm import ToolCallingLLM
 from ..agent.tools import build_article_index, parse_article_no, resolve_law_id
+from ..agent.trace import render_trace
 from ..contracts import ParentChunk
 from .harness import RE_ARTICLE, RE_LAW
 
@@ -572,8 +574,6 @@ def generate(
     同一个锚点出过的题已经进了 `seed`，再挖一遍只会得到换了说法的同 gold 同考点。
     每接受一道就落一次盘，所以中途断了重跑时把 `out` 读回来当 `seed` 即可接着补。
     """
-    from ..agent.graph import ToolCallingLLM  # 延迟导入：agent 层拉 langgraph，不能进包导入路径
-
     library = library or Library.load()
     llm = ToolCallingLLM()
     if not llm.available:
@@ -681,7 +681,7 @@ def trace(
     两条臂怎么跑、行里放什么，只此一处实现，改一次两边同时生效。
     case 只要求有 `question` / `gold_ids` / `gold_citations` 三个字段。
     """
-    from ..agent.graph import AgentRunner, render_trace
+    from ..agent.graph import AgentRunner  # 延迟导入：只有 graph 拉 langgraph
     from ..api import qa
     from ..contracts import Answer, RetrievalResult
 

@@ -15,7 +15,7 @@ import json
 
 import pytest
 
-from traffic_law_rag.agent.tools import (
+from traffic_law_qa.agent.tools import (
     GET_ARTICLE_TOOL,
     _snippet,
     build_article_index,
@@ -25,7 +25,7 @@ from traffic_law_rag.agent.tools import (
     parse_article_no,
     render_tool_result,
 )
-from traffic_law_rag.contracts import ParentChunk
+from traffic_law_qa.contracts import ParentChunk
 
 
 @pytest.fixture(scope="module")
@@ -336,7 +336,7 @@ def test_snippet_uses_the_expanded_query_not_the_raw_one(parents):
     返回 None，它就原样返回 —— 不报错、不失败，只是窗口悄悄退回错误位置。
     现在换算由 `HybridRetriever.expand` 承担，**用真改写器**跑真语料。
     """
-    from traffic_law_rag.qa.retriever import HybridRetriever
+    from traffic_law_qa.qa.retriever import HybridRetriever
 
     retriever = HybridRetriever(store=object(), parents=parents, chunks={})
     raw = "深圳开车玩手机，罚多少、扣几分"

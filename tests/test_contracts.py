@@ -17,7 +17,7 @@ import json
 
 import pytest
 
-from traffic_law_rag.contracts import (
+from traffic_law_qa.contracts import (
     Answer,
     Article,
     Chunk,

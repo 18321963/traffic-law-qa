@@ -1,6 +1,6 @@
 """交通法规 RAG 管道的端到端编排与命令行入口。
 
-各层输入输出（也是 `python -m traffic_law_rag.pipeline layers` 打印的内容）：
+各层输入输出（也是 `python -m traffic_law_qa.pipeline layers` 打印的内容）：
 
 | 层       | 类                 | 输入                            | 输出                        |
 |----------|--------------------|---------------------------------|-----------------------------|
@@ -12,10 +12,10 @@
 | retrieve | `HybridRetriever`  | `Query`                         | `RetrievalResult`           |
 | generate | `AnswerGenerator`  | `Question` + `RetrievalResult`  | `Answer`                    |
 
-命令行用法（只管知识库本身；**问答统一走 `python -m traffic_law_rag "问题"`** ——
+命令行用法（只管知识库本身；**问答统一走 `python -m traffic_law_qa "问题"`** ——
 那条路带一致性检查与自动重建，这里的 build/status/layers 都只管建库和查状态）：
-    python -m traffic_law_rag.pipeline build  [--force] [--no-vector]
-    python -m traffic_law_rag.pipeline layers | status
+    python -m traffic_law_qa.pipeline build  [--force] [--no-vector]
+    python -m traffic_law_qa.pipeline layers | status
 """
 
 from __future__ import annotations
@@ -200,7 +200,7 @@ class RagPipeline:
             for note in self.indexer.load_notes():
                 lines.append(f"  提示：{note}")
         else:
-            lines.append("索引：尚未构建（docker compose up -d 后运行 python -m traffic_law_rag.pipeline build）")
+            lines.append("索引：尚未构建（docker compose up -d 后运行 python -m traffic_law_qa.pipeline build）")
 
         milvus = config.milvus_config()
         try:

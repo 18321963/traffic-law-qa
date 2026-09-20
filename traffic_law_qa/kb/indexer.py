@@ -223,7 +223,7 @@ class Indexer:
 
 # ------------------------------------------------------------------ 调试入口
 def main(argv: list[str] | None = None) -> int:
-    """python -m traffic_law_rag.kb.indexer [--no-vector] [--query 词]"""
+    """python -m traffic_law_qa.kb.indexer [--no-vector] [--query 词]"""
     import sys
 
     from .chunker import ChunkStage

@@ -1,7 +1,7 @@
 """题集 A（82 道单跳域内题）上的 rag vs agent 对照。
 
-    python -m traffic_law_rag.eval.singlehop --compare --limit 5 --out data/traces/single5.json
-    python -m traffic_law_rag.eval.singlehop --compare --out data/traces/single82.json
+    python -m traffic_law_qa.eval.singlehop --compare --limit 5 --out data/traces/single5.json
+    python -m traffic_law_qa.eval.singlehop --compare --out data/traces/single82.json
 
 **与多跳那套正相反**：题集 A 的 gold 只有一条法条，问题本身**不需要多跳**
 （题面既不含条号也不含法名，构造时就滤掉了）。所以这里问的是

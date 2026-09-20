@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "traffic-law-rag"
+name = "traffic-law-qa"
 version = "0.1.0"
 description = "交通法规问答 Agent：分层 RAG 管道 + Agentic RAG（Milvus 混合检索 / 强制引用式生成）"
 readme = "README.md"
@@ -43,18 +43,18 @@ dev = [
     "ruff>=0.6",
 ]
 all = [
-    "traffic-law-rag[agent,api,dev]",
+    "traffic-law-qa[agent,api,dev]",
 ]
 
 [project.scripts]
-tlr-qa = "traffic_law_rag.__main__:main"
-tlr-serve = "traffic_law_rag.server:main"
+tlq-qa = "traffic_law_qa.__main__:main"
+tlq-serve = "traffic_law_qa.server:main"
 
 [project.urls]
-Homepage = "https://github.com/18321963/traffic-law-rag"
+Homepage = "https://github.com/18321963/traffic-law-qa"
 
 [tool.setuptools.packages.find]
-include = ["traffic_law_rag*"]
+include = ["traffic_law_qa*"]
 
 # ------------------------------------------------------------------ pytest
 [tool.pytest.ini_options]

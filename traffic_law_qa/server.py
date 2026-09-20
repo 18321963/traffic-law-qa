@@ -1,7 +1,7 @@
 """单文件 HTTP 服务：把 `qa()` 包成 FastAPI，含 SSE 流式。
 
-    uvicorn traffic_law_rag.server:app --port 8000
-    # 或安装后：tlr-serve
+    uvicorn traffic_law_qa.server:app --port 8000
+    # 或安装后：tlq-serve
 
     curl -X POST localhost:8000/qa -H 'Content-Type: application/json' \\
          -d '{"question":"醉驾怎么处罚"}'
@@ -212,7 +212,7 @@ def _sse(event: str, payload: dict) -> str:
 
 # ------------------------------------------------------------------ 入口
 def main(argv: list[str] | None = None) -> int:
-    """tlr-serve [--host H] [--port P]"""
+    """tlq-serve [--host H] [--port P]"""
     import sys
 
     import uvicorn

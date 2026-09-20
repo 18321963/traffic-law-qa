@@ -74,11 +74,11 @@ services:
   # 应用层（无状态）。Dockerfile 见同目录，数据全在 Milvus 那边。
   # 单独起应用：docker compose up -d --build app
   app:
-    container_name: tlr-app
+    container_name: tlq-app
     build:
       context: .
       dockerfile: Dockerfile
-    image: traffic-law-rag:0.1.0
+    image: traffic-law-qa:0.1.0
     env_file:
       # required: false —— 没有 .env 也让它起来。刚 clone 下来还没 Copy-Item
       # .env.example .env 的人（以及只想看一眼这项目的人）否则会直接撞上
