@@ -21,22 +21,37 @@
 2. **第三行要带上 LLM。** agent 那一臂的检索词是模型自己写的，换个模型这格就会动；表头默认的 `qwen-max` 跑不出同一组数。
 3. **第四行两组数要一起读。** 全预算 agent 68/126 比 rag 的 59/126 高 7pp，但那是用 1.7 次检索换来的；两边都只看第一次检索，完全一样。也就是说在这道题上 agent 没有查得更准，多中的 9 条全部来自「愿意再查一次」。还有一个数没进表：agent 查到 68 条，最终只引用了 61 条。
 
-364 条测试全部离线（不连 Milvus、不发网络请求），其中一批钉住知识库的规模（6 部 / 508 条 / 812 块 / 均长 78.8 字）。解析或切块改坏了，测试先红，而不是等评测数字悄悄掉下来。
+394 条测试全部离线（不连 Milvus、不发网络请求），其中一批钉住知识库的规模（6 部 / 508 条 / 812 块 / 均长 78.8 字）。解析或切块改坏了，测试先红，而不是等评测数字悄悄掉下来。
 
 ## 跑起来
 
+一条命令，服务连 Milvus 一起进容器：
+
 ```powershell
-pip install -e ".[all]"                        # 依赖
-docker compose up -d --wait standalone         # 起 Milvus，首启 60~90 秒
-ollama pull dengcao/bge-large-zh-v1.5          # 向量模型，拉一次之后检索不出网
-Copy-Item .env.example .env                    # 填 LLM_API_KEY；向量那几行已指向本地 ollama
-python -m traffic_law_qa.pipeline build       # 建库，docx 的 sha1 没变就跳过解析
-python -m traffic_law_qa "醉驾怎么处罚"        # 提问
+Copy-Item .env.example .env     # 填 LLM_API_KEY；向量那几行已指向本地 ollama
+docker compose up -d --build    # 起 Milvus + 服务，首次约 2 分钟
+docker compose ps               # 等四个容器都 healthy 再访问
+curl.exe localhost:8000/health  # 必须带 .exe：PowerShell 的 curl 是 IWR 别名，不认这个地址
 ```
 
-没有 key 也能跑，检索会退化为一套可用的 BM25 关键词方案。
+`--build` 不能省。镜像把源码烤进去了，不带它 compose 会直接复用旧镜像 —— 改了代码却敲 `docker compose up -d`，跑的还是上一版，不报任何错。
 
-装包时带了两个短命令：`tlq-qa "醉驾怎么处罚"`（等价最后一步）和 `tlq-serve`（起 HTTP 服务）。`docker compose up -d --build` 可以把服务连 Milvus 一起进容器（8000 端口）——compose 已经覆盖了两处必须改的 `.env`：Milvus 用服务名 `standalone`，embedding 端点用 `host.docker.internal:11434`。后一处配错不报错：检索会静默退回纯 BM25，服务照常起来，`/health` 照常报「稠密+BM25」，只有启动日志里「稠密通道预热」那行会变成「未执行」。
+想在本机裸跑（改代码即时生效，且能用上 Agent 那条路 —— 容器里的服务只跑线性管道）：
+
+```powershell
+pip install -e ".[all]"                        # 依赖
+docker compose up -d --wait standalone         # 只起 Milvus，首启 60~90 秒
+ollama pull dengcao/bge-large-zh-v1.5          # 向量模型，拉一次之后检索不出网
+python -m traffic_law_qa.pipeline build        # 建库，docx 的 sha1 没变就跳过解析
+python -m traffic_law_qa "醉驾怎么处罚"         # 提问
+```
+
+两条路都不强依赖 key：没有 LLM key 时生成层拒答，检索退化为一套可用的 BM25 关键词方案。装包时带了两个短命令：`tlq-qa "醉驾怎么处罚"`（等价裸跑的最后一步）和 `tlq-serve`（起 HTTP 服务）。
+
+**两个不报错但会咬人的坑**，先记着：
+
+- **向量端点连不上，不报错。** 两条路默认都走本地 Ollama（`.env` 指着 `localhost:11434`，compose 在容器里覆盖成 `host.docker.internal:11434`）。没装或没 pull 到都不报错，但表现分两种：**索引还没建**时编码失败、集合退回纯 BM25，`/health` 的 `channels` 如实报「纯 BM25」；**索引已经建好**（构建机上的 `chunks/`、`index/` 随镜像带了进去）时集合是稠密的，`/health` 照常报「稠密+BM25」，只有查询侧退回 BM25。**不报错，但不是没线索**：启动日志里「稠密通道预热」那行会变成「未执行」，每次检索的结果自己就带着通道状态 —— HTTP 响应是 `retrieval.used_vector: false`（附一句为什么连不上），`mode="search"` 的 `render()` 印「通道：向量=关 BM25=开」。`/health` 也说得清：`channels` 报此刻**实际**在走的通道（这时会变成「纯 BM25」），`dense_built` 报集合**建库时**带没带稠密 —— 两个一比就知道是端点坏了，不是索引本来就只建了 BM25。
+- **命名卷的属主是历史遗留。** `chunks/` 与 `index/` 挂在两个命名卷上，而卷**只在首次创建时**继承镜像里同路径目录的属主。镜像现在会先 `mkdir` 再 `chown`，所以新卷没问题；但如果你在这条修复之前跑过一次，手里那两个卷仍是 root 属主 —— 换新镜像也救不回来。它只在**需要重建索引**时才咬人：卷里有一套对得上的产物时走复用分支，一个字节都不写，照样起得来；等 docx 改了、或卷被清过，才撞上 `PermissionError`，容器反复重启（`docker compose logs app` 里能看到）。恢复：`docker compose down -v` 删掉那两个命名卷，下次启动重建索引（Milvus 的数据在 `./volumes/` 里，是 bind mount，不受影响）。**重建要重新向量化，这一步花钱。**
 
 当库用只有一个口子：
 
@@ -85,7 +100,7 @@ traffic_law_qa/
 └── eval/   三套题集 + 一组双跑：hit@k / 规则取条探针 / 跨法多跳 / 单跳两臂对照
 
 法规知识库/   docx（唯一真源）→ text → parsed → chunks → index
-tests/        364 条，全部离线
+tests/        394 条，全部离线
 data/         两套评测题集
 docs/         DESIGN.md
 ```

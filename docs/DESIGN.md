@@ -18,6 +18,7 @@
 - [7. 设计取舍](#7-设计取舍)
 - [8. 工程化：打包、测试、HTTP 服务](#8-工程化打包测试http-服务)
   - [打包](#打包)
+  - [命令行入口](#命令行入口)
   - [测试](#测试)
   - [HTTP 服务](#http-服务)
   - [Docker](#docker)
@@ -95,7 +96,7 @@
 换生成模型只改 `.env`，代码零改动。但**向量模型不能随手换**：集合是按 `EMBED_MODEL` 建的，
 换了要全库重建、且既有基线数字全部作废 —— 所以 `EMBED_API_KEY` 必须显式填，不能留空吃回退
 （理由写在 `.env.example` 里，踩过一次）。**全库重建这一步现在会自动发生**：
-`api.py` 的 `_stale_reason` 会比快照里的 `embedding_model` 与当前配置，不一致就重建 ——
+`api.py` 的 `stale_reason` 会比快照里的 `embedding_model` 与当前配置，不一致就重建 ——
 补这条之前它是静默的（v4 与 bge-large 都是 1024 维、行数也不变，一路放行）。
 
 向量侧从云端换到本地是本项目的一次**明账取舍**，数字与代价都在第 6 节。
@@ -457,11 +458,54 @@ gold 是从模型生成的 `output` 里解析出来的，不是人工标注，�
 | `pip install -e ".[dev]"` | 加 `pytest` + `ruff` |
 | `pip install -e ".[all]"` | 全部 |
 
-命令行入口：`tlq-qa "醉驾怎么处罚"`、`tlq-serve`。
+### 命令行入口
+
+仓库里有 14 个 `if __name__ == "__main__"` 块。它们**不是同一件事的多种拼法**，是不同读者
+走不同的路 —— 问一句、建库、跑评测、起服务、分步调试，各是各的事。归到读者视角是下面这 13
+条，**不是一对一**：`kb/` 下四个 `main` 合成了一行，`pipeline` 一个拆成了三行。
+
+| 命令 | 干什么 | 花钱 | Milvus | langgraph |
+|---|---|---|---|---|
+| `python -m traffic_law_qa "问题"`（短命令 `tlq-qa`） | 问一句（线性管道） | 是 ¹ | 要 | 否 |
+| `python -m traffic_law_qa.agent "问题"` | 问一句（Agent 循环） | 是 | 要 | **是** |
+| `python -m traffic_law_qa.pipeline build` | 建库：解析 + 切块 + 向量化 | 是 | 要 | 否 |
+| `python -m traffic_law_qa.pipeline status` | 查索引状态 | 否 | 要 ² | 否 |
+| `python -m traffic_law_qa.pipeline layers` | 打印层表（各层输入输出契约） | 否 | 否 | 否 |
+| `python -m traffic_law_qa.eval` | 82 道域内题：hit@k / MRR | 否 | 要 | 否 |
+| `python -m traffic_law_qa.eval --reference` | 112 道点名桶：规则取条能否唯一定位 | 否 | 要 ³ | 否 |
+| `python -m traffic_law_qa.eval.singlehop --compare` | 单跳 82 题上 rag vs agent | 是 | 要 | **是** |
+| `python -m traffic_law_qa.eval.multihop --check` | 63 道跨法题：题集自检护栏 | 否 | 否 | 否 |
+| `python -m traffic_law_qa.eval.multihop --compare` | 跨法多跳上 rag vs agent | 是 | 要 | **是** |
+| `python -m traffic_law_qa.kb.<step>` | 分步调试：解析 / 切块 / 入库 / 检索各查一步 ⁴ | 部分 | 部分 | 否 |
+| `tlq-serve`（= `python -m traffic_law_qa.server`） | HTTP 服务 + SSE 流式 | 是 | 要 | 否 |
+| `python examples/quickstart.py` | 免装包的四问演示 | 是 | 要 | 否 |
+
+¹ `--search` 只检索不生成，不花 LLM 的钱（[§3](#3-快速开始)）。
+² 连不上只打印「连接失败」不抛异常 —— 状态查询不该因为连不上就崩（[pipeline.py:208](../traffic_law_qa/pipeline.py)）。
+³ 加 `--no-compare` 连基线对照都不跑，才是纯离线（[§6](#6-离线评测)）。
+⁴ `kb/indexer` 要 Milvus、向量化时花钱；`docx_reader` / `law_parser` / `chunker` 是文件 → 文件，都不连库。
+
+这张表里最值得看的是最后一列：**13 条里只有 3 条需要 `[agent]` 那组可选依赖** ——
+两条 `--compare`（它们要在同一批题上把 rag 和 agent 各跑一遍）和 `…agent` 本身。
+`tlq-serve` 不在其中 —— HTTP 服务只跑线性管道，Agent 循环没有对外暴露。所以
+「不装 langgraph 也能跑完整管道」这条边界不是纸面承诺，是剩下那 10 条天天在守。
+
+三处**看着像重复、其实不是**的地方，一并记在这里：
+
+- **`agent/` 与 `eval/` 下那两个 10 行左右的 `__main__.py` 是转发垫片**，不是又一层入口。
+  子包化之后 `-m` 的路径本来会变成 `…agent.cli` / `…eval.harness`，而对外承诺的写法是
+  `…agent` / `…eval`（`.env.example`、本文档、README 用的都是后者）。垫片的全部作用就是让
+  那两个承诺继续成立，代价是两个文件 —— 比逼所有人改记忆便宜。
+- **`kb/` 下四个 `main` 不是重复**：参数完全不同（docx 路径 / `--show 条号` /
+  `--force --only` / `--no-vector --query`），各答一个「这一步做对了没有」。合成一个
+  `choices` 分发器只是多一层壳，换不来任何东西。
+- **两条「问一句」的命令是依赖边界，不是选择题**：`python -m traffic_law_qa` 必须在没装
+  `[agent]` 的机器上跑通，所以它不能拉 langgraph；`…agent` 必须有。合并就得让所有人
+  在装包时二选一。这条边界由 `test_rag_boundary.py` 的 AST 断言钉着。
 
 ### 测试
 
-364 个测试，**全部离线可跑**（不连 Milvus、不发网络请求），`pytest -q` 约 3 分钟：
+394 个测试，**全部离线可跑**（不连 Milvus、不发网络请求），`pytest -q` 约 3 分钟：
 
 ```powershell
 python -m pytest -q
@@ -517,6 +561,50 @@ Agent 那层另有两组：`test_agent_tools.py`（工具层，47 条，**不需
 `test_pipeline_cli.py`（4 条）只干一件事：把 `RagPipeline` 换成哨兵，断言 `--help` 不会构造管道。
 这条测试的存在本身就是一个教训 —— 见 §3 命令行那段引用块。
 
+`test_server_cli.py`（6 条）是同一条教训的另一侧，而且更重：`tlq-serve --help` 曾经
+**真的把服务起起来** —— 既占住 8000 端口，又跑 lifespan 里的就绪检查与稠密通道预热
+（索引过期时那一步还会触发重建）。根因一模一样：手搓的参数解析只做 `if name in args`，
+没有任何东西拦在 `uvicorn.run` 之前。同一个坑还漏出另外三处：`--bogus` 被静默忽略、
+`--host` 悬空时静默用默认值、`--port abc` 抛裸 `ValueError`。现在换成 argparse ——
+`--help` 在解析阶段就被它拦下，`main()` 把 `SystemExit` 收回成返回值，
+保住「`main()` 返回 int、调用方 `raise SystemExit(main())`」这条全仓一致的契约。
+
+`test_cli_args.py`（21 条）管的是**另外四个**入口（`agent` / `eval` / `eval.singlehop` /
+`eval.multihop`）的开关校验，同一个病根的另一半。这四处原先各自手搓一个 `option()`，
+只做 `if name in args`，于是不认识的开关被静默忽略、取不到值的开关静默退回默认值。
+安静本身不是问题，问题是它安静地改变了要花多少钱：`--limit` 敲错一个字母，
+`run(limit=None)` 就是**全量 82 道**、两条臂都真调 LLM，文档里那句「先跑 5 道看链路」
+于是变成一次全额付费；`--generate --target` 同理静默退回 100 道。
+
+四个都换成 argparse、**只做校验**：`--help` 与「不带参数」仍由各自开头那个分支打印
+手写的 `USAGE`（`add_help=False`，argparse 的自动帮助覆盖不了那几段例子），所以这两条
+路径输出逐字节未变。改完拿 30 条文档里出现过的命令做了新旧逐项对比：解析结果
+**零不一致、零拒绝**。只有一处是刻意保留的例外 —— `agent --trace` 写在 `USAGE` 里，
+却从加进来那天起就没被代码读过（轨迹本来就默认打印），argparse 会把它判成不认识的
+开关，等于打断一条一直在用的命令，所以收下它并在 `USAGE` 里把这件事写明。
+钉它的是打 `main` 的测试（`AgentRunner` 用哨兵顶掉，好在连 Milvus 之前停下），
+不是打解析器 —— 解析器是 `main` 的实现细节，换成别的写法这条命令也该照样能用。
+顺带一提，这个例外是**对比脚本抓出来的**，不是读代码看出来的：另外两个「文档里有、
+解析器不认」的开关（`harness` 的 `--in-domain`、`multihop` 开头那句 `--reference`）
+分别是「域内外分开报」拆除后留下的字和指 harness 的散文，拒绝它们才是对的。
+
+这一轮还把测试里对生产**私有名**的访问清干净了：原先 4 处共 29 个调用点直接戳 `_` 名字
+（`generator._client` 17、`reflect._parse_reflection` 9、`api._stale_reason` 2、
+`cli._parser()` 1）。现在只碰公开面 —— 假客户端改成**构造期注入**
+（`AnswerGenerator(cfg, client=...)`，属性仍是私有的 `_client`：公开一个懒建的缓存位
+等于邀请调用方在构造之后改它，这条 `qa/rag.py` 开头有前科），审核那两条改走公开节点
+`make_reflect_node(...)(state)`（`reflections[0]` 就是解析结果本身，断言精度一样），
+`--trace` 那条改打 `main`、`AgentRunner` 用哨兵顶掉。只有
+`api._stale_reason → stale_reason` 这处是**贴标签不是解耦**（测试仍逐个分支钉着那个具体
+函数，所以「重构不红」在这处收益为 0），选它是因为仓库自己那条判据：有测试单独调用就
+不该加 `_` —— 同 `route_after_agent` 公开、`_route_after_classify` 私有。
+
+「重构不红」不是空话，拿三个变异验过：把 `retrievable` 的默认翻成 `False`、把解析失败的
+默认翻成 `sufficient=False`、把 `next_query` 的默认从空串改成 `None` —— 三条各自只让
+对应的那条测试红，且都红。代价是定位精度：红了要先看一眼是节点层还是解析层。
+（`test_rag.py:154` 的 `retriever._dense` 和 `test_api.py` 的 `_假Store._rows` 是**测试
+自己假类**的属性，不是戳生产内部，没动。）
+
 ### HTTP 服务
 
 单文件，把 `qa()` 包成 FastAPI：
@@ -525,14 +613,17 @@ Agent 那层另有两组：`test_agent_tools.py`（工具层，47 条，**不需
 uvicorn traffic_law_qa.server:app --port 8000
 # 或：tlq-serve --port 8000
 
-curl localhost:8000/health
-curl -X POST localhost:8000/qa -H 'Content-Type: application/json' -d '{"question":"醉驾怎么处罚"}'
-curl -N -X POST localhost:8000/qa/stream -H 'Content-Type: application/json' -d '{"question":"醉驾怎么处罚"}'
+curl.exe localhost:8000/health
+curl.exe -X POST localhost:8000/qa -H 'Content-Type: application/json' -d '{"question":"醉驾怎么处罚"}'
+curl.exe -N -X POST localhost:8000/qa/stream -H 'Content-Type: application/json' -d '{"question":"醉驾怎么处罚"}'
 ```
+
+（三条都写 `curl.exe`：块标的是 powershell，而 PowerShell 里 `curl` 是 `Invoke-WebRequest`
+的别名，不认 `-d` 也不认 `localhost:8000` 这种不带协议的地址。）
 
 | 端点 | 说明 |
 |---|---|
-| `GET /health` | 存活 + 库内规模 + **装配耗时**；未就绪返回 503 和原因（不崩进程） |
+| `GET /health` | 存活 + 库内规模 + **装配耗时** + 通道实况（`channels` 此刻实际 / `dense_built` 建库时）；未就绪返回 503 和原因（不崩进程） |
 | `POST /qa` | `mode=ask` 检索+生成，`mode=search` 只检索不花钱 |
 | `POST /qa/stream` | SSE：先推 `evidence`（依据清单），再逐块推 `delta`，末尾 `done` |
 
@@ -582,8 +673,11 @@ curl -N -X POST localhost:8000/qa/stream -H 'Content-Type: application/json' -d 
 docker compose up -d --build        # 起 Milvus + 应用（首次构建约 2 分钟）
 docker compose ps                   # 四个容器都要 healthy
 docker compose logs -f app          # 看装配日志
-curl localhost:8000/health          # 宿主机直接访问
+curl.exe localhost:8000/health      # 宿主机直接访问（`.exe` 见 README「跑起来」的说明）
 ```
+
+那个 `--build` 是命令的一部分，不是可选项：镜像里烤的是源码，不加的话 compose 见镜像已存在
+就直接复用 —— 改了代码却敲 `docker compose up -d`，跑的还是上一版，且不报任何错。
 
 实测启动日志（计数为当前语料，秒数随机器冷热浮动）：
 
@@ -596,7 +690,7 @@ curl localhost:8000/health          # 宿主机直接访问
 （第一行是 `api.ensure_ready().describe()` 的实际输出；预热那一行是此前跑容器时测的，
 不随语料变化。那 1.6 秒的预热就是上面说的冷启动修复，见 §8「冷启动」。）
 
-容器化踩到的四个坑，都写在对应文件里了：
+容器化踩到的六个坑，都写在对应文件里了：
 
 | 坑 | 处理 |
 |---|---|
@@ -604,6 +698,40 @@ curl localhost:8000/health          # 宿主机直接访问
 | 容器里 `localhost` 指容器自己 | `MILVUS_URI` 覆盖成服务名 `http://standalone:19530`（`.env` 里那个是给宿主机裸跑用的） |
 | Milvus `Up` ≠ 能接受连接（还差 30~90 秒） | `depends_on: condition: service_healthy` |
 | 命名卷首次创建继承镜像里同路径目录的属主 | 镜像里先 `mkdir` 那两个派生目录再 `chown`，否则非 root 用户写不进去 |
+| 同一条 `localhost` 的坑，但这次在 embedding 端点 —— **`MILVUS_URI` 配错是响的，这条不响** | `EMBED_BASE_URL` 覆盖成 `http://host.docker.internal:11434/v1`；Linux 不认这个名字，另给 `extra_hosts: host-gateway` |
+| 属主继承**只发生在卷首次创建时** —— 早于上一行那条修复建的卷，换新镜像也救不回来 | 没有就地修法，只能 `docker compose down -v` 删掉那两个命名卷重建（Milvus 数据在 `./volumes/` 的 bind mount 里，不受影响；重新向量化要花钱） |
+
+最后两条是这里唯一会「不响」的，各展开一段。
+
+**embedding 端点配错为什么不响**：它的失败路径被设计成分级降级，而降级点取决于**索引建到哪一步**，
+于是同一个错误有两种表现。索引还没建（新 clone，或清过卷）—— 编码失败，集合退回纯 BM25，
+`vector_enabled=dim is not None` 记成 `False`，`/health` 的 `channels` 如实报「纯 BM25」，
+看得见。索引已经建好（构建机上有 `chunks/`、`index/`，随镜像带了进去）—— 集合里是稠密的，
+`stats.vector_enabled` 为真，查询侧退回 BM25。**这一种才是「不响」的**：服务照常答、
+状态码照常 200。
+
+线索有三处。`/health` 现在自己就说得清：`channels` 报**此刻实际**在走的通道
+（`dense_live`，跟着预热与每次检索更新），这时会变成「纯 BM25」；而 `dense_built` 仍是
+`true` —— 两个一比就知道「索引是带稠密建的，坏的是端点」，不必翻日志。另外两处：
+启动日志里「稠密通道预热」那行变成「未执行」；每次检索的结果自己带着状态 ——
+`RetrievalResult.used_vector` 是 `False`（HTTP 响应里就是 `retrieval.used_vector`，
+附一句为什么连不上），`render()` 印「通道：向量=关 BM25=开」，Agent 轨迹同此。
+
+`channels` 从前读的是 `index_meta.json` 的建库快照，答的是「集合支持什么」，
+读起来却是「此刻在走什么」—— 于是它成了这一路里唯一会说反话的字段。现在它读观测值，
+建库时那个事实挪到了 `dense_built`，两个字段各说一件事。
+README 的「跑起来」把这两种表现都写出来了，因为它是新用户第一眼会撞上的地方。
+
+**卷属主为什么只能重建**：Docker 只在卷**首次创建**时把镜像里同路径目录的内容与属主复制进去。
+所以 `mkdir` + `chown` 治的是新卷，对已经存在的旧卷完全无效 —— 旧卷的属主是死的历史事实，
+镜像改成什么样都改不动它。**它只在需要重建时才咬人** —— 卷里有一套对得上的产物时走的是复用
+分支，一个字节都不写，照样起得来；等哪天 docx 改了、或者卷被清过，`ensure_ready` 进建库分支，
+`index_meta.json` 那一写（`kb/indexer.py`）才撞上 `EACCES`。症状是容器起不来：这个异常不是
+`QaError`，而 `server.py` 的 lifespan 只接 `QaError`，所以不会被转成「留在 `/health` 里」
+那种软失败，而是直接让 uvicorn 打一行 `Application startup failed. Exiting.` 退出，
+`restart: unless-stopped` 于是反复重启。
+`down -v` 删的是 `volumes:` 段里声明的两个命名卷；etcd / MinIO / Milvus 那三个用的是
+`./volumes/` 下的 bind mount，不在删除范围里。
 
 `chunks/` 与 `index/` 挂在命名卷上，构建机上有就随镜像带进去 —— 首次启动直接
 「复用已有索引」，免得在容器里重算一次 embedding（那要花钱）。索引本身仍在 Milvus 里。
@@ -985,8 +1113,6 @@ python -m traffic_law_qa.eval.multihop --compare --limit 63 --out data/traces/ho
 - 调整目录结构，分层封装 —— **注意这条与 §2 的现状有张力**：`kb/` `qa/` `eval/` `agent/`
   现在是平的四个子包，「子包只按路径说话」那条规矩也是按平铺写的；单独把 `agent/` 套一层
   会与其余三个不一致。要动就得四个一起动，否则是改现状不是改这条
-- 测试黑盒：现在大量测试直接戳内部函数（如 `_parse_reflection`），改成只打公开面
-  —— 这会牺牲一部分定位精度，换的是「重构不红」。值得做，但不是免费的
 
 ### 还没动的大件
 
@@ -1000,5 +1126,10 @@ python -m traffic_law_qa.eval.multihop --compare --limit 63 --out data/traces/ho
 - README 太长太「AI」、不够清晰 → 已重写，162 行收到 97 行，删掉自证式的加粗与警告块
 - 行数虚高、注释过时误导 model → 已随 `agent/graph.py` 拆分重写：设计论证搬进本文档，
   代码里只留「这行为什么这样」的一句话（见 §2 / §9）
+- 测试黑盒：测试直接戳内部函数（如 `_parse_reflection`），改成只打公开面 → 已做完，
+  实测违规范只有 4 处 29 个调用点、不是「大量」；改法与变异验证见 §8 末尾。**顺带留下
+  一条新账**：清完之后 `api.py` 的 `build_dense` 定档（「一次 `--no-vector` 就会把花过
+  钱的稠密索引 drop 掉」那段）仍然一条测试都没有 —— 它在 `ensure_ready` 里，要测就得
+  照索引快照的磁盘格式造替身，不便宜，所以当时没顺手做
 
 > 以上可以用 skillcreator、grillme 辅助。
