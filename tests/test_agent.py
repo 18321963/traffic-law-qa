@@ -71,6 +71,11 @@ class FakeRetriever:
 
     `fail_on` 让**指定的查询词**炸掉，而不是让整个检索器一直坏 ——
     否则收尾节点的兜底检索也会炸，就测不到「失败回灌之后模型还能继续」了。
+
+    **`top_ks` 必须记。** 收下 `top_k` 就扔掉的话，「工具轮有没有把生效条数传下来」
+    这件事在整个文件里无从观测：`state["top_k"]` 与 `rag.top_k` 恰好同值时，
+    `tools_node` 里那句 `state.get("top_k", ...)` 换成写死的配置默认值，本地全绿，
+    而单题自带的 `top_k` 到了工具轮就静默失效（收尾那份还照着它走，于是两头不一致）。
     """
 
     def __init__(self, parents: dict, *, hits: int = 2, fail_on: set[str] | None = None) -> None:
@@ -79,6 +84,7 @@ class FakeRetriever:
         self.fail_on = fail_on or set()
         self.queries: list[str] = []
         self.expanded: list[str] = []
+        self.top_ks: list[int | None] = []
 
     def expand(self, text: str) -> str:
         """真检索器上这里会做口语对齐；替身原样返回，摘要退化成改动前的行为。"""
@@ -87,6 +93,7 @@ class FakeRetriever:
 
     def search(self, text: str, top_k: int | None = None, **kwargs) -> RetrievalResult:
         self.queries.append(text)
+        self.top_ks.append(top_k)
         if text in self.fail_on:
             raise RuntimeError("检索端点不可用")
         picks = list(self.parents.values())[: self.hits]
@@ -179,6 +186,28 @@ def generator(client) -> AnswerGenerator:
     return AnswerGenerator(FAKE_LLM_CFG, client=client)
 
 
+def initial_state(question: str, max_steps: int) -> dict:
+    """跑图要的那份初态。
+
+    `AgentRunner.invoke()` 内部也造一份，但那份是从 `cfg` 和 `rag` 推出来的；
+    这里写死成字面量，是为了让测试能**自己**调 `graph().invoke()` —— 下面
+    `test_AgentRunner_把审核客户端接进图` 非得自己调不可，因为要测的正是
+    `AgentRunner.graph()` 这一步。
+    """
+    return {
+        "question": question,
+        "history": [],
+        "top_k": 6,
+        "max_steps": max_steps,
+        "intent": "",
+        "messages": [],
+        "search_log": [],
+        "steps": 0,
+        "usage": [],
+        "reflections": [],
+    }
+
+
 def run(
     question, script, parents, generator, *,
     forced=None, max_steps=None, retriever=None, reflect_llm=None, tracer=None,
@@ -215,18 +244,7 @@ def run(
         tracer=tracer,
     )
     state = graph.invoke(
-        {
-            "question": question,
-            "history": [],
-            "top_k": 6,
-            "max_steps": max_steps,
-            "intent": "",
-            "messages": [],
-            "search_log": [],
-            "steps": 0,
-            "usage": [],
-            "reflections": [],
-        },
+        initial_state(question, max_steps),
         config={"recursion_limit": 3 * max_steps + 6},
     )
     return state, llm, retriever
@@ -376,6 +394,34 @@ def test_budget_exhausted_still_goes_through_tools():
 
 def test_route_after_agent_without_tool_calls():
     assert A.route_after_agent({"messages": [{"role": "assistant", "content": "够了"}]}) == "finalize"
+
+
+def test_收尾轮之后不再回工具(parents, generator):
+    """路由读的是**最后一条**消息 —— 上面两条用例分不开「最后一条」和「第一条」。
+
+    它们都只有一条消息，`messages[0]` 与 `messages[-1]` 是同一个对象，下标写成哪个
+    都对。**只有多轮历史才分得开**：第一轮规划带 tool_calls、第二轮给的是最终答案
+    （不带 tool_calls），此刻必须收尾。
+
+    写成 `messages[0]` 的后果不是「答案差一点」：第二轮明明没有工具调用，却还是被送进
+    `tools`，而 `tools` 是**无条件**接 `reflect` 的 —— 白多一轮审核。
+
+    **断言只能数 `reflections`，不能数模型调用次数。** 这条测试第一版就是数
+    「不带 tools 的那几次 `chat`」，结果变异照样绿：预算恰好用尽时 `reflect` 会短路
+    **不调模型**（`reflect.py:83`），那多出来的一轮审核一个请求都不发，从调用记录上
+    完全看不见。`reflections` 是那个短路分支也会写的东西，才数得到。
+    """
+    script = [
+        _assistant(calls=[("c1", SEARCH_LAW_NAME, {"query": "玩手机"})]),
+        _reflection(False, "缺数额", retrievable=True, next_query="玩手机 罚款"),
+        _assistant("够了，这是最终答案"),
+    ]
+    state, _llm, retriever = run("深圳开车玩手机罚多少", script, parents, generator)
+
+    assert retriever.queries == ["玩手机"], "第二轮没有工具调用，不该再检索一次"
+    # 中间那条 user 是审核回灌的「还缺什么」（reflect.py:116），不是模型给的
+    assert [m["role"] for m in state["messages"]] == ["assistant", "tool", "user", "assistant"]
+    assert len(state["reflections"]) == 1, "第二轮给的是最终答案，却又多审了一轮"
 
 
 # ================================================================== 5. 预算
@@ -888,6 +934,78 @@ def test_审核真的走了另一个客户端(parents, generator):
     assert state["reflections"][0]["sufficient"] is True
 
 
+def test_AgentRunner_把审核客户端接进图(parents, generator):
+    """`AgentRunner.graph()` 必须把 `self.reflect_llm` 转给 `build_graph` —— 漏过一次。
+
+    上面那条 `test_审核真的走了另一个客户端` 走的是 `run()`，而 `run()` **直接调
+    `build_graph(reflect_llm=...)`**，把 `AgentRunner.graph()` 整个绕过去了。于是
+    `graph()` 忘了转发那一行时它照样绿 —— 可 `load()` 里读 `AGENT_REFLECT_*` 造出来
+    的第二个客户端根本进不了图，审核悄悄落回规划轮那个模型，`AGENT_REFLECT_*`
+    全程形同虚设。
+
+    2026-09-20 就是这么现形的：63 题多跳跑到第 36 题崩，报错写着「调用 `qwen-turbo`
+    失败」，而 `AGENT_REFLECT_MODEL` 明明是 `qwen3.7-flash` —— 审核压根没碰过它。
+
+    断言落在**两个假客户端的调用次数**上：「谁被调了」才是这个接缝的语义。
+    只断言 `runner.reflect_llm` 非空是白测 —— 那个属性一直是好的，坏的是它没被用。
+    """
+    planner = ScriptedLLM([_assistant(calls=[("c1", SEARCH_LAW_NAME, {"query": "q"})])])
+    reviewer = ScriptedLLM([_reflection(True)])
+    rag = LegalRAG(FakeRetriever(parents), generator, top_k=6)
+    # cfg 显式给：不传就走 `agent_config()`，本机配了 AGENT_MAX_STEPS 就跟着变。
+    max_steps = config.AgentConfig().max_steps
+    runner = A.AgentRunner(
+        rag, llm=planner, reflect_llm=reviewer, cfg=config.AgentConfig(max_steps=max_steps)
+    )
+
+    runner.graph().invoke(
+        initial_state("问题", max_steps),
+        config={"recursion_limit": 3 * max_steps + 6},
+    )
+
+    assert len(planner.calls) == 1, "规划轮只该被问一次"
+    assert len(reviewer.calls) == 1, "审核必须走 AgentRunner 自己那个客户端"
+
+
+def test_AgentRunner_把强制意图接进图(parents, by_number, generator):
+    """`AgentRunner.graph()` 必须把 `self.forced_intent` 转给 `build_graph` —— 和上一条同一个形状。
+
+    上面那条 `test_forced_intent_overrides_the_rule` 走的是 `run()`，而 `run()` **直接调
+    `build_graph(forced_intent=...)`**，把 `AgentRunner.graph()` 整个绕过去了。于是
+    `graph()` 漏掉这一行时它照样绿 —— 可 `--intent` 是 `cli.py:110` 经 `load()` 存进
+    `self.forced_intent` 的，漏转发就等于 `--intent` 静默失效：A/B 对照跑出来两臂相同，
+    而「对照」这个结论本身就是错的。
+
+    断言落在**走没走检索**上，不是「`runner.forced_intent` 非空」—— 那个属性一直是好的，
+    坏的是它没被用（同 `test_AgentRunner_把审核客户端接进图` 的教训）。
+
+    **开头先证明这道题本来会被规则判成另一类**：不证的话，万一规则哪天也判成检索，
+    这个测试就退化成 `forced == forced` 的恒真式，而它仍然是绿的。
+    """
+    assert intent.classify_intent(ARTICLE_Q, parents=parents, index=by_number) == intent.INTENT_LOOKUP
+    planner = ScriptedLLM([
+        _assistant(calls=[("c1", SEARCH_LAW_NAME, {"query": "q"})]),
+        _reflection(True),
+    ])
+    retriever = FakeRetriever(parents)
+    rag = LegalRAG(retriever, generator, top_k=6)
+    max_steps = config.AgentConfig().max_steps
+    runner = A.AgentRunner(
+        rag,
+        llm=planner,
+        cfg=config.AgentConfig(max_steps=max_steps),
+        forced_intent=intent.INTENT_SEARCH,   # ← 强行扳到规则不会选的那条路
+    )
+
+    state = runner.graph().invoke(
+        initial_state(ARTICLE_Q, max_steps),
+        config={"recursion_limit": 3 * max_steps + 6},
+    )
+
+    assert state["intent"] == intent.INTENT_SEARCH, "强制意图没进图，规则又把它判回定位了"
+    assert retriever.queries, "强制检索却没检索 —— 走的还是定位那条零检索的路"
+
+
 # ================================================================== 16. top_k 同源
 def test_单题自带的_top_k_管到收尾(parents, generator):
     """单题自带的 `top_k` 必须一路管到收尾 —— 两个节点同源。
@@ -903,6 +1021,11 @@ def test_单题自带的_top_k_管到收尾(parents, generator):
     **问题里不能带条号**：那会被 `classify_intent` 判成条文定位，走零检索的
     `get_article` 路径，证据恒为 1 条，截断根本没机会发生（这条测试第一版就是这么
     写错的 —— 顺手拿了 `ARTICLE_Q`）。
+
+    **工具轮也在这条里一起钉**：`tools_node` 的 `default_top_k` 同样读 `state["top_k"]`
+    （`nodes.py:90`），而它以前没有任何观测点 —— `FakeRetriever` 收下 `top_k` 就扔掉，
+    于是那句 `state.get(...)` 换成写死的配置默认值也照样绿。现在它记下收到什么，
+    下面 `retriever.top_ks` 那行就是那句 `state.get` 的唯一见证。
     """
     llm = ScriptedLLM([
         _assistant(calls=[("c1", SEARCH_LAW_NAME, {"query": "q"})]),
@@ -916,6 +1039,7 @@ def test_单题自带的_top_k_管到收尾(parents, generator):
     state = runner.invoke(Question(text="醉驾怎么处罚", top_k=2))   # ← 单题覆盖
 
     assert state["top_k"] == 2
+    assert retriever.top_ks == [2], "工具轮该按单题的 top_k 召回，不是 runner/配置那个"
     assert len(state["answer"].retrieval.articles) == 2, "收尾该跟着单题的 top_k 走，不是 runner 的"
 
 

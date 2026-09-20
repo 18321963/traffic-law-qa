@@ -87,7 +87,17 @@ def retrieval(chunk_set) -> RetrievalResult:
 EMPTY = RetrievalResult(
     query="库外问题", articles=(), used_vector=False, used_bm25=False, elapsed_ms=0.0, notes=()
 )
-QUESTION = Question(text="醉驾怎么处罚")
+# 历史**刻意不空**：`_call_llm` 与 `_stream_llm` 各有一句
+# `messages.extend(... question.history)`，历史为空时那两句展开的都是零条 ——
+# 删掉任意一句，构造出来的 messages 逐字不变，本文件一条测试都不会红。
+# 给上两轮对话，那两句才各自有了见证（尤其 `test_两条路径都展开对话历史`）。
+QUESTION = Question(
+    text="那罚多少",
+    history=(
+        ("user", "深圳开车玩手机怎么罚"),
+        ("assistant", "按《深圳经济特区道路交通安全违法行为处罚条例》第十三条…… [依据1]"),
+    ),
+)
 
 
 def _deltas(gen: AnswerGenerator, retrieval: RetrievalResult, question=QUESTION) -> tuple[str, dict]:
@@ -119,6 +129,30 @@ def test_流式与非流式发同一份提示词(retrieval):
     assert plain["messages"][0] == {"role": "system", "content": SYSTEM_PROMPT}
     assert streamed["stream"] is True
     assert "stream" not in plain
+
+
+def test_两条路径都展开对话历史(retrieval):
+    """历史必须**按原顺序**出现在 messages 里 —— 两条路径各有一句 `extend`，各钉一次。
+
+    上面那条比较的是「两条路径彼此相同」，而**那是个可以被两边一起错满足的等式**：
+    `_call_llm` 与 `_stream_llm` 里的 `extend` 同时被删掉时，两边都是 `[system, user]`，
+    等式照样成立、照样绿。所以这里不比较，直接钉住展开后的那两条。
+
+    钉住它是为了「那罚多少」这类**承接上文**的追问：历史没进 messages 时模型看不到
+    上一句问的是什么，答案不会报错、只是答非所问 —— 没有异常，只有一份读起来像样
+    却答错题的回答。
+    """
+    client = _FakeClient([_chunk("答案")])
+    gen = _generator(client=client)
+
+    gen.generate(QUESTION, retrieval)
+    _deltas(gen, retrieval)
+
+    plain, streamed = client.completions.calls
+    期望 = [{"role": role, "content": content} for role, content in QUESTION.history]
+    # 切片的长度本身就是断言的一部分：少展开一条，右边会短一截而不是「差不多」
+    assert plain["messages"][1:3] == 期望
+    assert streamed["messages"][1:3] == 期望
 
 
 def test_提示词里带上依据(retrieval):

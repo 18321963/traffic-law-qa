@@ -10,12 +10,35 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
 from .. import config
 
 __all__ = ["ToolCallingLLM"]
+
+
+def _arguments(call: Any) -> str:
+    """工具参数必须是**合法 JSON 字符串** —— 不是就把这一条降级成 `{}`。
+
+    这是外部服务脏数据进系统的接缝。2026-09-20 实测 `qwen-turbo` 回过非 JSON 的
+    `arguments`，服务端自己拒收：
+
+        400 InternalError.Algo.InvalidParameter:
+        The "function.arguments" parameter of the code model must be in JSON format.
+
+    脏值一旦写进 `history` 就赖着不走了 —— 之后**每一次**请求都会带上它，整条题
+    在重试耗尽后抛 RuntimeError 中断。宁可当空参数：`parse_tool_arguments` 会抛
+    ValueError，节点把它转成「参数不合法，请修正后重试」的观察结果
+    （`nodes.py:109`），模型下一轮自己会改。一次退化成空参，好过整条题报废。
+    """
+    raw = getattr(call.function, "arguments", None)
+    try:
+        json.loads(raw)
+    except (TypeError, ValueError):
+        return "{}"
+    return raw
 
 
 def _normalize(response: Any) -> tuple[dict, dict]:
@@ -31,7 +54,7 @@ def _normalize(response: Any) -> tuple[dict, dict]:
                 "type": "function",
                 "function": {
                     "name": call.function.name,
-                    "arguments": call.function.arguments,
+                    "arguments": _arguments(call),
                 },
             }
             for call in calls
