@@ -1,10 +1,14 @@
 # Milvus Standalone（etcd + MinIO + Milvus），配置对齐官方 v2.6.x 的 docker-compose.yml。
 #
 # 用法：
-#   docker compose up -d          # 启动
+#   docker compose up -d --build  # 启动（改了代码必须带 --build，镜像里烤的是源码，
+#                                 #   不加会直接复用旧镜像、静默跑旧版本）
 #   docker compose ps             # 看健康状态（milvus 需 30~90 秒）
-#   docker compose down           # 停止（保留数据卷）
-#   docker compose down -v        # 停止并清空数据
+#   docker compose down           # 停止（数据都保留）
+#   docker compose down -v        # 停止并删掉 tlr_chunks / tlr_index 两个命名卷
+#                                 #   （Milvus 数据在 ./volumes/ 的 bind mount 里，不受影响）
+#                                 #   唯一用途：卷属主是 root 时（早于 Dockerfile 那条 chown
+#                                 #   建的卷）只能这样重建；代价是下次启动重新向量化
 #
 # 国内网络下镜像拉不动时，可从加速源拉取后重新打标签（本仓库即用此法）：
 #   docker pull docker.m.daocloud.io/milvusdb/milvus:v2.6.24
@@ -74,11 +78,11 @@ services:
   # 应用层（无状态）。Dockerfile 见同目录，数据全在 Milvus 那边。
   # 单独起应用：docker compose up -d --build app
   app:
-    container_name: tlr-app
+    container_name: tlq-app
     build:
       context: .
       dockerfile: Dockerfile
-    image: traffic-law-rag:0.1.0
+    image: traffic-law-qa:0.1.0
     env_file:
       # required: false —— 没有 .env 也让它起来。刚 clone 下来还没 Copy-Item
       # .env.example .env 的人（以及只想看一眼这项目的人）否则会直接撞上

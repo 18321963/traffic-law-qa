@@ -1,4 +1,4 @@
-# --- Python 虚拟环境（依赖靠 requirements.txt 复现，不提交）---
+# --- Python 虚拟环境（依赖的真源是 pyproject.toml，pip install -e ".[all]" 复现）---
 .venv/
 venv/
 env/
@@ -51,7 +51,7 @@ desktop.ini
 *.rar
 *.tar.gz
 
-# --- RAG 管道生成的检索产物（用 python -m traffic_law_rag.pipeline build 重建）---
+# --- RAG 管道生成的检索产物（用 python -m traffic_law_qa.pipeline build 重建）---
 法规知识库/chunks/
 法规知识库/index/
 

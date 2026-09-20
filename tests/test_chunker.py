@@ -17,8 +17,8 @@ from tests.conftest import (
     EXPECTED_CHUNK_COUNT,
     EXPECTED_LAW_COUNT,
 )
-from traffic_law_rag.contracts import Article, LawDocument
-from traffic_law_rag.kb.chunker import RE_LIST_MARKER, LawChunker
+from traffic_law_qa.contracts import Article, LawDocument
+from traffic_law_qa.kb.chunker import RE_LIST_MARKER, LawChunker
 
 
 def _law_with(article: Article) -> LawDocument:

@@ -94,7 +94,7 @@ class EmbeddingClient:
         是「没配前缀的部署与加这个功能之前逐位相同」。
 
         调用方注意：改这个前缀**不需要重建索引** —— 它只影响查询怎么编码，段落向量
-        与它无关（`_stale_reason` 比对的是 embedding_model，不含前缀，这是对的）。
+        与它无关（`stale_reason` 比对的是 embedding_model，不含前缀，这是对的）。
         """
         prefix = self.cfg.query_prefix
         return self.embed([prefix + text if prefix else text])[0]
@@ -223,7 +223,7 @@ class Indexer:
 
 # ------------------------------------------------------------------ 调试入口
 def main(argv: list[str] | None = None) -> int:
-    """python -m traffic_law_rag.kb.indexer [--no-vector] [--query 词]"""
+    """python -m traffic_law_qa.kb.indexer [--no-vector] [--query 词]"""
     import sys
 
     from .chunker import ChunkStage

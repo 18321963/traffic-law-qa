@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from traffic_law_rag.contracts import Query
-from traffic_law_rag.qa.query_rewriter import (
+from traffic_law_qa.contracts import Query
+from traffic_law_qa.qa.query_rewriter import (
     GENERIC_FRAGMENTS,
     MIN_HINT_LENGTH,
     QUERY_ALIASES,

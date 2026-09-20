@@ -25,10 +25,10 @@
    等于把题集调成「rag 必输」，agent/rag 对比就失去意义。`--check` 会打印每条 gold
    在基线 top-k 里的位置分布，供判断，但不据此增删。
 
-    python -m traffic_law_rag.eval.multihop --check                 # 全离线，复跑护栏
-    python -m traffic_law_rag.eval.multihop --generate --target 100 # 花钱调 LLM
-    python -m traffic_law_rag.eval.multihop --trace --limit 10 --out data/traces/hop10.json
-    python -m traffic_law_rag.eval.multihop --compare --limit 100 --out data/traces/hop100.json
+    python -m traffic_law_qa.eval.multihop --check                 # 全离线，复跑护栏
+    python -m traffic_law_qa.eval.multihop --generate --target 100 # 花钱调 LLM
+    python -m traffic_law_qa.eval.multihop --trace --limit 10 --out data/traces/hop10.json
+    python -m traffic_law_qa.eval.multihop --compare --limit 100 --out data/traces/hop100.json
                                                                     # = --trace + 全预算汇总
 
 `data/traces/` 被 gitignore —— 轨迹是跑出来的，不是手工维护的，且随时能重跑。
@@ -36,6 +36,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 from collections.abc import Sequence
@@ -44,7 +45,9 @@ from pathlib import Path
 from typing import Any
 
 from .. import config
+from ..agent.llm import ToolCallingLLM
 from ..agent.tools import build_article_index, parse_article_no, resolve_law_id
+from ..agent.trace import render_trace
 from ..contracts import ParentChunk
 from .harness import RE_ARTICLE, RE_LAW
 
@@ -572,8 +575,6 @@ def generate(
     同一个锚点出过的题已经进了 `seed`，再挖一遍只会得到换了说法的同 gold 同考点。
     每接受一道就落一次盘，所以中途断了重跑时把 `out` 读回来当 `seed` 即可接着补。
     """
-    from ..agent.graph import ToolCallingLLM  # 延迟导入：agent 层拉 langgraph，不能进包导入路径
-
     library = library or Library.load()
     llm = ToolCallingLLM()
     if not llm.available:
@@ -681,7 +682,7 @@ def trace(
     两条臂怎么跑、行里放什么，只此一处实现，改一次两边同时生效。
     case 只要求有 `question` / `gold_ids` / `gold_citations` 三个字段。
     """
-    from ..agent.graph import AgentRunner, render_trace
+    from ..agent.graph import AgentRunner  # 延迟导入：只有 graph 拉 langgraph
     from ..api import qa
     from ..contracts import Answer, RetrievalResult
 
@@ -828,6 +829,29 @@ def full_budget_summary(rows: list[dict]) -> str:
 USAGE = __doc__
 
 
+def _parser() -> argparse.ArgumentParser:
+    """只做校验的解析器（`--help` 与「不带参数」由 main 开头那个分支打印 `USAGE`，
+    所以 `add_help=False`）。
+
+    模式是四个**平级的布尔开关**，不是子命令 —— 所以谁都没给时会落到末尾打印说明书，
+    这个形状与改动前一致。解析器只负责把「不认识的开关」和「取不到值的开关」变成错误：
+    `--target` 敲错一个字母静默退回 100 道，和 singlehop 那边 `--limit` 敲错退回全量
+    是同一类错误，只是贵在 LLM 那一步。
+    """
+    parser = argparse.ArgumentParser(prog="python -m traffic_law_qa.eval.multihop", add_help=False)
+    parser.add_argument("--check", action="store_true", help="复跑护栏，全离线")
+    parser.add_argument("--generate", action="store_true", help="调 LLM 造题并落盘（花钱）")
+    parser.add_argument("--trace", action="store_true", help="跑 rag/agent 两臂并落盘轨迹（花钱）")
+    parser.add_argument("--compare", action="store_true", help="= --trace + 全预算汇总")
+    parser.add_argument("--diagnose", action="store_true", help="在 --check 里追加基线诊断")
+    parser.add_argument("--quiet", action="store_true", help="不打印逐题进度")
+    parser.add_argument("--limit", type=int, default=None, help="只跑前 N 道（默认 10）")
+    parser.add_argument("--target", type=int, default=None, help="--generate 的目标题数（默认 100）")
+    parser.add_argument("--top-k", type=int, default=None, help="覆盖默认召回条数（6）")
+    parser.add_argument("--out", default=None, help="产物落盘路径")
+    return parser
+
+
 def main(argv: list[str] | None = None) -> int:
     import sys
 
@@ -836,14 +860,16 @@ def main(argv: list[str] | None = None) -> int:
         print(USAGE)
         return 0
 
-    def option(name: str, cast: Any = int) -> Any:
-        if name not in args or args.index(name) + 1 >= len(args):
-            return None
-        return cast(args[args.index(name) + 1])
-
-    out = Path(option("--out", str)) if option("--out", str) else None
     try:
-        if "--check" in args:
+        options = _parser().parse_args(args)
+    except SystemExit as exc:
+        # argparse 在参数不认识 / 取不到值时直接 SystemExit。收回成返回值，
+        # 保住「main() 返回 int、调用方 raise SystemExit(main())」这条全仓一致的契约。
+        return exc.code if isinstance(exc.code, int) else 0
+
+    out = Path(options.out) if options.out else None
+    try:
+        if options.check:
             library = Library.load()
             cases, dropped = load_cases(out or config.EVAL_MULTIHOP_PATH, library=library)
             print(summarize(cases, library=library))
@@ -851,26 +877,26 @@ def main(argv: list[str] | None = None) -> int:
             print(defect_diagnostic(cases, library))
             if dropped:
                 print(f"  （去重丢掉 {dropped} 条重复题面）")
-            if "--diagnose" in args:
-                baseline_diagnostic(cases, top_k=option("--top-k") or 6)
+            if options.diagnose:
+                baseline_diagnostic(cases, top_k=options.top_k or 6)
             return 0
 
-        if "--generate" in args:
+        if options.generate:
             generate(
-                target=option("--target") or 100,
+                target=options.target or 100,
                 out=out or config.EVAL_MULTIHOP_PATH,
-                verbose="--quiet" not in args,
+                verbose=not options.quiet,
             )
             return 0
 
-        if "--trace" in args or "--compare" in args:
+        if options.trace or options.compare:
             rows = trace(
-                limit=option("--limit") or 10,
+                limit=options.limit or 10,
                 out=out,
-                top_k=option("--top-k") or 6,
-                verbose="--quiet" not in args,
+                top_k=options.top_k or 6,
+                verbose=not options.quiet,
             )
-            if "--compare" in args:
+            if options.compare:
                 print()
                 print(full_budget_summary(rows))
             return 0

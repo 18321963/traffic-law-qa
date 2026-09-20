@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-PACKAGE = Path(__file__).resolve().parent.parent / "traffic_law_rag"
+PACKAGE = Path(__file__).resolve().parent.parent / "traffic_law_qa"
 # 包内相对路径，不是文件名 —— 子包化之后 `path.name` 不再唯一（六个 __init__.py）。
 FACADE = "qa/rag.py"
 
@@ -113,7 +113,7 @@ def test_only_allowed_modules_name_it_in_code(name, trees):
     """比 import 更严一层：**在代码里提到这个名字**也不行。
 
     只挡 import 是不够的 —— `from .retriever import HybridRetriever` 换成
-    `import traffic_law_rag.qa.retriever as r` 再写 `r.HybridRetriever(...)` 就绕过去了。
+    `import traffic_law_qa.qa.retriever as r` 再写 `r.HybridRetriever(...)` 就绕过去了。
     这里扫 `ast.Name` / `ast.Attribute`，把这条路也堵上。
     （类型注解也算：它是代码位置，不是字符串。）
     """
@@ -172,7 +172,7 @@ def test_the_retriever_keeps_its_innards_private(parents):
     这才是真正把门关上的那一手：AST 测试只管 import，管不到属性穿透。
     私有化之后，越界不是「静默拿到 None」，而是一次 `AttributeError`。
     """
-    from traffic_law_rag.qa.retriever import HybridRetriever
+    from traffic_law_qa.qa.retriever import HybridRetriever
 
     retriever = HybridRetriever(store=object(), parents=parents, chunks={})
     for name in ("store", "chunks", "rewriter"):
@@ -188,8 +188,8 @@ def test_the_facade_keeps_its_innards_private(parents):
     `chunks` / `rewriter` 私有），所以这里也留着 `top_k` —— 它是设置项。
     构造参数名（`retriever=` / `generator=`）不受影响：那是注入点，测试要往里塞替身。
     """
-    from traffic_law_rag.qa.rag import LegalRAG
-    from traffic_law_rag.qa.retriever import HybridRetriever
+    from traffic_law_qa.qa.rag import LegalRAG
+    from traffic_law_qa.qa.retriever import HybridRetriever
 
     rag = LegalRAG(HybridRetriever(store=object(), parents=parents, chunks={}))
     for name in ("retriever", "generator"):

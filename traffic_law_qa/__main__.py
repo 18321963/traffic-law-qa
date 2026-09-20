@@ -1,7 +1,7 @@
-"""`python -m traffic_law_rag "问题"` —— 一条命令拿到答案（等价于一次 `qa()` 调用）。
+"""`python -m traffic_law_qa "问题"` —— 一条命令拿到答案（等价于一次 `qa()` 调用）。
 
-    python -m traffic_law_rag "醉驾怎么处罚"
-    python -m traffic_law_rag "深圳 行人 在机动车道 罚款多少" --search --debug
+    python -m traffic_law_qa "醉驾怎么处罚"
+    python -m traffic_law_qa "深圳 行人 在机动车道 罚款多少" --search --debug
 
 失败只打印一行中文提示（含该执行的命令），不糊 pymilvus 的堆栈。
 """
@@ -15,7 +15,7 @@ from .api import MODE_SEARCH, QaError, qa, render
 from .contracts import Answer
 
 USAGE = """用法：
-    python -m traffic_law_rag "问题" [选项]
+    python -m traffic_law_qa "问题" [选项]
 
 选项：
     --search        只检索，不调用大模型（不花 LLM 的钱）
@@ -26,8 +26,8 @@ USAGE = """用法：
     --json          输出 JSON 而不是人读文本
 
 示例：
-    python -m traffic_law_rag "醉驾怎么处罚"
-    python -m traffic_law_rag "深圳 行人 在机动车道 罚款多少" --search --debug
+    python -m traffic_law_qa "醉驾怎么处罚"
+    python -m traffic_law_qa "深圳 行人 在机动车道 罚款多少" --search --debug
 """
 
 

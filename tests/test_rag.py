@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import pytest
 
-from traffic_law_rag import config
-from traffic_law_rag.contracts import CorpusStats, Question, RetrievalResult
-from traffic_law_rag.qa.generator import AnswerGenerator
-from traffic_law_rag.qa.rag import LegalRAG
+from traffic_law_qa import config
+from traffic_law_qa.contracts import CorpusStats, Question, RetrievalResult
+from traffic_law_qa.qa.generator import AnswerGenerator
+from traffic_law_qa.qa.rag import LegalRAG
 
 FAKE_LLM_CFG = config.LLMConfig(base_url="http://fake", api_key="fake", model="fake-model")
 
@@ -77,7 +77,7 @@ def test_default_law_filter_is_an_empty_tuple_not_none(rag, retriever):
     （`for law_id in law_ids`），`Query.law_filter` 本身也是 `()`。
     这里除了断言透传值，还把它真的喂给那个函数 —— 只有真跑一遍才算验证过。
     """
-    from traffic_law_rag.kb.milvus_store import MilvusStore
+    from traffic_law_qa.kb.milvus_store import MilvusStore
 
     rag.search("醉驾怎么处罚")
     forwarded = retriever.calls[0]["law_filter"]

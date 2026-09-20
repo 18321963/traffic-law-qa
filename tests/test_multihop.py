@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from traffic_law_rag.contracts import ChunkSet
-from traffic_law_rag.eval.multihop import (
+from traffic_law_qa.contracts import ChunkSet
+from traffic_law_qa.eval.multihop import (
     HopError,
     Library,
     _candidates,
@@ -31,7 +31,7 @@ from traffic_law_rag.eval.multihop import (
     summarize,
 )
 
-PACKAGE = Path(__file__).resolve().parent.parent / "traffic_law_rag"
+PACKAGE = Path(__file__).resolve().parent.parent / "traffic_law_qa"
 
 
 @pytest.fixture(scope="module")
@@ -346,8 +346,8 @@ def test_跨法种子只认别的法(library: Library):
     sites = cross_law_sites(library)
     assert sites, "语料里应当存在点名了别的法的条文"
 
-    from traffic_law_rag.agent.tools import resolve_law_id
-    from traffic_law_rag.eval.harness import RE_LAW
+    from traffic_law_qa.agent.tools import resolve_law_id
+    from traffic_law_qa.eval.harness import RE_LAW
 
     for parent in sites:
         cited = [
@@ -400,7 +400,7 @@ def test_续跑不重挖同一个锚点(library: Library, monkeypatch):
     所以能红的只剩锚点没被记住这一件事。
     """
     fake = _照抄锚点的假LLM(library)          # 同一个实例跨两次调用，题面才不重样
-    monkeypatch.setattr("traffic_law_rag.agent.graph.ToolCallingLLM", lambda: fake)
+    monkeypatch.setattr("traffic_law_qa.agent.llm.ToolCallingLLM", lambda: fake)
 
     first = generate(target=1, library=library, verbose=False)
     second = generate(target=2, library=library, seed=first, verbose=False)
@@ -420,18 +420,30 @@ def test_统计按法规分布(library: Library):
 
 # ================================================================== 边界
 def test_导入multihop不拉langgraph():
-    """生成器里的 `from ..agent.graph import ToolCallingLLM` 必须是延迟导入。
+    """`import traffic_law_qa.eval.multihop` 不能把 langgraph 拖进来。
 
-    agent 层会拉 langgraph，一旦写到模块顶层，`import traffic_law_rag.eval.multihop`
-    就会把整个图框架拖进来。这条与 test_rag_boundary 的取向一致。
+    **只有 `agent.graph` 拉 langgraph**（它 `from langgraph.graph import ...`）。
+    `agent.tools` / `agent.llm` / `agent.trace` 都不拉，可以顶层导入 ——
+    `multihop.py` 正是这么写的，所以 `AgentRunner` 那个 import 必须留在函数体里。
+
+    这里同时钉两条：AST 那条指出**是哪一行**越界（报错能直接定位），
+    子进程那条验证**真实的不变量**（AST 规则是按模块名枚举的，新加一个拉 langgraph
+    的模块它看不出来）。
     """
+    import subprocess
+    import sys
+
     tree = ast.parse((PACKAGE / "eval" / "multihop.py").read_text(encoding="utf-8"))
     for node in tree.body:  # 只看模块顶层，函数体里的延迟导入不算
         if isinstance(node, ast.ImportFrom):
-            # 只有 `agent.graph` 拉 langgraph；`agent.tools` 顶层导入是允许的 ——
-            # 它整个模块都不依赖 langgraph（test_agent_tools 另有测试钉住这一点）。
             assert node.module != "agent.graph", "graph 层会拉 langgraph，必须函数内延迟导入"
             assert not (node.module == "agent" and any(a.name == "graph" for a in node.names))
             assert node.module != "langgraph"
         if isinstance(node, ast.Import):
             assert all(alias.name != "langgraph" for alias in node.names)
+
+    code = (
+        "import sys, traffic_law_qa.eval.multihop; "
+        "sys.exit(1 if 'langgraph' in sys.modules else 0)"
+    )
+    assert subprocess.call([sys.executable, "-c", code]) == 0

@@ -13,7 +13,7 @@ import json
 
 import pytest
 
-from traffic_law_rag.eval.harness import (
+from traffic_law_qa.eval.harness import (
     CITE_WINDOW,
     KS,
     CaseResult,
@@ -27,7 +27,7 @@ from traffic_law_rag.eval.harness import (
     _normalize_law,
     build_cases,
 )
-from traffic_law_rag.kb.chunker import ChunkStage
+from traffic_law_qa.kb.chunker import ChunkStage
 
 LAW = "中华人民共和国道路交通安全法"
 REGULATION = "中华人民共和国道路交通安全法实施条例"

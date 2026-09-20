@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from traffic_law_rag.qa.retriever import HybridRetriever
+from traffic_law_qa.qa.retriever import HybridRetriever
 
 
 class _FakeEmbedder:

@@ -12,7 +12,7 @@
 | retrieve | `HybridRetriever`  | `Query`                         | `RetrievalResult`           |
 | generate | `AnswerGenerator`  | `Question` + `RetrievalResult`  | `Answer`                    |
 
-（同一张表也由 `python -m traffic_law_rag.pipeline layers` 打印，改的时候两边一起改。
+（同一张表也由 `python -m traffic_law_qa.pipeline layers` 打印，改的时候两边一起改。
 表里记的是**管道真正跑的那个类**：`ParseStage` / `ChunkStage` 是建库步骤的磁盘包装，
 纯计算的 `LawParser` / `LawChunker` 在它们里面。）
 

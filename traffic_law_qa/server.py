@@ -1,7 +1,7 @@
 """单文件 HTTP 服务：把 `qa()` 包成 FastAPI，含 SSE 流式。
 
-    uvicorn traffic_law_rag.server:app --port 8000
-    # 或安装后：tlr-serve
+    uvicorn traffic_law_qa.server:app --port 8000
+    # 或安装后：tlq-serve
 
     curl -X POST localhost:8000/qa -H 'Content-Type: application/json' \\
          -d '{"question":"醉驾怎么处罚"}'
@@ -17,6 +17,10 @@
 所以这里把检索器与生成器在 lifespan 里装配一次缓存在 `app.state`，
 请求只做「检索 + 生成」。两者的耗时差距在启动日志里会打出来。
 
+`/health` 有两个通道字段，别只看一个：`channels` 报**此刻实际**在走的通道
+（随预热与每次检索更新），`dense_built` 报集合**建库时**带没带稠密向量。
+`纯 BM25` 配上 `dense_built: true` 就是「向量端点挂了，但服务照常在答」。
+
 容器化见仓库根的 `Dockerfile` 与 `docker-compose.yml`（`app` 服务）。
 容器里唯一的差别是启动参数：默认绑 `127.0.0.1` 只对本地裸跑安全，
 容器内必须 `--host 0.0.0.0`，否则宿主机映射过来的端口连不上。
@@ -27,6 +31,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import time
 from contextlib import asynccontextmanager
@@ -51,6 +56,10 @@ class Runtime:
     ready: ReadyState
     rag: LegalRAG
     boot_ms: float
+    # 稠密通道此刻是否真在工作 —— **观测值**，不是配置。
+    # 与 `ready.dense` 是两件事：后者是 index_meta.json 里「建库时带没带稠密向量」
+    # 的快照，落盘之后就不会变了；这个跟着预热与每次检索走，端点挂了它才会变 False。
+    dense_live: bool = False
 
 
 @asynccontextmanager
@@ -89,9 +98,14 @@ def _boot() -> Runtime:
     warm_ms = rag.warm()
     boot_ms = (time.perf_counter() - started) * 1000
     print(f"[serve] 装配完成（{boot_ms / 1000:.2f}s）：{ready.describe()}")
-    warm_note = f"{warm_ms:.0f}ms" if warm_ms is not None else "未执行（无 embedding 配置，检索只走 BM25）"
+    # 措辞故意不写「无 embedding 配置」：warm() 对「压根没配」和「配了但端点连不上」
+    # 都返回 None，断言成前者会在后一种情况下指错方向。真实原因由每次检索的
+    # notes 带着（「查询向量化失败，本次只用 BM25：…」），这里只报事实。
+    warm_note = f"{warm_ms:.0f}ms" if warm_ms is not None else "未执行（向量端点未配置或不可达，检索只走 BM25）"
     print(f"[serve] 稠密通道预热 {warm_note}")
-    return Runtime(ready=ready, rag=rag, boot_ms=boot_ms)
+    # 集合压根没有稠密字段时，端点再通也算不上「通道在工作」，所以要 and 上 ready.dense。
+    dense_live = ready.dense and warm_ms is not None
+    return Runtime(ready=ready, rag=rag, boot_ms=boot_ms, dense_live=dense_live)
 
 
 # ------------------------------------------------------------------ 请求体
@@ -113,7 +127,15 @@ def _runtime() -> Runtime:
 # 检索与 LLM 调用都是阻塞 IO —— 写成 async def 反而会卡住整个事件循环。
 @app.get("/health")
 def health() -> dict:
-    """存活 + 库内规模 + 装配耗时。未就绪时返回 503 与原因。"""
+    """存活 + 库内规模 + 装配耗时 + 通道实况。未就绪时返回 503 与原因。
+
+    `channels` 报**此刻实际**在走的通道，`dense_built` 报集合**建库时**带没带稠密向量。
+    两个一起看才诊断得出来：`纯 BM25` 配 `dense_built: true` 是向量端点坏了；
+    `dense_built: false` 是索引本来就只建了 BM25。
+
+    通道降级**不改状态码**：端点挂了服务照常在答（BM25 是设计好的降级路径），
+    判成 503 会让容器无谓地 flapping 成 unhealthy —— 那是另一种撒谎。
+    """
     rt = getattr(app.state, "rt", None)
     if rt is None:
         raise HTTPException(status_code=503, detail=app.state.boot_error or "服务未就绪")
@@ -124,7 +146,8 @@ def health() -> dict:
         "laws": rt.ready.laws,
         "articles": rt.ready.articles,
         "rows": rt.ready.rows,
-        "channels": "稠密+BM25" if rt.ready.dense else "纯 BM25",
+        "channels": "稠密+BM25" if rt.dense_live else "纯 BM25",
+        "dense_built": rt.ready.dense,
         "index": rt.ready.action,
         "llm_ready": rt.rag.llm_ready,
     }
@@ -136,6 +159,9 @@ def ask(req: QaRequest) -> dict:
     rt = _runtime()
     started = time.perf_counter()
     retrieval = rt.rag.search(req.question, top_k=req.top_k)
+    # 把「这次到底走没走稠密」记回运行时，/health 靠它说真话。
+    # 并发下只是「最后一次写的赢」：一个状态提示，不参与控制流，不值得加锁。
+    rt.dense_live = retrieval.used_vector
     if req.mode == "search":
         payload = retrieval.to_dict()
     else:
@@ -175,6 +201,8 @@ def _sse_events(rt: Runtime, req: QaRequest):
     except Exception as exc:  # noqa: BLE001 - 检索层失败要给用户一句话而不是断连
         yield _sse("error", {"message": f"检索失败：{exc}"})
         return
+    # 与 ask() 同理：流式这条路也要让 /health 知道本次走没走稠密。
+    rt.dense_live = retrieval.used_vector
 
     yield _sse("evidence", retrieval.to_dict())
 
@@ -212,17 +240,35 @@ def _sse(event: str, payload: dict) -> str:
 
 # ------------------------------------------------------------------ 入口
 def main(argv: list[str] | None = None) -> int:
-    """tlr-serve [--host H] [--port P]"""
+    """tlq-serve [--host H] [--port P]"""
     import sys
 
     import uvicorn
 
-    args = list(sys.argv[1:] if argv is None else argv)
+    # 用 argparse 而不是手搓：`--help` 由它在解析阶段就拦下（SystemExit(0)），
+    # 绝不会走到下面那行 uvicorn.run。这一段的哨兵测试钉的就是这条 ——
+    # 手搓版本只做 `if name in args`，`--help` 没人拦，会**真的把服务起起来**。
+    parser = argparse.ArgumentParser(
+        prog="tlq-serve",
+        description="把 qa() 包成 HTTP 服务。装配在启动时做一次，请求只做检索 + 生成。",
+        epilog="等价写法：python -m traffic_law_qa.server；"
+        "或让 uvicorn 直接指定 app：uvicorn traffic_law_qa.server:app --port 8000",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="监听地址（默认 127.0.0.1；容器内必须显式给 0.0.0.0，否则映射出来的端口连不上）",
+    )
+    parser.add_argument("--port", type=int, default=8000, help="监听端口（默认 8000）")
 
-    def option(name: str, default: str) -> str:
-        return args[args.index(name) + 1] if name in args and args.index(name) + 1 < len(args) else default
+    try:
+        options = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    except SystemExit as exc:
+        # argparse 在 --help 和参数错时都会直接 SystemExit。把它收回成返回值，
+        # 让「main() 返回 int、调用方 raise SystemExit(main())」这条全仓一致的契约继续成立。
+        return exc.code if isinstance(exc.code, int) else 0
 
-    uvicorn.run(app, host=option("--host", "127.0.0.1"), port=int(option("--port", "8000")))
+    uvicorn.run(app, host=options.host, port=options.port)
     return 0
 
 

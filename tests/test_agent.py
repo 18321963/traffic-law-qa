@@ -1,7 +1,7 @@
 """Agent 循环：意图识别、两条路径、悬空工具调用、预算、提示词一致性。
 
 **全部离线**：不连 Milvus、不发网络请求。Milvus 用替身换掉，LLM 用按脚本弹消息的
-替身换掉，生成器是真的 `AnswerGenerator` 只是把它的 `_client` 换成记录器 ——
+替身换掉，生成器是真的 `AnswerGenerator`、只是在构造时注入一个假客户端 ——
 所以「Agent 的答案与线性管道的答案是同一段代码产出的」这句话是被**断言**过的，
 不是被相信的。
 
@@ -14,23 +14,26 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 
 import pytest
 
 pytest.importorskip("langgraph")   # 可选依赖：没装就跳过这一整个文件
 
-from traffic_law_rag import config
-from traffic_law_rag.agent import graph as A
-from traffic_law_rag.agent.tools import (
+from traffic_law_qa import config
+from traffic_law_qa.agent import graph as A
+from traffic_law_qa.agent import intent, reflect, trace
+from traffic_law_qa.agent.tools import (
     GET_ARTICLE_NAME,
     SEARCH_LAW_NAME,
     SEARCH_LAW_TOOL,
     build_article_index,
     merge_retrievals,
 )
-from traffic_law_rag.contracts import Question, RetrievalResult, RetrievedArticle
-from traffic_law_rag.qa.generator import AnswerGenerator
-from traffic_law_rag.qa.rag import LegalRAG
+from traffic_law_qa.contracts import Question, RetrievalResult, RetrievedArticle
+from traffic_law_qa.obs import Recorder
+from traffic_law_qa.qa.generator import AnswerGenerator
+from traffic_law_qa.qa.rag import LegalRAG
 
 FAKE_LLM_CFG = config.LLMConfig(base_url="http://fake", api_key="fake", model="fake-model")
 
@@ -166,17 +169,21 @@ def by_number(parents):
 
 
 @pytest.fixture
-def generator():
-    gen = AnswerGenerator(FAKE_LLM_CFG)
-    gen._client = RecordingClient()
-    return gen
+def client() -> RecordingClient:
+    """假 openai 客户端。测试自己持有它 —— 不去 Generator 里把私有的那份掏出来。"""
+    return RecordingClient()
+
+
+@pytest.fixture
+def generator(client) -> AnswerGenerator:
+    return AnswerGenerator(FAKE_LLM_CFG, client=client)
 
 
 def run(
     question, script, parents, generator, *,
-    forced=None, max_steps=None, retriever=None, reflect_llm=None,
+    forced=None, max_steps=None, retriever=None, reflect_llm=None, tracer=None,
 ):
-    """跑一次完整图，返回 (终态, 假 LLM, 假检索器, 提示词记录器)。
+    """跑一次完整图，返回 (终态, 假 LLM, 假检索器)。
 
     **不传 `max_steps` 就取 `AgentConfig` 的出厂默认值**（现在是 2，实测定的）。
     这里曾经写死一个字面量 `2`，注释却声称「跟着 AgentConfig 的默认走」—— 承诺和实现
@@ -205,6 +212,7 @@ def run(
         cfg=cfg,
         forced_intent=forced,
         reflect_llm=reflect_llm,
+        tracer=tracer,
     )
     state = graph.invoke(
         {
@@ -221,36 +229,36 @@ def run(
         },
         config={"recursion_limit": 3 * max_steps + 6},
     )
-    return state, llm, retriever, generator._client
+    return state, llm, retriever
 
 
 ARTICLE_Q = "《深圳经济特区道路交通安全违法行为处罚条例》第十三条怎么规定的"
 
 
 # ================================================================== 1. 头条：提示词逐字一致
-def test_agent_prompt_is_byte_identical_to_linear_pipeline(parents, generator):
+def test_agent_prompt_is_byte_identical_to_linear_pipeline(parents, generator, client):
     """**这是整个设计的验收标准**：Agent 的答案与线性管道的答案是同一段代码产出的。
 
     做法不是「读代码确认」，而是把两边真正发给模型的 `messages` 抓出来逐字比。
     如果收尾节点偷偷往证据里加了一句、或换了证据顺序，这条会红。
     """
     state, *_ = run(ARTICLE_Q, [_reflection(True)], parents, generator)
-    agent_prompt = generator._client.requests[-1]["messages"]
+    agent_prompt = client.requests[-1]["messages"]
 
     # 用同一个 search_log 独立重算一遍合并结果，再走一次同一个生成器
     merged = merge_retrievals(
         state["search_log"], question=ARTICLE_Q, parents=parents, max_evidence=6
     )
     generator.generate(Question(text=ARTICLE_Q, top_k=6), merged)
-    linear_prompt = generator._client.requests[-1]["messages"]
+    linear_prompt = client.requests[-1]["messages"]
 
     assert agent_prompt == linear_prompt
 
 
-def test_prompt_carries_the_retrieved_article_text(parents, generator):
+def test_prompt_carries_the_retrieved_article_text(parents, generator, client):
     """逐字一致的对比不能是「两边都空」——顺带确认提示词里真有法条正文。"""
     state, *_ = run(ARTICLE_Q, [_reflection(True)], parents, generator)
-    prompt = generator._client.requests[-1]["messages"]
+    prompt = client.requests[-1]["messages"]
     blob = "\n".join(m.get("content") or "" for m in prompt)
     assert "第十三条" in blob
     assert state["answer"].evidences, "证据不该为空"
@@ -260,33 +268,33 @@ def test_prompt_carries_the_retrieved_article_text(parents, generator):
 @pytest.mark.parametrize(
     ("question", "expected"),
     [
-        ("《深圳经济特区道路交通安全违法行为处罚条例》第十三条怎么规定的", A.INTENT_LOOKUP),
-        ("根据道路交通安全法实施条例第六十六条，警车有什么限制", A.INTENT_LOOKUP),
-        ("醉驾怎么处罚", A.INTENT_SEARCH),
+        ("《深圳经济特区道路交通安全违法行为处罚条例》第十三条怎么规定的", intent.INTENT_LOOKUP),
+        ("根据道路交通安全法实施条例第六十六条，警车有什么限制", intent.INTENT_LOOKUP),
+        ("醉驾怎么处罚", intent.INTENT_SEARCH),
         # 跨法歧义：「第一条」6 部法都有，不指名 → 回退检索
-        ("第一条怎么规定的", A.INTENT_SEARCH),
+        ("第一条怎么规定的", intent.INTENT_SEARCH),
         # 越界 → 回退检索
-        ("《中华人民共和国道路交通安全法》第九千条", A.INTENT_SEARCH),
+        ("《中华人民共和国道路交通安全法》第九千条", intent.INTENT_SEARCH),
         # 没说条号，即使指名了法规也要检索
-        ("《中华人民共和国道路交通安全法》里罚款收据怎么理解", A.INTENT_SEARCH),
+        ("《中华人民共和国道路交通安全法》里罚款收据怎么理解", intent.INTENT_SEARCH),
     ],
 )
 def test_classify_intent(parents, by_number, question, expected):
-    assert A.classify_intent(question, parents=parents, index=by_number) == expected
+    assert intent.classify_intent(question, parents=parents, index=by_number) == expected
 
 
 def test_classify_intent_is_pure(parents, by_number):
     """零 LLM 调用、无副作用 —— 同一输入两次结果相同。"""
-    first = A.classify_intent(ARTICLE_Q, parents=parents, index=by_number)
-    assert first == A.classify_intent(ARTICLE_Q, parents=parents, index=by_number)
+    first = intent.classify_intent(ARTICLE_Q, parents=parents, index=by_number)
+    assert first == intent.classify_intent(ARTICLE_Q, parents=parents, index=by_number)
 
 
 # ================================================================== 3. 条文定位全链路
 def test_lookup_path_skips_retrieval_entirely(parents, generator):
     """条文定位这条路：零检索调用、零 LLM 规划调用，证据就是点名的那一条。"""
-    state, llm, retriever, _ = run(ARTICLE_Q, [_reflection(True)], parents, generator)
+    state, llm, retriever = run(ARTICLE_Q, [_reflection(True)], parents, generator)
 
-    assert state["intent"] == A.INTENT_LOOKUP
+    assert state["intent"] == intent.INTENT_LOOKUP
     assert retriever.queries == [], "不该走向量/BM25 检索"
     assert len(state["search_log"]) == 1
     assert state["answer"].evidences[0].citation.endswith("第十三条")
@@ -318,15 +326,13 @@ def test_intent_is_actually_written_to_state(parents, generator):
     这条测试是那种错误的唯一防线。
     """
     state, *_ = run(ARTICLE_Q, [_reflection(True)], parents, generator)
-    assert state["intent"] == A.INTENT_LOOKUP
+    assert state["intent"] == intent.INTENT_LOOKUP
 
 
 def test_forced_intent_overrides_the_rule(parents, generator):
     """`--intent` 对照用：强行按「法规检索」跑同一道题，就必须真的走检索。"""
-    state, llm, retriever, _ = run(
-        ARTICLE_Q, [_reflection(True)], parents, generator, forced=A.INTENT_SEARCH
-    )
-    assert state["intent"] == A.INTENT_SEARCH
+    state, llm, retriever = run(ARTICLE_Q, [_reflection(True)], parents, generator, forced=intent.INTENT_SEARCH)
+    assert state["intent"] == intent.INTENT_SEARCH
     assert retriever.queries, "强制走检索时应当真的检索了"
 
 
@@ -380,7 +386,7 @@ def test_budget_exhaustion_still_produces_an_answer(parents, generator):
         script.append(_assistant(calls=[(f"c{index}", SEARCH_LAW_NAME, {"query": f"词{index}"})]))
         script.append(_reflection(False, "还不够"))
 
-    state, llm, retriever, _ = run("永远查不够的问题", script, parents, generator, max_steps=3)
+    state, llm, retriever = run("永远查不够的问题", script, parents, generator, max_steps=3)
 
     assert state["steps"] == 3
     assert state["answer"] is not None
@@ -489,7 +495,7 @@ def test_get_article_failure_is_fed_back(parents, generator):
         ),
         _reflection(True),
     ]
-    state, *_ = run("问题", script, parents, generator, forced=A.INTENT_SEARCH)
+    state, *_ = run("问题", script, parents, generator, forced=intent.INTENT_SEARCH)
     tool_messages = [m for m in state["messages"] if m.get("role") == "tool"]
     assert "没有第" in tool_messages[0]["content"]
     # 取条失败没有产出证据；search_log 里那一行是 finalize 的兜底检索，不是这条
@@ -500,7 +506,7 @@ def test_get_article_failure_is_fed_back(parents, generator):
 def test_no_evidence_falls_back_to_the_linear_pipeline(parents, generator):
     """模型一次工具都没调 → 按单轮管道兜底检索，保证 Agent 严格增量。"""
     script = [_assistant(content="我直接回答"), _reflection(True)]
-    state, llm, retriever, _ = run("域外问题", script, parents, generator)
+    state, llm, retriever = run("域外问题", script, parents, generator)
 
     assert retriever.queries, "兜底应当真的检索一次"
     assert len(state["search_log"]) == 1
@@ -571,8 +577,8 @@ def test_nodes_do_not_mutate_the_input_state(parents, by_number):
     }
     before = copy.deepcopy(state)
 
-    A.make_classify_node(parents, by_number)(state)
-    A.make_lookup_plan_node(parents, by_number)(state)
+    intent.make_classify_node(parents, by_number)(state)
+    intent.make_lookup_plan_node(parents, by_number)(state)
 
     assert state == before
 
@@ -610,10 +616,10 @@ def test_render_trace_shows_intent_and_real_tool_names(parents, generator):
         _reflection(True),
     ]
     state, *_ = run("深圳开车玩手机罚多少", script, parents, generator)
-    trace = A.render_trace(state)
-    assert f"意图：{A.INTENT_SEARCH}" in trace
-    assert f"{SEARCH_LAW_NAME}(" in trace
-    assert "命中 2 条" in trace
+    text = trace.render_trace(state)
+    assert f"意图：{intent.INTENT_SEARCH}" in text
+    assert f"{SEARCH_LAW_NAME}(" in text
+    assert "命中 2 条" in text
 
 
 def test_render_trace_reports_failed_calls_without_misnumbering(parents, generator):
@@ -626,9 +632,9 @@ def test_render_trace_reports_failed_calls_without_misnumbering(parents, generat
     ]
     state, *_ = run("问题", script, parents, generator)
     assert len(state["search_log"]) == 1
-    trace = A.render_trace(state)
-    assert "未取到" in trace
-    assert "命中 2 条" in trace       # 第 2 轮的命中数是它自己那次的，不是错位来的
+    text = trace.render_trace(state)
+    assert "未取到" in text
+    assert "命中 2 条" in text       # 第 2 轮的命中数是它自己那次的，不是错位来的
 
 
 def test_render_trace_shows_forced_stop(parents, generator):
@@ -637,7 +643,7 @@ def test_render_trace_shows_forced_stop(parents, generator):
         _reflection(False, "还不够"),
     ]
     state, *_ = run("问题", script, parents, generator, max_steps=1)
-    assert "已达最大轮数 1" in A.render_trace(state)
+    assert "已达最大轮数 1" in trace.render_trace(state)
 
 
 def test_render_trace_explains_evidence_without_retrieval(parents, generator):
@@ -649,17 +655,17 @@ def test_render_trace_explains_evidence_without_retrieval(parents, generator):
     """
     script = [_reflection(True)]      # 第一轮就不调工具
     state, *_ = run("怎么做红烧肉", script, parents, generator)
-    trace = A.render_trace(state)
+    text = trace.render_trace(state)
 
-    assert "0 次检索" in trace
-    assert "证据" in trace
-    assert "本轮未取到任何证据" in trace    # 那个「为什么有证据」的答案
-    assert "兜底检索一次" in trace
+    assert "0 次检索" in text
+    assert "证据" in text
+    assert "本轮未取到任何证据" in text    # 那个「为什么有证据」的答案
+    assert "兜底检索一次" in text
 
 
 # ================================================================== 12. 惰性导入
 def test_importing_the_package_does_not_pull_langgraph():
-    """`import traffic_law_rag` 永远不触发 langgraph 导入。
+    """`import traffic_law_qa` 永远不触发 langgraph 导入。
 
     这是「Agent 是增量能力」在依赖层面的兑现：没装 `[agent]` extra 的人
     照常走线性管道，不该因为一个可选能力而 import 失败。
@@ -667,7 +673,7 @@ def test_importing_the_package_does_not_pull_langgraph():
     import subprocess
     import sys
 
-    code = "import sys, traffic_law_rag; sys.exit(1 if 'langgraph' in sys.modules else 0)"
+    code = "import sys, traffic_law_qa; sys.exit(1 if 'langgraph' in sys.modules else 0)"
     assert subprocess.call([sys.executable, "-c", code]) == 0
 
 
@@ -683,7 +689,7 @@ def test_库外缺口直接收尾不回边(parents, generator):
         _assistant(calls=[("c1", SEARCH_LAW_NAME, {"query": "阻碍执行职务"})]),
         _reflection(False, "缺《治安管理处罚法》的责任条款", retrievable=False),
     ]
-    state, llm, retriever, _ = run("阻碍交警执法怎么罚", script, parents, generator)
+    state, llm, retriever = run("阻碍交警执法怎么罚", script, parents, generator)
 
     assert len(retriever.queries) == 1, "库外缺口不该触发第二次检索"
     assert state["steps"] == 1
@@ -708,33 +714,48 @@ def test_库内缺口照旧回边(parents, generator, retrievable):
     # max_steps 显式给 3：这里要的是**跑满两轮且第二轮审核真的调了模型**。
     # 用默认的 2 的话，第二轮末尾预算已尽，reflect 会短路不调模型 ——
     # 那样就分不清「回边生效了」和「只是没轮到短路」，测不到想测的东西。
-    state, llm, retriever, _ = run("超员怎么罚", script, parents, generator, max_steps=3)
+    state, llm, retriever = run("超员怎么罚", script, parents, generator, max_steps=3)
 
     assert len(retriever.queries) == 2
     assert state["steps"] == 2
     assert len(llm.calls) == 4
 
 
-def test_parse_reflection_的三种输入():
-    """解析层的默认值单独钉一遍 —— 图跑一整套代价太高，而这里是最容易被改错的一行。"""
-    assert A._parse_reflection('{"sufficient": false, "retrievable": false}')["retrievable"] is False
-    assert A._parse_reflection('{"sufficient": false, "retrievable": true}')["retrievable"] is True
-    assert A._parse_reflection('{"sufficient": false}')["retrievable"] is True
+def _审核(reply: str | None) -> dict:
+    """跑一次**审核节点**，返回它写进 state 的那条结论。
+
+    走公开的 `make_reflect_node`，不碰里面的解析函数：`reflections[0]` 就是解析结果本身，
+    所以断言的精度和直接调解析函数一样，但换掉解析实现时这些断言不会跟着红。
+    图跑一整套代价太高，这里只建节点。
+
+    `laws=[]` 合法 —— 库边界只进提示词，与这里要钉的默认值无关。
+    """
+    node = reflect.make_reflect_node(ScriptedLLM([_assistant(reply)]), config.AgentConfig(max_steps=2), [])
+    return node({"question": "问题", "max_steps": 2})["reflections"][0]
+
+
+def test_审核输出的默认值_三种输入():
+    """默认值单独钉一遍 —— 图跑一整套代价太高，而这里是最容易被改错的一行。"""
+    assert _审核('{"sufficient": false, "retrievable": false}')["retrievable"] is False
+    assert _审核('{"sufficient": false, "retrievable": true}')["retrievable"] is True
+    assert _审核('{"sufficient": false}')["retrievable"] is True
     # 解析不出来 → 按已足够处理（停止），此时也谈不上回边
-    assert A._parse_reflection("我不知道")["sufficient"] is True
+    assert _审核("我不知道")["sufficient"] is True
+    # 模型一条 content 都没给（None）也要走同一条路，不能炸在 `.strip()` 上
+    assert _审核(None)["sufficient"] is True
 
 
-def test_parse_reflection_的_next_query_缺了就是空串():
+def test_审核没写_next_query_时就是空串():
     """`next_query` 是给下一轮的**补充信息**，不是决策依据，所以缺了给空串而不是别的。
 
     空串 = 回灌时那半句不出现 = 与加这个字段之前逐字相同。给成 `None` 或占位文案
     都会让「模型没写」变成一句要发给模型的话。
     """
-    assert A._parse_reflection('{"sufficient": false, "next_query": "记多少分？"}')["next_query"] == "记多少分？"
-    assert A._parse_reflection('{"sufficient": false}')["next_query"] == ""
-    assert A._parse_reflection("我不知道")["next_query"] == ""
+    assert _审核('{"sufficient": false, "next_query": "记多少分？"}')["next_query"] == "记多少分？"
+    assert _审核('{"sufficient": false}')["next_query"] == ""
+    assert _审核("我不知道")["next_query"] == ""
     # 模型写了空值/纯空白，与没写同义
-    assert A._parse_reflection('{"sufficient": false, "next_query": "   "}')["next_query"] == ""
+    assert _审核('{"sufficient": false, "next_query": "   "}')["next_query"] == ""
 
 
 def test_审核提示词带着库的边界(parents, generator):
@@ -761,10 +782,10 @@ def test_轨迹区分库外收尾与预算耗尽(parents, generator):
         _reflection(False, "缺《治安管理处罚法》", retrievable=False),
     ]
     state, *_ = run("问题", script, parents, generator)     # 默认 max_steps 没花完
-    trace = A.render_trace(state)
+    text = trace.render_trace(state)
 
-    assert "缺口在库外" in trace
-    assert "已达最大轮数" not in trace
+    assert "缺口在库外" in text
+    assert "已达最大轮数" not in text
 
 
 def test_默认轮数上限是2():
@@ -896,3 +917,136 @@ def test_单题自带的_top_k_管到收尾(parents, generator):
 
     assert state["top_k"] == 2
     assert len(state["answer"].retrieval.articles) == 2, "收尾该跟着单题的 top_k 走，不是 runner 的"
+
+
+# ================================================================== 17. 观测与上色
+def _without_elapsed(payload):
+    """剔掉墙上时钟字段：`elapsed_ms` 每次运行都不同，与被测的东西无关。"""
+    if isinstance(payload, dict):
+        return {k: _without_elapsed(v) for k, v in payload.items() if k != "elapsed_ms"}
+    if isinstance(payload, list):
+        return [_without_elapsed(v) for v in payload]
+    return payload
+
+
+def test_埋点不改变终态_且每个节点恰好一个_span(parents, generator):
+    """`Recorder` 只是旁路记账：**结果与不埋点逐字段相同** —— 这是空实现降级的全部意义。
+
+    顺带钉住 span 的名字。名字写错（漏了 `node.` 前缀、拼错节点名）不会让任何行为断言
+    变红，只会让 `--timing` 的表悄悄少一行 —— 那是最难发现的一种坏。
+    """
+    script = [
+        _assistant(calls=[("c1", SEARCH_LAW_NAME, {"query": "q"})]),
+        _reflection(True),
+    ]
+    plain, *_ = run("深圳开车玩手机罚多少", script, parents, generator)
+    recorder = Recorder()
+    traced, *_ = run("深圳开车玩手机罚多少", script, parents, generator, tracer=recorder)
+
+    assert sorted({span["name"] for span in recorder.spans}) == [
+        "node.agent",
+        "node.classify",
+        "node.finalize",
+        "node.reflect",
+        "node.tools",
+    ]
+    assert traced["messages"] == plain["messages"]
+    assert traced["search_log"] == plain["search_log"]
+    assert _without_elapsed(traced["answer"].to_dict()) == _without_elapsed(
+        plain["answer"].to_dict()
+    )
+
+
+def test_invoke_自己也有一个_span(parents, generator):
+    """外层 `invoke` 与内层 `node.*` **是平的、不嵌套** —— 两者相减就是 langgraph 的调度开销。"""
+    llm = ScriptedLLM([
+        _assistant(calls=[("c1", SEARCH_LAW_NAME, {"query": "q"})]),
+        _reflection(True),
+    ])
+    rag = LegalRAG(FakeRetriever(parents), generator, top_k=6)
+    recorder = Recorder()
+    runner = A.AgentRunner(
+        rag, llm=llm, cfg=config.AgentConfig(max_steps=2), tracer=recorder
+    )
+
+    runner.invoke("醉驾怎么处罚")
+
+    assert "invoke" in {span["name"] for span in recorder.spans}
+    # 平铺的证据：invoke 只出现一次，且不与任何 node 同名
+    assert sum(span["name"] == "invoke" for span in recorder.spans) == 1
+
+
+def test_span_真的计时且异常也记账():
+    """崩在哪个节点比耗时更有用 —— 所以异常也要落一行，但**不吞**，继续往上抛。"""
+    recorder = Recorder()
+    with pytest.raises(ValueError):
+        with recorder.span("boom"):
+            raise ValueError("炸了")
+
+    assert len(recorder.spans) == 1
+    assert recorder.spans[0]["name"] == "boom"
+    assert recorder.spans[0]["seconds"] >= 0
+
+
+def test_计时表按名字聚合且按总耗时降序():
+    """聚合在 `Recorder.summary()`、排版在 `trace.render_timing()` —— 各归各位。"""
+    recorder = Recorder()
+    recorder.spans = [
+        {"name": "node.agent", "seconds": 3.0},
+        {"name": "node.tools", "seconds": 1.0},
+        {"name": "node.agent", "seconds": 1.0},
+        {"name": "invoke", "seconds": 6.0},
+    ]
+    rows = recorder.summary()
+
+    assert [row["name"] for row in rows] == ["invoke", "node.agent", "node.tools"]  # 大头的先看
+    assert rows[1] == {"name": "node.agent", "count": 2, "total": 4.0, "mean": 2.0}
+
+    text = trace.render_timing(rows)
+    assert "node.agent" in text
+    assert "2 次" in text
+    assert "4.00s" in text
+    assert "2.00s" in text          # 均值
+    assert "\x1b" not in text
+    # 空表要说得出话：`--linear` 不跑图，那时它必须有解释，不能是一行空白
+    assert "无计时数据" in trace.render_timing([])
+
+
+def test_轨迹上色默认关闭且只上判别行(parents, generator):
+    """上色必须是**纯装饰**：剥掉转义序列后与不上色逐字节相同。
+
+    这条同时钉住三件事：默认关（重定向进 `data/traces/*.log` 时全是转义序列就是灾难）、
+    只上判别行（通篇上色等于没重点）、以及开与不开渲染的是同一份内容。
+    """
+    script = [
+        _assistant(calls=[("c1", SEARCH_LAW_NAME, {"query": "q"})]),
+        _reflection(True),
+    ]
+    state, *_ = run("问题", script, parents, generator)
+
+    plain = trace.render_trace(state)
+    colored = trace.render_trace(state, color=True)
+
+    assert "\x1b" not in plain
+    assert colored != plain
+    assert re.sub(r"\x1b\[[0-9;]*m", "", colored) == plain
+    # 「审核：够了」是这条脚本里**唯一**有判别价值的一行，所以恰好一对开/闭转义
+    assert colored.count("\x1b") == 2
+
+
+def test_库外缺口那行是黄的而命中行不是(parents, generator):
+    """绿=正常收敛、黄=非正常收敛。命中行是过程记录，不是结论，不上色。"""
+    script = [
+        _assistant(calls=[("c1", SEARCH_LAW_NAME, {"query": "q"})]),
+        _reflection(False, "缺口在库外", retrievable=False),
+    ]
+    state, *_ = run("问题", script, parents, generator)
+    colored = trace.render_trace(state, color=True)
+
+    assert "\x1b" + "[33m" in colored          # 黄：补不上
+    assert "\x1b" + "[32m" not in colored      # 没有绿
+
+    # 按行看：带转义的行**有且只有**审核那一行（「命中 N 条」是过程记录，不上色）
+    colored_lines = [line for line in colored.splitlines() if "\x1b" in line]
+    assert len(colored_lines) == 1
+    assert "审核" in colored_lines[0]

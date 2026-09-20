@@ -445,7 +445,7 @@ class ParseStage:
 
 # ------------------------------------------------------------------ 调试入口
 def main(argv: list[str] | None = None) -> int:
-    """python -m traffic_law_rag.kb.law_parser [--force] [--only law_id]"""
+    """python -m traffic_law_qa.kb.law_parser [--force] [--only law_id]"""
     args = list(sys.argv[1:] if argv is None else argv)
     only = args[args.index("--only") + 1] if "--only" in args else None
     ParseStage().run(force="--force" in args, only=only)

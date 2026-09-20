@@ -238,7 +238,7 @@ class ChunkStage:
 
 # ------------------------------------------------------------------ 调试入口
 def main(argv: list[str] | None = None) -> int:
-    """python -m traffic_law_rag.kb.chunker [--show 条号]"""
+    """python -m traffic_law_qa.kb.chunker [--show 条号]"""
     args = list(sys.argv[1:] if argv is None else argv)
     chunk_set = ChunkStage().run()
 
