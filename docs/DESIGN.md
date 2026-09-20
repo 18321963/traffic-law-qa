@@ -22,6 +22,7 @@
   - [测试](#测试)
   - [HTTP 服务](#http-服务)
   - [Docker](#docker)
+  - [本机解释器：venv 建在 conda 上](#本机解释器venv-建在-conda-上)
 - [9. Agentic RAG（阶段二）](#9-agentic-rag阶段二)
   - [图](#图)
   - [两个工具](#两个工具)
@@ -758,6 +759,42 @@ chunk 619 个 → 向量化 → 建出 619 行稠密+BM25 集合」。其中 par
 
 密钥不进镜像：`.env` 被 `.dockerignore` 挡在构建上下文外，运行时由 compose 的
 `env_file` 注入。已实测确认镜像里既无 `.env` 也无 `volumes/`（162M 的 Milvus 数据卷）。
+
+### 本机解释器：venv 建在 conda 上
+
+`.venv` 不是独立解释器。它的 `pyvenv.cfg` 第一行是 `home = D:\anaconda3\envs\rag`，
+留着的建它的那条命令就是 `D:\anaconda3\envs\rag\python.exe -m venv …` —— 标准库和
+`python311.dll` 都在那个 conda 环境里。**删掉 `rag`，`.venv` 立刻废**：所以「两个环境留一个」
+这件事做不到，要留的那个正寄生在另一个上面。
+
+包倒是彻底隔离的（`include-system-site-packages = false`）：项目的依赖全在 `.venv`，
+`rag` 里那 333 项（jupyter 全家桶、pymilvus **2.3.8**）项目一个也看不见。**所以「项目在用
+哪个环境」本来没有歧义 —— 除非有人起了一个新的 python 进程。**
+
+坑就在这层。`.venv\Scripts\python.exe` 是个转发器（274 KB），真正跑代码的进程是
+`rag\python.exe`（105 KB），于是从 venv 里再起一个 python 时，Windows 那条
+**「先找父进程自己所在的目录」**的规则（它排在 PATH 之前）正好命中 `rag\python.exe`：
+
+| 在一段跑在 `.venv` 里的代码里写 | 实际落到 | pymilvus |
+|---|---|---|
+| `subprocess.run(["python", …])` | `D:\anaconda3\envs\rag\python.exe` | **2.3.8** |
+| `subprocess.run([sys.executable, …])` | `.venv\Scripts\python.exe` | 2.6.17 |
+
+**规矩：起子进程一律写 `sys.executable`，不写 `"python"`。** 仓库里那两处
+（[test_agent.py](../tests/test_agent.py)、[test_multihop.py](../tests/test_multihop.py)）
+本来就这么写，所以日常测试咬不到 —— 它咬的是手写的临时脚本。转发器是 Windows 上 venv 的
+通用做法、不是 conda 特有的，换成官方 Python 也未必干净，这条规矩才是根治。
+
+难查是因为**报出来的不是版本错**：2.3.8 没有 `MilvusClient.get_server_version`，而
+`api._ping()` 把这个 `MilvusError` 换成一句「Milvus 连不上（…）→ 先执行：
+docker compose up -d --wait」（`from None` 把原始异常吞了）。于是「解释器不对」伪装成
+「Milvus 没起」—— 而 Milvus 本来就常没起，这个伪装格外像真的。撞上了先验一句：
+
+```
+python -c "import sys, pymilvus; print(pymilvus.__version__, sys.prefix)"
+```
+
+版本和 `prefix` 一起看，就知道落在哪个环境里了。
 
 ## 9. Agentic RAG（阶段二）
 

@@ -48,7 +48,7 @@ python -m traffic_law_qa.pipeline build        # 建库，docx 的 sha1 没变�
 python -m traffic_law_qa "醉驾怎么处罚"         # 提问
 ```
 
-两条路都不强依赖 key：没有 LLM key 时生成层拒答，检索退化为一套可用的 BM25 关键词方案。装包时带了两个短命令：`tlq-qa "醉驾怎么处罚"`（等价裸跑的最后一步）和 `tlq-serve`（起 HTTP 服务）。
+两条路都不强依赖 key：没有 LLM key 时生成层拒答，检索退化为一套可用的 BM25 关键词方案。装包时另带了两个短命令，完整清单见下面「所有入口」。
 
 当库用只有一个口子：
 
@@ -58,6 +58,30 @@ from traffic_law_qa import qa
 print(qa("醉驾怎么处罚").render())                                  # 检索 + 生成
 print(qa("深圳 行人在机动车道 罚款多少", mode="search").render())  # 只检索，不花 LLM 的钱
 ```
+
+## 所有入口
+
+装好包（`pip install -e .`）之后能敲的全部路径。`kb/` 那四个不认 `--help` —— 它们手搓解析 `sys.argv`，`--help` 会被当成普通参数**真的开始干活**，其余七个都由 argparse 在解析阶段拦下。
+
+| 命令 | 干什么 |
+|---|---|
+| `python -m traffic_law_qa "问题"` | 提问：确保索引就绪 → 检索 → 生成 |
+| `python -m traffic_law_qa.pipeline build \| status \| layers` | 建库 / 看库内规模 / 看七层管道的输入输出 |
+| `python -m traffic_law_qa.kb.docx_reader [docx …]` | 建库第一步：docx → 段落，不给路径就跑全部 |
+| `python -m traffic_law_qa.kb.law_parser [--force] [--only 法id]` | 第二步：段落 → 法→章→节→条，sha1 没变就跳过 |
+| `python -m traffic_law_qa.kb.chunker [--show 条号]` | 第三步：条文 → 父子块 |
+| `python -m traffic_law_qa.kb.indexer [--no-vector] [--query 词]` | 第四步：块 → Milvus 集合 |
+| `python -m traffic_law_qa.agent "问题" [--trace]` | Agentic RAG：模型自己决定查什么、查几轮 |
+| `python -m traffic_law_qa.eval [--reference]` | 域内 82 题：hit@k / MRR；`--reference` 换跑 112 道点名桶，量规则取条能否唯一定位 |
+| `python -m traffic_law_qa.eval.singlehop` | 单跳 82 题：rag vs agent 两臂对照 |
+| `python -m traffic_law_qa.eval.multihop` | 跨法多跳题集 |
+| `python -m traffic_law_qa.server [--host H] [--port P]` | 起 HTTP 服务，默认 8000 |
+| `tlq-qa "问题"` | 短命令，等价 `python -m traffic_law_qa` |
+| `tlq-serve` | 短命令，等价 `python -m traffic_law_qa.server` |
+
+`…eval` 与 `…agent` 各是一次纯转发：实现在 `eval/harness.py` 和 `agent/cli.py`，那两个模块也能直接 `-m` 跑（`…eval.harness` / `…agent.cli`），转发文件存在的意义只是让重构前记熟的那条命令继续能用。
+
+十三条路径都验过：十一条 `-m` 起得来，两个短命令正常，服务那条 `/health` 返回 200。
 
 ## 它长什么样
 
@@ -94,7 +118,7 @@ traffic_law_qa/
 ├── kb/     建库四步：docx 进，Milvus 集合出（只在 build 时跑）
 ├── qa/     问答三步：改写 → 混合检索 → 强制引用式生成
 ├── agent/  Agentic RAG：模型自己规划查什么、查几轮
-└── eval/   四条评测入口：域内 hit@k / 规则取条探针 / 跨法多跳 / 单跳两臂对照
+└── eval/   四条评测路径：域内 hit@k / 规则取条探针 / 跨法多跳 / 单跳两臂对照
 
 法规知识库/   docx（唯一真源）→ text → parsed → chunks → index
 tests/        401 条，全部离线（一定很多过时的）
@@ -113,6 +137,7 @@ docs/         DESIGN.md
 测试过时更多，要删了重写
 审查agent后面加一个打分agent测正确率
 加网页搜索工具
+加PDF解析
 微调
 强化学习
 记忆（这项目好像需求不高）
