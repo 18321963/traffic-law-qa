@@ -200,6 +200,9 @@ class AgentRunner:
                 llm=self.llm,
                 cfg=self.cfg,
                 forced_intent=self.forced_intent,
+                # 漏掉这一行的话 `load()` 造的第二个客户端**根本进不了图**，
+                # 审核悄悄落回规划轮那个模型 —— `AGENT_REFLECT_*` 全程不生效。
+                reflect_llm=self.reflect_llm,
                 tracer=self.tracer,
             )
         return self._graph
