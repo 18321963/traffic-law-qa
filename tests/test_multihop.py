@@ -1,7 +1,7 @@
 """跨法规多跳题集的护栏测试 —— 全部离线，不连 Milvus、不调 LLM。
 
 护栏是这份题集唯一的可信度来源（gold 是模型给的，不是机械可验证的边），
-所以**负向用例比正向更重要**：必须证明「同法」「泄漏」「不存在的条」都会被拒。
+所以**负向用例比正向更重要**：必须证明「同法」「题面自带条号」「不存在的条」都会被拒。
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from traffic_law_rag.eval.multihop import (
     defect_diagnostic,
     format_key,
     full_budget_summary,
+    generate,
     is_preamble,
     is_pure_scope,
     load_cases,
@@ -53,7 +54,7 @@ def test_坏键被拒(raw: str):
         parse_key(raw)
 
 
-# ================================================================== G1 泄漏
+# ================================================================== G1 题面自带条号
 @pytest.mark.parametrize(
     "question",
     [
@@ -62,16 +63,16 @@ def test_坏键被拒(raw: str):
         "根据《深圳经济特区智能网联汽车管理条例》，责任怎么分？",
     ],
 )
-def test_题面泄漏被拒(question: str, library: Library):
-    """条号与《法名》只要出现一样，答案就被题面自己写出来了。"""
+def test_题面自带条号被拒(question: str, library: Library):
+    """条号与《法名》只要出现一样，定位信息就由题面自己给出了。"""
     with pytest.raises(HopError):
         check_question(question, library)
 
 
-def test_题面不加书名号写法名也算泄漏(library: Library):
+def test_题面不加书名号写法名也算自带条号(library: Library):
     """首轮试跑真踩到过：「不是说全国道交法里规定不系安全带才罚50吗」。
 
-    它没写书名号，`RE_LAW` 拦不住 —— 但法名简称原样在里面，答案等于被问出来了。
+    它没写书名号，`RE_LAW` 拦不住 —— 但法名简称原样在里面，定位信息等于被题面自己给出了。
     """
     with pytest.raises(HopError, match="法规名"):
         check_question("道路交通安全法里说这种情况只警告，为什么深圳罚这么重", library)
@@ -357,6 +358,55 @@ def test_跨法种子只认别的法(library: Library):
     # 实施条例第一条：「根据《中华人民共和国道路交通安全法》……制定本条例」—— 板上钉钉的种子
     pairs = {(p.law_id, p.article_no) for p in sites}
     assert ("road_traffic_safety_regulation", "第一条") in pairs
+
+
+# ================================================================== 续跑
+class _照抄锚点的假LLM:
+    """照着锚点编题，每次换一部法当「另一条」，题面带流水号好让每条都不一样。"""
+
+    available = True
+
+    def __init__(self, library: Library):
+        self.library = library
+        self.calls = 0
+
+    def chat(self, history, temperature=0.0):
+        del temperature
+        prompt = next(row["content"] for row in history if row["role"] == "user")
+        # 「【本条】法名　条号」—— 条号那截不能进题面，会被自带条号护栏拦下
+        head = next(r for r in prompt.splitlines() if r.startswith("【本条】"))
+        anchor_name = head.split()[0][len("【本条】"):]
+        other = next(name for name in self.library.law_names if name != anchor_name)
+
+        self.calls += 1
+        content = json.dumps(
+            {
+                "question": f"路上出了点事想问问，这是第{self.calls}回：保险只赔一部分，剩下的谁掏",
+                "other_law": other,
+                "other_article_no": "第二条",
+                "why": "一条管赔偿范围，一条管责任划分",
+            },
+            ensure_ascii=False,
+        )
+        return {"content": content}, {}
+
+
+def test_续跑不重挖同一个锚点(library: Library, monkeypatch):
+    """**这条是回归**：续跑时只按题面去重挡不住重挖。
+
+    `generate` 曾经判的是 `_normalize(anchor.text) in seen` —— 拿整条法条去撞题面集合，
+    恒不相等，等于没判。锚点表又是固定顺序，于是「续跑补题」永远从第一个锚点重新挖起，
+    补多少道都是同 gold 同考点的换皮题。这里让假 LLM 每次都吐一条合格的题面，
+    所以能红的只剩锚点没被记住这一件事。
+    """
+    fake = _照抄锚点的假LLM(library)          # 同一个实例跨两次调用，题面才不重样
+    monkeypatch.setattr("traffic_law_rag.agent.graph.ToolCallingLLM", lambda: fake)
+
+    first = generate(target=1, library=library, verbose=False)
+    second = generate(target=2, library=library, seed=first, verbose=False)
+
+    assert len(second) == 2
+    assert second[1]["anchor"] != first[0]["anchor"]
 
 
 # ================================================================== 统计

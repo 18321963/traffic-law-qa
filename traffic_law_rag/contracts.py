@@ -2,14 +2,19 @@
 
 每个阶段只认相邻两层的契约对象，不关心对方的实现：
 
-| 层 | 类 | 输入 | 输出 |
-|----|----|------|------|
-| read     | `DocxReader`       | `Path`                        | `list[Paragraph]` |
-| parse    | `LawParser`        | `list[Paragraph]`             | `LawDocument` |
-| chunk    | `LawChunker`       | `LawDocument`                 | `ChunkSet` |
-| index    | `Indexer`          | `ChunkSet`                    | `IndexStats` |
-| retrieve | `HybridRetriever`  | `Query`                       | `RetrievalResult` |
-| generate | `AnswerGenerator`  | `Question` + `RetrievalResult`| `Answer` |
+| 层       | 类                 | 输入                            | 输出                        |
+|----------|--------------------|---------------------------------|-----------------------------|
+| read     | `DocxReader`       | docx 路径 `Path`                | `list[Paragraph]`           |
+| parse    | `ParseStage`       | docx 目录                       | `list[LawDocument]`         |
+| chunk    | `ChunkStage`       | `list[LawDocument]`             | `ChunkSet`                  |
+| index    | `Indexer`          | `ChunkSet`                      | `IndexStats`                |
+| rewrite  | `QueryRewriter`    | `Query`                         | `RewrittenQuery`            |
+| retrieve | `HybridRetriever`  | `Query`                         | `RetrievalResult`           |
+| generate | `AnswerGenerator`  | `Question` + `RetrievalResult`  | `Answer`                    |
+
+（同一张表也由 `python -m traffic_law_rag.pipeline layers` 打印，改的时候两边一起改。
+表里记的是**管道真正跑的那个类**：`ParseStage` / `ChunkStage` 是建库步骤的磁盘包装，
+纯计算的 `LawParser` / `LawChunker` 在它们里面。）
 
 契约对象自己负责 JSON 读写（`to_dict` / `from_dict`），所以磁盘格式的变更
 只需要改这一个文件。
@@ -337,6 +342,7 @@ class RewrittenQuery:
         }
 
 
+# ============================================================ 6. retrieve 层
 @dataclass(frozen=True)
 class Query:
     """检索请求。"""
@@ -449,7 +455,7 @@ class RetrievalResult:
         }
 
 
-# ============================================================ 6. generate 层
+# ============================================================ 7. generate 层
 @dataclass(frozen=True)
 class Evidence:
     """喂给 LLM 的一条证据（= 一条法条）。"""
@@ -512,7 +518,7 @@ class Answer:
         return "\n".join(parts)
 
 
-# ============================================================ 7. 编排层
+# ============================================================ 8. 编排层
 @dataclass(frozen=True)
 class StageReport:
     """单个阶段的执行结果。"""
@@ -555,7 +561,7 @@ class PipelineReport:
         return "\n".join(lines)
 
 
-# ============================================================ 8. 门面层
+# ============================================================ 9. 门面层
 @dataclass(frozen=True)
 class CorpusStats:
     """已装配语料的规模与通道状态（`LegalRAG.stats()` 的产物）。

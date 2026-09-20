@@ -48,7 +48,7 @@ all = [
 
 [project.scripts]
 tlr-qa = "traffic_law_rag.__main__:main"
-tlr-serve = "traffic_law_rag.server_demo:main"
+tlr-serve = "traffic_law_rag.server:main"
 
 [project.urls]
 Homepage = "https://github.com/18321963/traffic-law-rag"

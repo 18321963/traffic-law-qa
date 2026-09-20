@@ -91,6 +91,16 @@ services:
       # 容器内必须用**服务名**连 Milvus。localhost 在容器里指容器自己 ——
       # .env 里那个 http://localhost:19530 是给宿主机裸跑用的，这里必须覆盖掉。
       MILVUS_URI: http://standalone:19530
+      # 同一类问题，同一个理由：.env 里的 embedding 端点也是宿主机上的
+      # http://localhost:11434（Ollama），容器里连不上。踩过一次：**它不报错**，
+      # 检索层按设计静默降级成纯 BM25，容器照常起来、/health 照常报「稠密+BM25」
+      # （那个字段只看配置与集合 schema，不探测端点），只有启动日志里
+      # 「稠密通道预热」那行会变成「未执行」。所以这里必须显式覆盖。
+      EMBED_BASE_URL: http://host.docker.internal:11434/v1
+    # Docker Desktop（Win/Mac）自带 host.docker.internal；Linux 上不认这个名字，
+    # 要显式给一条 host-gateway，否则上面那个 EMBED_BASE_URL 会解析不了。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
     volumes:

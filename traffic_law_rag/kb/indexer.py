@@ -67,7 +67,10 @@ class EmbeddingClient:
         return self._client
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        """分批向量化，失败按指数退避重试。"""
+        """分批向量化，失败按指数退避重试。
+
+        **段落侧**：建库时喂的是法条原文，这里绝不加查询前缀 —— 理由见 `embed_query`。
+        """
         client = self._ensure_client()
         vectors: list[list[float]] = []
         batch = max(1, self.cfg.batch)
@@ -75,8 +78,26 @@ class EmbeddingClient:
             vectors.extend(self._embed_window(client, texts[start : start + batch]))
         return vectors
 
-    def embed_one(self, text: str) -> list[float]:
-        return self.embed([text])[0]
+    def embed_query(self, text: str) -> list[float]:
+        """向量化一条**查询** —— 与 `embed()` 分开，是因为两者在 bge 上不是同一个用法。
+
+        bge-zh 系列（bge-large-zh-v1.5、bge-m3）是**按「查询加指令前缀、段落不加」训练**的，
+        两边一视同仁就是没按它的用法用。82 题实测，同一进程、同一索引，只差这个前缀：
+
+            无前缀   hit@1 68.3%  hit@3 84.1%  hit@6 87.8%  MRR 0.761
+            加前缀   hit@1 69.5%  hit@3 84.1%  hit@6 91.5%  MRR 0.777
+
+        四项里三项变好、一项持平，所以它现在是默认行为的一部分。
+
+        前缀走 `EMBED_QUERY_PREFIX` 配置而**不是写死在这里**：换成 text-embedding-v4
+        这类不吃前缀的模型时，把它留空就回到原样，不必回来改代码。默认空值另一层意思
+        是「没配前缀的部署与加这个功能之前逐位相同」。
+
+        调用方注意：改这个前缀**不需要重建索引** —— 它只影响查询怎么编码，段落向量
+        与它无关（`_stale_reason` 比对的是 embedding_model，不含前缀，这是对的）。
+        """
+        prefix = self.cfg.query_prefix
+        return self.embed([prefix + text if prefix else text])[0]
 
     def _embed_window(self, client, window: list[str]) -> list[list[float]]:
         kwargs: dict[str, Any] = {}

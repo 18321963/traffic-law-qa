@@ -73,7 +73,6 @@ from typing import Annotated, Any, Literal, TypedDict
 
 from .. import config
 from ..contracts import Answer, ParentChunk, Question, RetrievalResult
-from ..qa.generator import AnswerGenerator
 from ..qa.rag import LegalRAG
 from .tools import (
     GET_ARTICLE_NAME,
@@ -171,9 +170,20 @@ sufficient = false 时，还必须回答第二个独立的问题：**这个缺�
   例如只找到罚款条款、没找到记分条款，就应判 false 并把「记分」写进 missing。
 - 但**问题本身没问的要素不算缺**。不要因为「还想知道别的」而判 false。
 
+**判出缺口之后，再把它写成一句能直接拿去检索的话**（`next_query`），交给下一轮。
+`missing` 是给决策看的（缺哪一类规定），`next_query` 是给检索用的 —— 两者不是一回事：
+
+- 写成**一句完整的问话**，像用户会问的那样。不要写成「记分条款」「超载标准」这种名词短语：
+  检索层会把口语自动对齐成法条用语（醉驾→醉酒驾驶），拆成关键词反而稀释信号。
+- 只问**缺的那一块**，已经查到的东西不要再问一遍。一句话只问一件事。
+- 缺口在库外（`retrievable = false`）时留空 —— 那一轮马上就收尾，这句话没人会读到。
+
+例：`missing` →「缺记分条款」，`next_query` →「驾驶机动车不按规定使用安全带的，记多少分？」
+
 只输出 JSON，不要任何其他文字、不要 markdown 代码块：
 {"sufficient": true 或 false, "retrievable": true 或 false,
- "reason": "一句话说明判断依据", "missing": "还缺什么；sufficient 为 true 时留空"}
+ "reason": "一句话说明判断依据", "missing": "还缺什么；sufficient 为 true 时留空",
+ "next_query": "下一轮拿去检索的那句问话；sufficient 为 true 或缺口在库外时留空"}
 """
 
 
@@ -188,6 +198,9 @@ def _parse_reflection(text: str) -> dict:
     这个字段是给「缺口在不在库内」用的，而**不确定时不该替模型做停止的决定** ——
     默认 True 时行为与加这个字段之前逐位相同，默认 False 则会在模型不输出它时
     静默改掉循环行为。那不是「省了一轮」，是换了套逻辑。
+
+    `next_query`（缺口写成的一句问话）缺失时默认 **空串**，空串 = 不给规划轮这句提示，
+    也就是与加这个字段之前逐位相同。它只是给下一轮的**补充信息**，缺了不影响回边与否。
     """
     raw = (text or "").strip()
     start, end = raw.find("{"), raw.rfind("}")
@@ -202,12 +215,14 @@ def _parse_reflection(text: str) -> dict:
                 "retrievable": bool(data.get("retrievable", True)),
                 "reason": str(data.get("reason") or "").strip(),
                 "missing": str(data.get("missing") or "").strip(),
+                "next_query": str(data.get("next_query") or "").strip(),
             }
     return {
         "sufficient": True,
         "retrievable": True,
         "reason": f"审核输出无法解析，按已足够处理：{raw[:60]}",
         "missing": "",
+        "next_query": "",
     }
 
 
@@ -646,7 +661,13 @@ def _make_reflect_node(llm: ToolCallingLLM, cfg: config.AgentConfig, laws: list[
         if max_steps - state.get("steps", 0) <= 0:
             return {
                 "reflections": [
-                    {"sufficient": False, "reason": f"已达最大轮数 {max_steps}", "missing": ""}
+                    {
+                        "sufficient": False,
+                        "retrievable": True,
+                        "reason": f"已达最大轮数 {max_steps}",
+                        "missing": "",
+                        "next_query": "",
+                    }
                 ]
             }
 
@@ -665,9 +686,12 @@ def _make_reflect_node(llm: ToolCallingLLM, cfg: config.AgentConfig, laws: list[
         # **只在真要回边时才回灌**：判成「库外」的那条缺口马上就收尾了，这条消息没人会读到，
         # 留在历史里反而与「就此停止」的决定自相矛盾。
         if not reflection["sufficient"] and reflection["retrievable"] and reflection["missing"]:
-            update["messages"] = [
-                {"role": "user", "content": f"[检索审核] 还缺：{reflection['missing']}"}
-            ]
+            content = f"[检索审核] 还缺：{reflection['missing']}"
+            # 审核顺手把这个缺口写成了**一句问话**，规划轮可以直接拿它当检索词。
+            # 没写（旧模型/解析不出来）就只发上面那半句 —— 与加这个字段之前逐位相同。
+            if reflection.get("next_query"):
+                content += f"\n[检索审核] 建议查：{reflection['next_query']}"
+            update["messages"] = [{"role": "user", "content": content}]
         return update
 
     return reflect_node
@@ -774,7 +798,7 @@ def _make_finalize_node(
             top_k=active_top_k,
         )
         # 既有入口，零改动：Agent 的答案与线性管道的答案是同一段代码产出的
-        answer = rag.generator.generate(question, merged)
+        answer = rag.answer(question, merged)
         return {"answer": replace(answer, notes=answer.notes + tuple(notes)), "search_log": extra}
 
     return finalize_node
@@ -904,10 +928,6 @@ class AgentRunner:
         # 真实第二个客户端只在 `load()` 里造 —— 那里才知道该读 `AGENT_REFLECT_*`。
         self.reflect_llm = reflect_llm or self.llm
         self._graph = None
-
-    @property
-    def generator(self) -> AnswerGenerator:
-        return self.rag.generator
 
     @property
     def top_k(self) -> int:
@@ -1070,7 +1090,10 @@ def render_trace(state: AgentState) -> str:
                 # 「补不上」是个决定性结论，和「还不够」不是一回事，轨迹里要分得开
                 lines.append(f"[agent]         审核：不够，但缺口在库外、再检也补不上 → 收尾 —— {tail}")
             else:
-                lines.append(f"[agent]         审核：不够 —— {tail}")
+                # 一并印出审核拟的检索问句：紧下一行就是规划轮实际发出去的检索词，
+                # 两者挨着才好看出规划轮有没有照办。
+                hint = f" →「{verdict['next_query']}」" if verdict.get("next_query") else ""
+                lines.append(f"[agent]         审核：不够 —— {tail}{hint}")
 
     answer = state.get("answer")
     if answer is not None:

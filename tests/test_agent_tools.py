@@ -114,7 +114,7 @@ def test_longer_law_name_beats_its_own_prefix(parents, index):
 
     这条是回归测试：此前的实现是「命中两个法名就判歧义」，于是
     「…实施条例第六十六条」被误判成提到了两部法规而退回检索 —— 实际上题面
-    只提到了一部。实测这条让泄漏桶里 18 道题白白失去精确取条。
+    只提到了一部。实测这条（按当时的 208 行口径）让点名桶里 18 行白白失去精确取条。
     """
     hit = find_article("道路交通安全法实施条例第六十六条", parents=parents, index=index)
     assert hit is not None
@@ -136,7 +136,7 @@ def test_two_laws_really_mentioned_is_ambiguous(parents, index):
 def test_find_article_returns_none_when_no_article_number(parents, index):
     """没有条号 → None。即使题面指名了法规。
 
-    泄漏桶里有一批这种题（「在《X 法》中提到的罚款收据…」），它们**本来就该**走检索：
+    点名桶里有一批这种题（「在《X 法》中提到的罚款收据…」），它们**本来就该**走检索：
     题面没说问哪一条，精确取条无从谈起。
     """
     assert find_article(

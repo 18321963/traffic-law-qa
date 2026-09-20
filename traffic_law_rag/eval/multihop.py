@@ -11,14 +11,14 @@
 
 **护栏**（不过就重试，连续失败丢弃该条）：
 
-    G1  题面不含条号、不含《法名》   —— 否则答案泄漏，检索必然命中，测不出东西
+    G1  题面不含条号、不含《法名》   —— 否则题面自带定位信息，检索必然命中，测不出检索
     G2  gold 每一条都能解析到真实存在的条文
     G3  gold 必须跨 >= 2 部法规      —— 硬闸，就是本模块存在的理由
     G4  题面去重
 
 **诚实交代两件事，别被数字骗了：**
 
-1. **gold 是模型给的，不是机械可验证的边。** 这与现有 135 题同一个噪声来源
+1. **gold 是模型给的，不是机械可验证的边。** 这与单跳那 82 道题同一个噪声来源
    （语料的 gold 也是从模型 output 里解析的）。护栏能保证「条存在」「真跨法」，
    保证不了「这一条真的必要」。
 2. **所以基线可检索性只做诊断，不做筛选。** 若把「基线捞不到」当成入选条件，
@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,9 @@ __all__ = [
     "check_question",
     "build_case",
     "summarize",
+    # 两侧并排跑与全预算汇总：单跳对照（eval.singlehop）复用同一份
+    "trace",
+    "full_budget_summary",
     "main",
 ]
 
@@ -165,19 +169,19 @@ def _law_aliases(library: Library) -> tuple[str, ...]:
 def check_question(question: str, library: Library) -> None:
     """G1：题面不得含条号、不得含《法名》或其简称。
 
-    只要泄漏一样，答案就被题面自己写出来了 —— 检索必然命中，指标就成了
-    在测「正则能不能匹配中文数字」。现有 135 题也是这样剔出来的。
+    只要带上一样，题面就把定位信息自己写出来了 —— 检索必然命中，指标就成了
+    在测「正则能不能匹配中文数字」。单跳那套题也是这样剔出来的。
     """
     text = (question or "").strip()
     if not text:
         raise HopError("题面为空")
     if RE_ARTICLE.search(text):
-        raise HopError("题面含条号，答案泄漏")
+        raise HopError("题面含条号，自带定位信息")
     if RE_LAW.search(text):
-        raise HopError("题面含《法名》，答案泄漏")
+        raise HopError("题面含《法名》，自带定位信息")
     for alias in _law_aliases(library):
         if alias in text:
-            raise HopError(f"题面含法规名「{alias}」，答案泄漏")
+            raise HopError(f"题面含法规名「{alias}」，自带定位信息")
 
 
 def build_case(raw: dict, library: Library) -> HopCase:
@@ -307,7 +311,7 @@ def summarize(cases: list[HopCase], *, library: Library | None = None) -> str:
 def overlap_diagnostic(cases: list[HopCase], library: Library) -> str:
     """题面与 gold 原文的最长公共片段 —— 越长说明题面越像在**抄条文**而不是提问。
 
-    G1 拦得住条号和法名，拦不住「把条文内容改写进题面」。这个数就是那份残余泄漏的
+    G1 拦得住条号和法名，拦不住「把条文内容改写进题面」。这个数就是那份残余重合的
     可见化：中位数要是到了十几个字，说明题面在复述答案，题集就白造了。
     """
 
@@ -464,7 +468,11 @@ GEN_SYSTEM = (
 GEN_TEMPLATE = """下面是一部法规的条文原文。请写**一个**自然的中文用户问题。
 
 硬性要求：
-1. 完整回答这个问题，必须**同时**用到下面这条条文，**以及另一部法规中的某一条**。
+1. 这必须是**多跳**题：**只问一件事**，而这件事要答全，必须把两条串起来用。
+   - 对的形状：本条给出规则，规则里的某个概念/资格/范围/标准得看另一条才定得下来。
+     例：本条说「不得超过核定的人数」，而「核定的人数」怎么算写在另一条里。
+   - 错的形状：把两件事并排问进一句（「这样算不算违规？是不是还得买保险？」）——
+     两条各答一半，去掉哪条都还能答，这是拼盘，不是多跳。
 2. 问题要像一个真实用户会问的话（口语一点、具体一点），不要写成法律文书。
 3. **不许**出现「第X条」「本法」「本条例」这类字样，**不许**出现任何《法规名称》。
 4. 另一条**必须来自另一部法规**，不能和下面这条同属一部。
@@ -475,7 +483,8 @@ GEN_TEMPLATE = """下面是一部法规的条文原文。请写**一个**自然�
 可选的另一部法规（只能从这 6 部里挑，且不能是本条所在的那一部）：
 {catalog}
 
-只输出这个 JSON，不要有别的内容（why 用一句话说明为什么必须两条一起）：
+只输出这个 JSON，不要有别的内容（why 用一句话说明这两条各自补上了哪一块，
+**要写成链**：本条定了什么 → 其中哪个词/资格/标准要靠另一条才落地）：
 {{"question": "……", "other_law": "另一条的法规全名", "other_article_no": "第X条", "why": "……"}}"""
 
 
@@ -559,7 +568,9 @@ def generate(
 ) -> list[dict]:
     """从条文反向造题，直到攒够 `target` 道过了护栏的题。
 
-    `seed` 是已经有过的记录（续跑用）：先装进来，再往后补。
+    `seed` 是已经有过的记录（续跑用）：先装进来，再往后补。**补的是没挖过的锚点** ——
+    同一个锚点出过的题已经进了 `seed`，再挖一遍只会得到换了说法的同 gold 同考点。
+    每接受一道就落一次盘，所以中途断了重跑时把 `out` 读回来当 `seed` 即可接着补。
     """
     from ..agent.graph import ToolCallingLLM  # 延迟导入：agent 层拉 langgraph，不能进包导入路径
 
@@ -571,12 +582,16 @@ def generate(
     catalog = "\n".join(f"- {name}" for name in library.law_names)
     accepted: list[dict] = list(seed or [])
     seen = {_normalize(item.get("question", "")) for item in accepted}
+    # 光有题面去重挡不住「同一个锚点再问一遍」：换个说法就绕过去了，补出来的题会全是
+    # 已有题的同 gold 同考点。锚点本身也要记。这里以前比的是 `_normalize(anchor.text) in seen`，
+    # 拿整条法条去撞题面集合，恒不相等 —— 等于没判。
+    mined = {item.get("anchor", "") for item in accepted}
     attempts = failures = 0
 
     for anchor in _candidates(library):
         if len(accepted) >= target:
             break
-        if _normalize(anchor.text) in seen:
+        if format_key(anchor.law_id, anchor.article_no) in mined:
             continue
 
         history: list[dict] = [
@@ -622,7 +637,10 @@ def generate(
                 continue
 
             seen.add(_normalize(case.question))
+            mined.add(format_key(anchor.law_id, anchor.article_no))
             accepted.append(case.to_dict())
+            if out is not None:  # 逐条落盘：断了才有东西可当 seed，不然「续跑」是句空话
+                _save(out, accepted)
             if verbose:
                 print(f"[gen] {len(accepted):>3}/{target}  {case.question[:44]}"
                       f"  ← {case.gold_citations[-1]}", flush=True)
@@ -641,9 +659,15 @@ def generate(
 
 
 # ================================================================== 看轨迹
+def _why_of(case: Any) -> str:
+    """多跳题带 `why`（这道题为什么算跨法），单跳题没有 —— 一份行格式要能吃两种 case。"""
+    return getattr(case, "why", "")
+
+
 def trace(
     *,
-    limit: int = 10,
+    cases: Sequence[Any] | None = None,
+    limit: int | None = 10,
     out: Path | None = None,
     top_k: int = 6,
     verbose: bool = True,
@@ -652,13 +676,18 @@ def trace(
 
     **这里刻意不算任何指标。** 先看两边到底产出了什么，再决定怎么比 ——
     先定指标容易把真问题盖掉。两侧都要真调 LLM。
+
+    `cases` 不给就是多跳题集；单跳题集（`eval.singlehop`）复用同一份跑法 ——
+    两条臂怎么跑、行里放什么，只此一处实现，改一次两边同时生效。
+    case 只要求有 `question` / `gold_ids` / `gold_citations` 三个字段。
     """
     from ..agent.graph import AgentRunner, render_trace
     from ..api import qa
     from ..contracts import Answer, RetrievalResult
 
-    cases, _dropped = load_cases()
-    cases = cases[:limit]
+    if cases is None:
+        cases, _dropped = load_cases()
+    cases = list(cases)[:limit]
     runner = AgentRunner.load(top_k=top_k)   # 图只建一次，10 道题复用
 
     rows: list[dict] = []
@@ -679,7 +708,7 @@ def trace(
                 "question": case.question,
                 "gold": list(case.gold_citations),
                 "gold_ids": list(case.gold_ids),
-                "why": case.why,
+                "why": _why_of(case),
                 "rag": {
                     "answer": answer.text,
                     "cited": [e.citation for e in answer.evidences],
@@ -723,7 +752,9 @@ def full_budget_summary(rows: list[dict]) -> str:
     """**各自全预算**：rag 走它的完整一次，agent 走它全部的检索轮次。
 
     这是产品实际形态的对照 —— agent 本来就允许多轮，把它砍成一轮等于测一个不存在的系统。
-    但只报全预算数会误导：agent 平均检索 2.4 次，rag 1 次，多打几枪本来就会多中。
+    但只报全预算数会误导：agent 会多查几轮，rag 只查一次，多打几枪本来就会多中。
+    （这个倍数**随题集与 AGENT_MAX_STEPS 走，不是常数** —— 100 题集上曾是 2.4 次，
+    63 题集上是 1.7 次。所以下面那句倍数不要写死，写成"agent 平均检索 N 次"的形态。）
     所以同一份输出里**必须**带上同预算分解（双方都只看第一次检索），
     否则「agent 更强」这个结论分不清是"第一次就查得更准"还是"单纯多查了几轮"。
     """
@@ -738,7 +769,9 @@ def full_budget_summary(rows: list[dict]) -> str:
             for hit in search["articles"]:
                 index.setdefault(hit["parent_id"], hit["citation"])
 
-    total = 2 * len(rows)
+    # 分母从行里数，不写死 2×题数：多跳题恒好两条 gold，单跳题集（gold 一条起、条数不定）
+    # 复用这个汇总时，写死会把分母算错 —— 而算错的方向是**虚高**，正是最不该出的那种错。
+    total = sum(len(row["gold_ids"]) for row in rows)
     tally = {
         "rag": {"found": 0, "cited": 0, "rounds": 0},
         "agent": {"found": 0, "cited": 0, "rounds": 0},
@@ -769,7 +802,7 @@ def full_budget_summary(rows: list[dict]) -> str:
 
     n = len(rows)
     lines = [
-        f"各自全预算对照（{n} 题 × 2 条 gold = {total} 条）",
+        f"各自全预算对照（{n} 题，共 {total} 条 gold）",
         "",
         f"  {'':6}{'查到 gold':>12}{'引用 gold':>12}{'平均检索次数':>14}",
     ]

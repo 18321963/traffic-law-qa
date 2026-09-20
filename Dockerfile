@@ -1,4 +1,4 @@
-# 应用镜像：把 server_demo 跑起来，连 compose 里的 Milvus。
+# 应用镜像：把 server 跑起来，连 compose 里的 Milvus。
 #
 #   docker compose up -d --build        # 起 Milvus + 应用
 #   docker compose logs -f app          # 看装配日志
@@ -55,6 +55,6 @@ USER app
 
 EXPOSE 8000
 
-# --host 0.0.0.0 是必须的：server_demo 的默认值是 127.0.0.1（对本地裸跑是安全的默认），
+# --host 0.0.0.0 是必须的：server 的默认值是 127.0.0.1（对本地裸跑是安全的默认），
 # 容器里保持默认的话，宿主机映射过来的端口连不上 —— 这是容器化最经典的坑。
-CMD ["python", "-m", "uvicorn", "traffic_law_rag.server_demo:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "traffic_law_rag.server:app", "--host", "0.0.0.0", "--port", "8000"]

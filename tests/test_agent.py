@@ -134,15 +134,23 @@ def _assistant(content: str = "", calls: list[tuple[str, str, dict]] | None = No
     return message
 
 
-def _reflection(sufficient: bool, missing: str = "", *, retrievable: bool | None = None) -> dict:
+def _reflection(
+    sufficient: bool,
+    missing: str = "",
+    *,
+    retrievable: bool | None = None,
+    next_query: str | None = None,
+) -> dict:
     """构造一条审核输出。
 
-    `retrievable` **不给就不写这个键** —— 现有用例因此走的都是「模型没输出该字段」
-    那条路，默认值 True 的行为才一直有人钉着，而不是被显式传参掩盖过去。
+    `retrievable` / `next_query` **不给就不写这个键** —— 现有用例因此走的都是
+    「模型没输出该字段」那条路，默认值的行为才一直有人钉着，而不是被显式传参掩盖过去。
     """
     payload: dict = {"sufficient": sufficient, "reason": "r", "missing": missing}
     if retrievable is not None:
         payload["retrievable"] = retrievable
+    if next_query is not None:
+        payload["next_query"] = next_query
     return _assistant(json.dumps(payload, ensure_ascii=False))
 
 
@@ -413,6 +421,53 @@ def test_search_failure_is_fed_back_and_the_model_retries(parents, generator):
     assert any("兜底" in note for note in state["answer"].notes)
 
 
+def test_审核拟的检索问句随缺口一起回灌(parents, generator):
+    """审核不只说「缺什么」，还要把缺口**写成一句能直接拿去检索的问话**。
+
+    这句的落点就是回灌给规划轮的那条 user 消息 —— 只改提示词不接线的话，
+    模型费劲写出来的字段没有第二个读者。两个字段各司其职，缺一不可：
+    `missing` 给决策看（缺哪一类规定），`next_query` 给检索用（下一轮问什么）。
+    """
+    script = [
+        _assistant(calls=[("c1", SEARCH_LAW_NAME, {"query": "罚款"})]),
+        _reflection(False, "缺记分条款", next_query="不按规定使用安全带，记多少分？"),
+        _assistant(calls=[("c2", SEARCH_LAW_NAME, {"query": "不按规定使用安全带，记多少分？"})]),
+        _reflection(True),
+    ]
+    state, *_ = run("问题", script, parents, generator, max_steps=3)
+
+    fed = [
+        m["content"]
+        for m in state["messages"]
+        if m.get("role") == "user" and "[检索审核]" in (m.get("content") or "")
+    ]
+    assert len(fed) == 1, "只该回灌一次"
+    assert "缺记分条款" in fed[0]
+    assert "不按规定使用安全带，记多少分？" in fed[0]
+
+
+def test_审核没写检索问句时回灌与从前逐字相同(parents, generator):
+    """`next_query` 缺失（旧提示词、或模型没写）时，回灌消息必须一字不多。
+
+    这个字段是**加上去的**：它的缺失不能改变回边行为，也不能改变回灌文案 ——
+    否则对比新旧提示词时，分不清差异是提示词带来的还是接线带来的。
+    """
+    script = [
+        _assistant(calls=[("c1", SEARCH_LAW_NAME, {"query": "罚款"})]),
+        _reflection(False, "缺记分条款"),
+        _assistant(calls=[("c2", SEARCH_LAW_NAME, {"query": "记分"})]),
+        _reflection(True),
+    ]
+    state, *_ = run("问题", script, parents, generator, max_steps=3)
+
+    fed = [
+        m["content"]
+        for m in state["messages"]
+        if m.get("role") == "user" and "[检索审核]" in (m.get("content") or "")
+    ]
+    assert fed == ["[检索审核] 还缺：缺记分条款"]
+
+
 def test_unknown_tool_still_gets_a_tool_message(parents, generator):
     """未知工具也**必须**回一条 tool 消息，否则悬空 → 400。"""
     script = [
@@ -667,6 +722,19 @@ def test_parse_reflection_的三种输入():
     assert A._parse_reflection('{"sufficient": false}')["retrievable"] is True
     # 解析不出来 → 按已足够处理（停止），此时也谈不上回边
     assert A._parse_reflection("我不知道")["sufficient"] is True
+
+
+def test_parse_reflection_的_next_query_缺了就是空串():
+    """`next_query` 是给下一轮的**补充信息**，不是决策依据，所以缺了给空串而不是别的。
+
+    空串 = 回灌时那半句不出现 = 与加这个字段之前逐字相同。给成 `None` 或占位文案
+    都会让「模型没写」变成一句要发给模型的话。
+    """
+    assert A._parse_reflection('{"sufficient": false, "next_query": "记多少分？"}')["next_query"] == "记多少分？"
+    assert A._parse_reflection('{"sufficient": false}')["next_query"] == ""
+    assert A._parse_reflection("我不知道")["next_query"] == ""
+    # 模型写了空值/纯空白，与没写同义
+    assert A._parse_reflection('{"sufficient": false, "next_query": "   "}')["next_query"] == ""
 
 
 def test_审核提示词带着库的边界(parents, generator):
