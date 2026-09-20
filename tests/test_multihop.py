@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from traffic_law_qa.contracts import ChunkSet
+from traffic_law_qa.eval import multihop
 from traffic_law_qa.eval.multihop import (
     HopError,
     Library,
@@ -398,13 +399,21 @@ def test_续跑不重挖同一个锚点(library: Library, monkeypatch):
     恒不相等，等于没判。锚点表又是固定顺序，于是「续跑补题」永远从第一个锚点重新挖起，
     补多少道都是同 gold 同考点的换皮题。这里让假 LLM 每次都吐一条合格的题面，
     所以能红的只剩锚点没被记住这一件事。
+
+    **补丁得打在 `multihop` 上，不是 `agent.llm` 上。** `multihop.py` 顶层是
+    `from ..agent.llm import ToolCallingLLM`，导入那一刻名字就绑进了它自己的命名空间；
+    改 `agent.llm.ToolCallingLLM` 只换了源头，`generate()` 读的还是那份旧引用 ——
+    它会去建**真的**客户端。这个错法让本测试静默联网跑过真模型：有额度时真模型恰好
+    也能吐两条合格题面，于是一路绿着，测的却不是锚点去重。`fake.calls` 那句就是钉这个 ——
+    补丁再打歪它当场红，而不是等免费额度烧完才红。
     """
     fake = _照抄锚点的假LLM(library)          # 同一个实例跨两次调用，题面才不重样
-    monkeypatch.setattr("traffic_law_qa.agent.llm.ToolCallingLLM", lambda: fake)
+    monkeypatch.setattr(multihop, "ToolCallingLLM", lambda: fake)
 
     first = generate(target=1, library=library, verbose=False)
     second = generate(target=2, library=library, seed=first, verbose=False)
 
+    assert fake.calls, "假 LLM 一次没调到 —— 补丁打歪了，跑的是真客户端（会联网）"
     assert len(second) == 2
     assert second[1]["anchor"] != first[0]["anchor"]
 

@@ -19,6 +19,9 @@ from traffic_law_qa.qa.rag import LegalRAG
 
 FAKE_LLM_CFG = config.LLMConfig(base_url="http://fake", api_key="fake", model="fake-model")
 
+# 夹具的实例条数，**刻意不等于 `RAG_TOP_K` 的默认值**（理由见下面 `rag` 夹具）。
+INSTANCE_TOP_K = 4
+
 
 class RecordingRetriever:
     """记录每一次调用收到的参数；不实现检索，也不提供任何私有属性。"""
@@ -54,7 +57,19 @@ def retriever() -> RecordingRetriever:
 
 @pytest.fixture
 def rag(retriever, generator) -> LegalRAG:
-    return LegalRAG(retriever, generator, top_k=6)
+    """实例条数**刻意不等于配置默认值** —— 两个数撞在一起，`top_k or` 少写前半截也看不出来。
+
+    `LegalRAG.__init__` 那行有两种写法：`top_k or config.retrieve_config().top_k` 与
+    `config.retrieve_config().top_k`。它们只在**传了 `top_k` 且它不等于配置默认值**时
+    才分得开。本文件第一版传的是 6，而 `RAG_TOP_K` 的默认值也是 6 —— 「实例默认值」与
+    「配置默认值」逐位相同，于是删掉 `top_k or` 之后整个文件照样全绿，而线上
+    `LegalRAG.load(top_k=3)` / `--top-k 3` 会静默失效，检索仍按 6 条走。
+
+    `test_top_k_falls_back_to_the_instance_default` 断言里的那个 4 就是它，
+    **不是**随手挑的数。下面这句守卫钉住这个差：谁把常量改回配置默认值，本文件当场红。
+    """
+    assert INSTANCE_TOP_K != config.retrieve_config().top_k, "实例条数又和配置默认值撞了"
+    return LegalRAG(retriever, generator, top_k=INSTANCE_TOP_K)
 
 
 # ================================================================== 参数透传
@@ -65,9 +80,24 @@ def test_search_forwards_top_k_and_channel_debug(rag, retriever):
     ]
 
 
+def test_ask_forwards_channel_debug(rag, retriever):
+    """`ask()` 也得把 `channel_debug` 透下去 —— 上面那条只钉住了 `search()`。
+
+    `ask()` 是**另一个入口**，`api.py:242` 的 debug 模式走的正是它（`rag.py:104`
+    写着这段来历：这个参数不在 `ask` 上的时候，api 只能自己 `search()` 之后再伸手调
+    生成器，一条绕过门面的路）。门面收下参数却不往下传时，`search` 那条测试照样绿 ——
+    参数在门面上「能收」、在门面里「没用」，而 `?debug=1` 从此静默返回不带分通道明细的
+    结果，调用方拿到的字段还在（`channel_debug` 只控制要不要多跑那两次单通道检索），
+    只是全空 —— 没有异常，只有一份看起来正常、实际什么都没说的响应。
+    """
+    rag.ask("醉驾怎么处罚", channel_debug=True)
+    assert retriever.calls[0]["channel_debug"] is True
+
+
 def test_top_k_falls_back_to_the_instance_default(rag, retriever):
+    """不传 `top_k` 时用**实例**那个（构造时给的），不是配置默认值 —— 两者刻意不同值。"""
     rag.search("醉驾怎么处罚")
-    assert retriever.calls[0]["top_k"] == 6
+    assert retriever.calls[0]["top_k"] == INSTANCE_TOP_K
 
 
 def test_default_law_filter_is_an_empty_tuple_not_none(rag, retriever):
@@ -103,9 +133,14 @@ def test_ask_passes_the_whole_question_object_through(rag, retriever):
 
 
 def test_ask_uses_the_question_top_k_over_the_instance_default(rag, retriever):
-    """`Question.top_k` 优先于实例默认值，实例默认值优先于配置默认值。"""
+    """`Question.top_k` 优先于实例默认值，实例默认值优先于配置默认值。
+
+    末一档（实例 vs 配置）**在本文件里没有任何一条能测**：只有构造时不给 `top_k`
+    才走得到它，而那时两者本来就该是同一个数。它由 `LegalRAG.load()` 那条路覆盖 ——
+    `test_cli_args.py` 钉的是 `--top-k` 有没有被传进去，不是这行 `or`。
+    """
     rag.ask("醉驾怎么处罚")
-    assert retriever.calls[0]["top_k"] == 6
+    assert retriever.calls[0]["top_k"] == INSTANCE_TOP_K
     rag.ask(Question(text="醉驾怎么处罚", top_k=2))
     assert retriever.calls[1]["top_k"] == 2
 

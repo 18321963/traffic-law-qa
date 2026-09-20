@@ -35,15 +35,22 @@ class _假检索:
 
 
 class _假Rag:
-    """替掉真 `LegalRAG`。`used_vector` 是可改的，用来模拟端点半路回来。"""
+    """替掉真 `LegalRAG`。`下次走向量` 可改，用来模拟端点半路回来。
+
+    **替身不许有 `used_vector`。** 真 `LegalRAG` 没有这个属性 —— 它挂在每次检索
+    返回的 `RetrievalResult` 上（`contracts.py:411`）。替身凭空多一个同名属性，
+    就等于把「从检索结果上取」和「从 rag 上取」变得**逐位相同**：写回源写成
+    `rt.rag.used_vector` 时本文件照样全绿，而线上每次 `/qa` 会抛 `AttributeError`。
+    所以可变状态用一个生产代码里不存在的名字，别复用 `used_vector`。
+    """
 
     llm_ready = True
 
     def __init__(self, used_vector: bool) -> None:
-        self.used_vector = used_vector
+        self.下次走向量 = used_vector
 
     def search(self, question: str, *, top_k: int | None = None) -> _假检索:
-        return _假检索(self.used_vector)
+        return _假检索(self.下次走向量)
 
 
 def _就绪(*, dense_built: bool) -> ReadyState:
@@ -107,7 +114,17 @@ def test_ask_把本次的_used_vector_写回运行时(端点挂了):
     """
     assert 端点挂了.dense_live is False
 
-    端点挂了.rag.used_vector = True
+    端点挂了.rag.下次走向量 = True
     server.ask(server.QaRequest(question="醉驾怎么处罚", mode="search"))
 
     assert 端点挂了.dense_live is True
+
+
+def test_假Rag_不许有真类没有的_used_vector():
+    """**这条是回归**：替身凭空多一个属性，就能让写错的取法蒙混过关。
+
+    `_假Rag` 曾经自带 `used_vector`（取值还和检索结果一致），于是把写回源写成
+    `rt.rag.used_vector` —— 线上每次 `/qa` 抛 `AttributeError`、本地三条测试全绿。
+    真 `LegalRAG` 没有这个属性，替身就不许有。谁把它加回来，这条当场红。
+    """
+    assert not hasattr(_假Rag(used_vector=True), "used_vector")

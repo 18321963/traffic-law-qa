@@ -21,6 +21,7 @@ from __future__ import annotations
 import pytest
 
 from traffic_law_qa.agent import cli
+from traffic_law_qa.agent.intent import INTENT_SEARCH
 from traffic_law_qa.eval import harness, multihop, singlehop
 
 ENTRIES = [cli, harness, multihop, singlehop]
@@ -73,7 +74,31 @@ def test_这三个入口不带参数时打印_USAGE(module, capsys):
     assert "python -m traffic_law_qa" in capsys.readouterr().out
 
 
-def test_cli_的_trace_仍然被收下(monkeypatch, capsys):
+class _记账装配:
+    """顶掉 `AgentRunner`：把 `load()` 收到的关键字记下来，然后当场停住。
+
+    记完就抛，因为装配真的跑起来要连 Milvus —— 下面两条测试都必须离线。
+
+    它顶的是一个**类**（`AgentRunner.load` 是 classmethod），所以只要有个 `load`
+    属性就够；`main` 里是按模块全局名查的，`monkeypatch.setattr(cli, ...)` 打得着。
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def load(self, **kwargs):
+        self.calls.append(kwargs)
+        raise RuntimeError("哨兵：走到装配就够了")
+
+
+@pytest.fixture
+def 装配记录(monkeypatch) -> _记账装配:
+    sentinel = _记账装配()
+    monkeypatch.setattr(cli, "AgentRunner", sentinel)
+    return sentinel
+
+
+def test_cli_的_trace_仍然被收下(装配记录, capsys):
     """全仓唯一一处**不能**让「不认识的开关」报错的地方。
 
     `--trace` 写在 `USAGE` 里，但从加进来那天起就没被代码读过 —— 轨迹本来就是默认
@@ -85,18 +110,44 @@ def test_cli_的_trace_仍然被收下(monkeypatch, capsys):
     开头写着），`multihop` 开头那句 `--reference` 指的是 harness 的开关，是散文。
 
     这条走 `main` 而不是解析器：**解析器是 `main` 的实现细节**，而「这条命令还能用」
-    是 `main` 的行为。`AgentRunner` 用哨兵顶掉，好在连 Milvus 之前就停下 ——
-    装配真的跑起来要连库，这条测试必须离线。
+    是 `main` 的行为。
     """
-
-    class _装配即停:
-        @staticmethod
-        def load(**_):
-            raise RuntimeError("哨兵：能走到装配，就说明 argparse 把 --trace 放行了")
-
-    monkeypatch.setattr(cli, "AgentRunner", _装配即停)
-
     assert cli.main(["醉驾怎么处罚", "--trace"]) == 1
     captured = capsys.readouterr()
     assert captured.err == "", "argparse 把 --trace 判成了不认识的开关"
     assert "装配失败" in captured.out, "没走到装配那一步，说明中途就返回了"
+
+
+def test_cli_把解析出来的开关原样交给装配(装配记录):
+    """解析出来的值必须**一路透到 `load()`**，中途换成常量就算数字对不上也看不出来。
+
+    上面那些测试只证明「坏参数会被拒」，证明不了一件事：**好参数有没有被用**。
+    这里钉的就是那一跳 —— 解析器的 `--top-k 3` 与 `load(top_k=...)` 之间隔着一个
+    `options.top_k`，写成 `top_k=None`（或写成任何常量）时，argparse 那半边照样全绿，
+    而 `--top-k` 从此静默失效：`USAGE` 里写着「证据条数上限，默认取 RAG_TOP_K」，
+    给了也不生效。
+
+    断言落在**收到的关键字**上，与 `test_server_cli.py::test_默认值与改用_argparse_之前逐位相同`
+    同一个形状（那边记的是 `host`/`port`）。**两条调用都要**：只跑带开关的那次，
+    「永远传 3」这种写死也能过 —— 空值必须原样传 None，那是「默认取 RAG_TOP_K」的
+    唯一实现方式。
+    """
+    assert cli.main([
+        "醉驾怎么处罚",
+        "--top-k", "3",
+        "--max-steps", "4",
+        "--intent", "search",
+        "--no-vector",
+    ]) == 1
+    assert cli.main(["醉驾怎么处罚"]) == 1
+
+    给了, 没给 = 装配记录.calls
+
+    assert 给了["top_k"] == 3
+    assert 给了["cfg"].max_steps == 4
+    assert 给了["forced_intent"] == INTENT_SEARCH
+    assert 给了["with_vector"] is False
+
+    assert 没给["top_k"] is None, "不给开关时该传 None，让它去取 RAG_TOP_K"
+    assert 没给["forced_intent"] is None, "没给 --intent 时不该塞一个默认意图进去"
+    assert 没给["with_vector"] is True
