@@ -49,11 +49,9 @@ def run(
 
         raise QaError("题集 A 里没有可用的评测题")
 
-    # `limit=None` 时 multihop.trace 会跑全部 —— 切片对 None 是安全的。
     return trace(cases=cases, limit=limit, out=out, top_k=top_k, verbose=verbose)
 
 
-# ================================================================== 指标
 def _rank(ids: list[str], gold: set[str]) -> int | None:
     """第一个 gold 的名次；None = 这一格没命中。与 harness 同一套口径。"""
     return next((i for i, parent_id in enumerate(ids, start=1) if parent_id in gold), None)
@@ -95,7 +93,7 @@ def metrics(rows: list[dict], *, top_k: int = 6) -> str:
             candidates[name] += len(ids)
 
         searches += len(row["agent"]["searches"])
-        plans += len(row["agent"]["usage"])          # agent 节点每调一次模型写一行
+        plans += len(row["agent"]["usage"])
         reviews += len(row["agent"]["reflections"])
 
     n = len(rows)
@@ -120,7 +118,6 @@ def metrics(rows: list[dict], *, top_k: int = 6) -> str:
     return "\n".join(lines)
 
 
-# ================================================================== 命令行
 USAGE = __doc__
 
 
@@ -151,11 +148,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         options = _parser().parse_args(args)
     except SystemExit as exc:
-        # argparse 在参数不认识 / 取不到值时直接 SystemExit。收回成返回值，
-        # 保住「main() 返回 int、调用方 raise SystemExit(main())」这条全仓一致的契约。
         return exc.code if isinstance(exc.code, int) else 0
 
-    # 与多跳那套同一个约定：跑一次要花钱，所以得**显式**点名 `--compare`，不给就跑说明书。
     if not options.compare:
         print(USAGE)
         return 0

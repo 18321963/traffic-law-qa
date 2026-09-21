@@ -7,10 +7,13 @@
 **行为与加这个文件之前逐位相同**（本仓一贯的判据，同 `EMBED_QUERY_PREFIX` 空串、
 `retrievable` 缺省 True、`next_query` 空串）。
 
-要真记录就给一个 `Recorder`，它把 span 收进列表。**只有这两个实现，没有 exporter、
-不接 LangFuse、不接 OpenTelemetry** —— 这里要的是一个有边界的钩子，不是一套观测体系。
+要真记录就给一个 `Recorder`（把 span 收进列表）或 `agent/langfuse_tracer.LangfuseTracer`
+（把 span 与节点状态送到 Langfuse 云端）。**本文件自己零依赖、不 import 任何后端** ——
+这里要的是一个有边界的钩子，不是一套观测体系；真后端在它自己那个文件里，且是可选的 extra。
 
-要接真后端时，继承 `Tracer` 覆写 `span()` 返回自己的 span 对象即可 —— 调用方一行都不用改。
+钩子有三个，都是「基类空实现 + 子类覆写」：`span()` 计时、`observation()` 记一次 LLM 调用
+或检索、`record()` 收节点的入参与出参。要接别的后端，继承 `Tracer` 覆写它们即可 ——
+调用方一行都不用改。
 """
 
 from __future__ import annotations
@@ -22,10 +25,24 @@ __all__ = ["Tracer", "Recorder", "traced"]
 
 
 class Tracer:
-    """空实现。`span()` 返回自己，于是 `with` 与 `set` 全都落到这两个 no-op 上。"""
+    """空实现。三个钩子都返回自己，于是 `with` 与 `update` 全都落到这两个 no-op 上。"""
 
     def span(self, name: str) -> "Tracer":
         return self
+
+    def observation(self, name: str, as_type: str = "span", **fields: Any) -> "Tracer":
+        """一次模型调用（`as_type="generation"`）或一次检索（`"retriever"`）。
+
+        `fields` 是**开观察时就已知**的东西（模型名、查询词）；跑完才知道的（输出、token）
+        由 `update()` 补。名字与取值全由调用方定 —— 本文件不认识 state，也不认识 LLM。
+        """
+        return self
+
+    def record(self, state: Any, update: Any) -> None:
+        """节点跑完：把入参 state 与它返回的增量交给 span。只有真后端用得着。"""
+
+    def update(self, **fields: Any) -> None:
+        """空实现下 `observation()` 返回的正是自己，所以这个 no-op 必须存在。"""
 
     def __enter__(self) -> "Tracer":
         return self
@@ -49,9 +66,11 @@ class _Span:
         return self
 
     def __exit__(self, *exc: Any) -> bool:
-        # 异常也记：崩在哪个节点比耗时更有用。**不吞异常** —— 返回 False 让它继续往上抛。
         self._sink.append({"name": self.name, "seconds": time.perf_counter() - self._start})
         return False
+
+    def record(self, state: Any, update: Any) -> None:
+        """`Recorder` 只要耗时，节点状态与它无关。"""
 
 
 class Recorder(Tracer):
@@ -85,12 +104,17 @@ class Recorder(Tracer):
 def traced(tracer: Tracer, name: str, node: Callable) -> Callable:
     """把 langgraph 节点（`state -> dict`）包一层 span。
 
-    包装体只做「进 span、调用、出 span」，不改返回值 —— 所以空 `Tracer` 下与直接
-    `add_node(name, node)` 等价。
+    包装体只做「进 span、调用、`record`、出 span」，不改返回值 —— 所以空 `Tracer` 下与
+    直接 `add_node(name, node)` 等价（`record` 与 `span` 都是空实现）。
+
+    这里**是唯一同时握着入参 state 和出参增量**的地方：节点自己只关心这两者之一，
+    所以想记「这个节点吃了什么、吐了什么」只能在这一层。怎么切、切多细由 span 自己定。
     """
 
     def wrapped(state):
-        with tracer.span(name):
-            return node(state)
+        with tracer.span(name) as span:
+            update = node(state)
+            span.record(state, update)
+            return update
 
     return wrapped

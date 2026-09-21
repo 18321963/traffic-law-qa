@@ -1,6 +1,6 @@
 """三个走 LLM / 检索的节点：规划轮、工具执行轮、收尾轮。
 
-审核轮在 `reflect.py`（它不绑工具，契约不同）。意图两条路的节点在 `intent.py`。
+入口的地区判定在 `region.py`，审核轮在 `reflect.py`（它不绑工具，契约不同）。
 
 **收尾轮复用既有的 `AnswerGenerator`，提示词一个字都不改** —— 它把 N 次检索合并回一个
 `RetrievalResult`，原样交给 `answer()`。所以「Agent 的答案」和「线性管道的答案」是同一段
@@ -14,6 +14,7 @@ from typing import Any
 
 from .. import config
 from ..contracts import ParentChunk, Question, RetrievalResult
+from ..obs import Tracer
 from ..qa.rag import LegalRAG
 from .llm import ToolCallingLLM
 from .prompts import AGENT_SYSTEM_PROMPT
@@ -39,10 +40,22 @@ __all__ = [
     "make_finalize_node",
 ]
 
-# 规划轮能用的工具。两个一起挂是有意的：`search_law` 每次返回的「相关条：第九十九条」
-# 是现有输出里信息量最大、却一直被浪费的字段 —— 有了 get_article，模型才能跟着它去取那一条。
-# 这才是真正的多跳：检索负责找到「相关的」，取条负责拿到「就是它」。
 TOOLS = [SEARCH_LAW_TOOL, GET_ARTICLE_TOOL]
+
+
+def _retrieval_digest(result: RetrievalResult) -> dict:
+    """检索观察的输出：命中几条、走了哪条通道、多快、头三条是谁。
+
+    只放**判断用得上的**：命中条数与首选决定「这一轮有没有用」，通道与耗时解释
+    「为什么慢/为什么空」。全文不在这里 —— 它已经在节点 span 的 search_log 里了。
+    """
+    return {
+        "命中": len(result.articles),
+        "向量": result.used_vector,
+        "BM25": result.used_bm25,
+        "耗时ms": round(result.elapsed_ms, 1),
+        "头三条": result.citations()[:3],
+    }
 
 
 def make_agent_node(llm: ToolCallingLLM, cfg: config.AgentConfig):
@@ -61,7 +74,9 @@ def make_agent_node(llm: ToolCallingLLM, cfg: config.AgentConfig):
         prompt.append({"role": "user", "content": state["question"]})
         prompt.extend(state.get("messages") or ())
 
-        reply, usage = llm.chat(prompt, tools=TOOLS, temperature=cfg.temperature)
+        reply, usage = llm.chat(
+            prompt, tools=TOOLS, temperature=cfg.temperature, name="llm.agent"
+        )
         return {"messages": [reply], "steps": 1, "usage": [usage]}
 
     return agent_node
@@ -71,18 +86,27 @@ def make_tools_node(
     rag: LegalRAG,
     cfg: config.AgentConfig,
     index: dict[tuple[str, int], ParentChunk],
+    observer: Tracer | None = None,
 ):
     """执行工具调用。
 
-    读：messages[-1].tool_calls / search_log / top_k
+    读：messages[-1].tool_calls / search_log / top_k / region_scope
     写：{"messages": [每个 tool_call 一条 ToolMessage], "search_log": [新增行]}
+
+    检索的作用域有**两个来源，模型点名的优先**：模型给了 `law_name` 就用它解析出的那一部，
+    没给才落到入口判出的 `region_scope`（该地区条例 + 国家法，判不出时为空 = 全库）。
+    顺序不能反：模型点名是它在看到上一轮证据后的明确取舍，地区限定只是没人点名时的默认值。
 
     **不变量：每个 tool_call 恰好产出一条 ToolMessage** —— 无论成功、参数非法、
     工具名未知、还是工具抛异常。闭合发生在产生 tool_call 的那个节点里，
     于是「assistant 的 tool_calls 没有对应的 tool 消息」这个会让端点直接 400 的
     状态，在结构上就不可能出现，不需要任何事后修补。
+
+    `observer` 只用来给每次检索记一笔（观察类型 `retriever`），与检索结果无关；
+    不传就是空实现，逐位不变。
     """
 
+    observer = observer or Tracer()
     parents = rag.parents
 
     def tools_node(state: AgentState) -> dict:
@@ -118,11 +142,22 @@ def make_tools_node(
                         f"（或省略 law_name 检索全部）：{'；'.join(known_names)}"
                     )
                 kwargs["law_filter"] = (law_id,)
+            elif state.get("region_scope"):
+                kwargs["law_filter"] = state["region_scope"]
 
             try:
-                result = rag.search(query, top_k=top_k, **kwargs)
-                # 摘要窗口按检索层实际用的词定位（含口语对齐），不按模型原话
-                match_text = rag.expand(query)
+                with observer.observation(
+                    "检索",
+                    "retriever",
+                    input={
+                        "query": query,
+                        "top_k": top_k,
+                        "law_filter": kwargs.get("law_filter"),
+                    },
+                ) as span:
+                    result = rag.search(query, top_k=top_k, **kwargs)
+                    match_text = rag.expand(query)
+                    span.update(output=_retrieval_digest(result))
             except Exception as exc:  # noqa: BLE001 - 工具失败不该打断循环
                 return None, f"检索失败：{exc}。可以换一组关键词再试，或用更通用的说法。"
 
@@ -140,14 +175,18 @@ def make_tools_node(
             except ValueError as exc:
                 return None, f"参数不合法：{exc}。请修正后重试。"
 
-            result, error = lookup_article(
-                article_no, law_name, parents=parents, index=index
-            )
+            with observer.observation(
+                "精确取条",
+                "retriever",
+                input={"article_no": article_no, "law_name": law_name},
+            ) as span:
+                result, error = lookup_article(
+                    article_no, law_name, parents=parents, index=index
+                )
+                if result is not None:
+                    span.update(output=_retrieval_digest(result))
             if result is None:
                 return None, error
-            # 精确取条没有查询词可用来定位窗口，match_text 留空 → 摘要落在条文开头
-            # （也就是写着处罚的那句「帽子」），这正是用户点名要看的那一段。
-            # 摘要上限用 article_chars 而不是 snippet_chars：只取一条，给得起更大的窗口。
             return result, render_tool_result(
                 result,
                 index=position(),
@@ -176,7 +215,7 @@ def make_tools_node(
             result, text = handler(function.get("arguments") or "")
             out_messages.append(tool_message(call_id, text))
             if result is None:
-                continue  # 失败：已经回了一条说明，这一轮不进证据
+                continue
 
             row = result.to_dict()
             out_logs.append(row)
@@ -201,7 +240,7 @@ def _trajectory_notes(state: AgentState, merged: RetrievalResult, cfg: config.Ag
         if message.get("role") == "assistant"
         for call in message.get("tool_calls") or ()
     ]
-    plans = len(state.get("usage") or ())          # agent 每调一次模型写一行
+    plans = len(state.get("usage") or ())
     searches = calls.count(SEARCH_LAW_NAME)
     lookups = calls.count(GET_ARTICLE_NAME)
     reviews = len(state.get("reflections") or ())
@@ -210,15 +249,10 @@ def _trajectory_notes(state: AgentState, merged: RetrievalResult, cfg: config.Ag
 
     parts = [f"{plans} 轮 LLM 规划", f"{searches} 次检索"]
     if lookups:
-        parts.append(f"{lookups} 次精确取条")   # 只在真发生过时才出现，别占版面
+        parts.append(f"{lookups} 次精确取条")
     parts += [f"{reviews} 轮审核", f"证据 {len(merged.articles)} 条"]
     notes = ["Agent：" + " / ".join(parts)]
 
-    # 「被迫收尾」的判据要与 `_route_after_reflect` 逐字同源：审核说了不够、且预算真的见底。
-    # 光看 steps >= max_steps 不够 —— 规则取条那条路根本不缺轮次，它是**按设计**一轮结束的。
-    #
-    # 收尾有三种成因，轨迹里要分得开，否则「为什么 2 轮就停了」没法解释：
-    # 审核说够了 / 审核说缺口在库外 / 预算耗尽。
     reflections = state.get("reflections") or []
     verdict = reflections[-1] if reflections else None
     if verdict and not verdict.get("sufficient"):
@@ -235,6 +269,7 @@ def _trajectory_notes(state: AgentState, merged: RetrievalResult, cfg: config.Ag
 def make_finalize_node(
     rag: LegalRAG,
     cfg: config.AgentConfig,
+    observer: Tracer | None = None,
 ):
     """收尾：把累积的证据合并回一个 RetrievalResult，交给既有生成器。
 
@@ -248,19 +283,27 @@ def make_finalize_node(
     而 `AgentRunner.invoke()` 必然写 `state["top_k"]` —— 它一次都没生效过，
     却让同一个函数里坐着两个 `top_k`（收尾读闭包、工具轮读 state），
     调用方传进来的 `Question` 自带 `top_k` 时两者就分叉。现在兜底直接读 config。
+
+    `observer` 同上：只给那条**兜底检索**记一笔。它不进工具轮，是这张图里唯一一次
+    「没人要求、自己做的检索」，看 trace 时正要知道它花了多久、命中了什么。
     """
 
+    observer = observer or Tracer()
+
     def finalize_node(state: AgentState) -> dict:
-        # `state["top_k"]` 由 invoke 写成 `query.top_k or runner.top_k`，单题覆盖落在它上面。
-        # 兜底读 config 而不另接参数：这个值的真源只有 config 一处，与 tools_node 同款。
         active_top_k = state.get("top_k", config.retrieve_config().top_k)
         logs = list(state.get("search_log") or ())
         extra: list[dict] = []
         notes: list[str] = []
 
         if not logs:
-            # 模型一次都没检索 → 按单轮管道兜底。这一条保证 Agent 严格增量，不比基线差。
-            result = rag.search(state["question"], top_k=active_top_k)
+            with observer.observation(
+                "兜底检索",
+                "retriever",
+                input={"query": state["question"], "top_k": active_top_k},
+            ) as span:
+                result = rag.search(state["question"], top_k=active_top_k)
+                span.update(output=_retrieval_digest(result))
             logs = [result.to_dict()]
             extra = list(logs)
             notes.append("本轮未取到任何证据（未调用工具，或工具调用全部失败），已按单轮管道兜底检索一次")
@@ -276,12 +319,8 @@ def make_finalize_node(
         question = Question(
             text=state["question"],
             history=tuple(tuple(pair) for pair in state.get("history") or ()),
-            # 生成器今天并不读 `Question.top_k`（`build_evidence` 用的是 `show_top`），
-            # 所以这一行不改变任何行为；跟着 `active_top_k` 走只为不再留两个 top_k ——
-            # 哪天生成器开始读它，不会把这个坑悄悄带回来。
             top_k=active_top_k,
         )
-        # 既有入口，零改动：Agent 的答案与线性管道的答案是同一段代码产出的
         answer = rag.answer(question, merged)
         return {"answer": replace(answer, notes=answer.notes + tuple(notes)), "search_log": extra}
 

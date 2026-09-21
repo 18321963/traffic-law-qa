@@ -35,7 +35,6 @@ class DocxReader:
         """
         self.keep_empty = keep_empty
 
-    # -------------------------------------------------------------- 主接口
     def read(self, path: str | Path) -> list[Paragraph]:
         """读取 docx 的全部段落，按文档顺序返回。"""
         path = Path(path)
@@ -45,7 +44,7 @@ class DocxReader:
         paragraphs: list[Paragraph] = []
         for node in root.iter(f"{{{W}}}p"):
             if _has_paragraph_ancestor(node, parent_map):
-                continue  # 跳过文本框等嵌套段落，避免同段文字被重复收集
+                continue
             text = _paragraph_text(node)
             if not text and not self.keep_empty:
                 continue
@@ -62,7 +61,6 @@ class DocxReader:
         """批量读取，返回 {文件名: 段落列表}。"""
         return {Path(p).name: self.read(p) for p in paths}
 
-    # -------------------------------------------------------------- 内部
     @staticmethod
     def _read_document_xml(path: Path) -> bytes:
         if not path.exists():
@@ -73,7 +71,6 @@ class DocxReader:
             return zf.read(DOCUMENT_XML)
 
 
-# ------------------------------------------------------------------ XML 工具
 def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
@@ -111,7 +108,6 @@ def _paragraph_style(p: ET.Element) -> str | None:
     return style.get(f"{{{W}}}val")
 
 
-# ------------------------------------------------------------------ 调试入口
 def main(argv: list[str] | None = None) -> int:
     """python -m traffic_law_qa.kb.docx_reader [docx 路径 ...]"""
     from .. import config

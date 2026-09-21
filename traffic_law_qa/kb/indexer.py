@@ -23,8 +23,6 @@ from .. import config
 from ..contracts import ChunkSet, IndexStats
 from .milvus_store import MilvusError, MilvusStore, row_of
 
-# 向量端点挂了时的降级标记，写进 index_meta.json 的 notes。
-# api 层据此区分「没打算建稠密」和「想建但端点挂了」，避免每次调用都重试重建（会反复 drop 集合）。
 EMBED_FAILED_NOTE_PREFIX = "向量化失败"
 
 
@@ -61,7 +59,7 @@ class EmbeddingClient:
         if self._client is None:
             if not self.available:
                 raise RuntimeError(self.unavailable_reason)
-            from openai import OpenAI  # 延迟导入
+            from openai import OpenAI
 
             self._client = OpenAI(base_url=self.cfg.base_url, api_key=self.cfg.api_key)
         return self._client
@@ -140,7 +138,6 @@ class Indexer:
         self.verbose = verbose
         self.notes: list[str] = []
 
-    # -------------------------------------------------------------- 建库
     def build(self, chunk_set: ChunkSet, *, with_vector: bool = True) -> IndexStats:
         started = time.perf_counter()
         self.notes = []
@@ -204,7 +201,6 @@ class Indexer:
                 print(f"[index] 提示：{note}")
         return stats
 
-    # -------------------------------------------------------------- 读取
     def load_stats(self) -> IndexStats | None:
         if not self.meta_path.exists():
             return None
@@ -221,7 +217,6 @@ class Indexer:
         return self.store.ping()
 
 
-# ------------------------------------------------------------------ 调试入口
 def main(argv: list[str] | None = None) -> int:
     """python -m traffic_law_qa.kb.indexer [--no-vector] [--query 词]"""
     import sys

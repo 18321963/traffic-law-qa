@@ -12,7 +12,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 
-try:  # python-dotenv 是软依赖，缺失时退化为纯环境变量
+try:
     from dotenv import load_dotenv as _load_dotenv
 except ImportError:  # pragma: no cover
 
@@ -25,15 +25,12 @@ except ImportError:  # pragma: no cover
 load_dotenv = _load_dotenv
 load_dotenv(ROOT / ".env", override=False)
 
-# ---------------------------------------------------------------- 目录布局
 KB_DIR = ROOT / "法规知识库"
-DOCX_DIR = KB_DIR / "docx"          # 唯一真源：原始 docx，永不改写
-TEXT_DIR = KB_DIR / "text"          # 人读层：法条 Markdown
-PARSED_DIR = KB_DIR / "parsed"      # 结构层：法→章→节→条
-CHUNK_DIR = KB_DIR / "chunks"       # 检索层：父子块 jsonl
-INDEX_DIR = KB_DIR / "index"        # 索引层：index_meta.json 快照（数据在 Milvus）
-# 上游原始素材（下载来的 pdf），**不属于管道** —— 管道只读 docx。放在这里只是不让
-# 散件堆到仓库根目录；要入库得先转成 docx 放进 docx/。因为代码不读它，不进 ALL_DIRS。
+DOCX_DIR = KB_DIR / "docx"
+TEXT_DIR = KB_DIR / "text"
+PARSED_DIR = KB_DIR / "parsed"
+CHUNK_DIR = KB_DIR / "chunks"
+INDEX_DIR = KB_DIR / "index"
 PDF_DIR = KB_DIR / "pdf"
 
 MANIFEST_PATH = PARSED_DIR / "manifest.json"
@@ -41,14 +38,9 @@ CHUNKS_PATH = CHUNK_DIR / "chunks.jsonl"
 PARENTS_PATH = CHUNK_DIR / "parents.jsonl"
 INDEX_META_PATH = INDEX_DIR / "index_meta.json"
 
-# 仓库级数据，与知识库分开：知识库是要被解析/索引的语料，这里是评测用的题面语料。
-# 它参与版本管理（1.5MB），评测结果的可复现性依赖它逐字节不变。
 DATA_DIR = ROOT / "data"
 EVAL_CORPUS_PATH = DATA_DIR / "eval_corpus.json"
-# 跨法规多跳题集：由 eval/multihop.py 从条文反向生成，护栏见该模块。
-# 与 eval_corpus.json 一样进版本管理 —— 生成要花 API 钱，成品必须可复现、可复核。
 EVAL_MULTIHOP_PATH = DATA_DIR / "eval_multihop.json"
-# 向量数据存在 Milvus 里（docker-compose.yml 起服务），index/ 只留一份元信息快照
 
 ALL_DIRS = (DOCX_DIR, TEXT_DIR, PARSED_DIR, CHUNK_DIR, INDEX_DIR)
 
@@ -59,7 +51,6 @@ def ensure_dirs() -> None:
         d.mkdir(parents=True, exist_ok=True)
 
 
-# ---------------------------------------------------------------- 配置读取
 def _env(name: str, default: str = "") -> str:
     value = os.getenv(name)
     if value is None or not value.strip():
@@ -100,8 +91,6 @@ class EmbedConfig:
     model: str
     dim: int | None = None
     batch: int = 10
-    # 只加在**查询**上的指令前缀，段落侧绝不加。默认空 = 与不带前缀的模型逐位相同。
-    # 见 kb/indexer.py 的 embed_query，那里记着这个默认值的实测依据。
     query_prefix: str = ""
 
     @property
@@ -138,8 +127,6 @@ def reflect_llm_config() -> LLMConfig:
         base_url=_env("AGENT_REFLECT_BASE_URL") or base.base_url,
         api_key=_env("AGENT_REFLECT_API_KEY") or base.api_key,
         model=_env("AGENT_REFLECT_MODEL") or base.model,
-        # 审核的温度不看这里：调用点写死 0.0（判断题，不要它发挥）。留着只为让
-        # LLMConfig 完整，不去动一个不影响任何行为的旋钮。
         temperature=base.temperature,
     )
 
@@ -161,10 +148,10 @@ def embed_config() -> EmbedConfig:
 
 @dataclass(frozen=True)
 class RetrieveConfig:
-    top_k: int = 6            # 返回给 LLM 的法条（父块）数
-    candidates: int = 20      # 单通道候选数
-    rrf_k: int = 60           # Milvus RRFRanker 的平滑常数
-    law_hint_boost: float = 1.5   # 查询命中法名片段时，该法规条文的分数加成
+    top_k: int = 6
+    candidates: int = 20
+    rrf_k: int = 60
+    law_hint_boost: float = 1.5
 
 
 def retrieve_config() -> RetrieveConfig:
@@ -176,7 +163,6 @@ def retrieve_config() -> RetrieveConfig:
     )
 
 
-# ---------------------------------------------------------------- Agent
 @dataclass(frozen=True)
 class AgentConfig:
     """Agent 循环的参数（阶段二）。
@@ -186,14 +172,11 @@ class AgentConfig:
     只有一份真源，Agent 不许悄悄换一套检索参数，否则和基线的对照就不是同一个检索了。
     """
 
-    # 规划轮数上限（= LLM 调用次数上限）。**3 曾经是默认值，是实测把它降到 2 的**：
-    # 100 题多跳集上，第 2 轮把「条目级命中」从 72/200 抬到 78/200，第 3 轮只再抬 2 条
-    # （78→80），却多花 35 次检索 + 35 次规划调用 + 35 次审核。第 3 轮的边际已经接近零。
     max_steps: int = 2
-    max_evidence: int = 0     # 最终证据条数；0 = 沿用 RetrieveConfig.top_k
-    snippet_chars: int = 120  # 检索结果里每条法条的摘要字数
-    article_chars: int = 400  # 精确取条（get_article）时的摘要字数，比检索摘要大
-    temperature: float = 0.0  # 规划轮的温度：要它稳定选词，不要它发挥
+    max_evidence: int = 0
+    snippet_chars: int = 120
+    article_chars: int = 400
+    temperature: float = 0.0
     retries: int = 2
 
 
@@ -208,7 +191,31 @@ def agent_config() -> AgentConfig:
     )
 
 
-# ---------------------------------------------------------------- Milvus
+@dataclass(frozen=True)
+class LangfuseConfig:
+    """Langfuse 云端追踪的凭据（可选，只有 agent 命令行用）。
+
+    两个 key 缺一即 `ready=False`，此时一个客户端都不建、一个字节都不外发 ——
+    与没有这个功能时逐位相同。**host 不是秘密，两个 key 是**：任何打印只许出现 host。
+    """
+
+    public_key: str
+    secret_key: str
+    host: str = "https://cloud.langfuse.com"
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.public_key and self.secret_key)
+
+
+def langfuse_config() -> LangfuseConfig:
+    return LangfuseConfig(
+        public_key=_env("LANGFUSE_PUBLIC_KEY"),
+        secret_key=_env("LANGFUSE_SECRET_KEY"),
+        host=_env("LANGFUSE_HOST", "https://cloud.langfuse.com"),
+    )
+
+
 @dataclass(frozen=True)
 class MilvusConfig:
     uri: str

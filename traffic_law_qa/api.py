@@ -14,7 +14,7 @@
 3. **把失败翻译成一行中文提示**（含该执行的命令），而不是 pymilvus 的堆栈。
 
 失败一律抛 `QaError`：库里不该替调用方打印，但消息本身就是给用户看的那一行。
-命令行入口（`python -m traffic_law_qa`）与 examples/quickstart.py 会把它接住并打印。
+命令行入口（`python -m traffic_law_qa`）会把它接住并打印。
 """
 
 from __future__ import annotations
@@ -24,9 +24,6 @@ from dataclasses import dataclass
 from . import config
 from .contracts import Answer, Question, RetrievalResult
 
-# `stale_reason` 公开、但**不是给用户的**（用户面是 qa / render / ensure_ready）。
-# 公开是因为它有测试单独调用 —— 同 `agent/graph.py` 里 `route_after_agent` 公开、
-# `_route_after_classify` 私有：加 `_` 的意思是「只有本模块用，随便改」，它不是。
 __all__ = ["qa", "QaError", "ReadyState", "ensure_ready", "render", "stale_reason", "MODE_ASK", "MODE_SEARCH"]
 
 MODE_ASK = "ask"
@@ -41,14 +38,14 @@ class QaError(RuntimeError):
 class ReadyState:
     """索引就绪检查的结果。"""
 
-    action: str          # "reuse" 复用已有索引 | "rebuild" 重建过
-    reason: str          # 复用 / 重建的原因
-    rows: int            # 集合行数（= 子块数）
-    laws: int            # 法规部数
-    articles: int        # 条文数
-    parents: int         # 父块数（应等于条文数）
-    dense: bool          # 集合是否带稠密向量
-    milvus: str          # Milvus 版本号
+    action: str
+    reason: str
+    rows: int
+    laws: int
+    articles: int
+    parents: int
+    dense: bool
+    milvus: str
 
     def describe(self) -> str:
         verb = "复用已有索引" if self.action == "reuse" else "已重建索引"
@@ -59,7 +56,6 @@ class ReadyState:
         )
 
 
-# ================================================================== 就绪检查
 def ensure_ready(*, with_vector: bool = True, rebuild: bool = False) -> ReadyState:
     """确保 Milvus 里有一套与 docx 当前内容一致的索引；只在必要时重建。"""
     from .kb.indexer import Indexer
@@ -73,9 +69,6 @@ def ensure_ready(*, with_vector: bool = True, rebuild: bool = False) -> ReadySta
     version = _ping(store)
     stats = Indexer(verbose=False).load_stats()
 
-    # 重建按「能建就建」定档：绝不比现有索引更弱。查询走不走稠密由 with_vector 决定，
-    # 但它不该决定索引被建成什么样 —— 否则一次 --no-vector 就会把已有（花过钱的）稠密索引
-    # drop 掉，之后所有默认调用都复用这套纯 BM25 集合，稠密通道静默消失。
     build_dense = config.embed_config().ready and (
         with_vector or bool(stats is not None and stats.vector_enabled)
     )
@@ -85,11 +78,9 @@ def ensure_ready(*, with_vector: bool = True, rebuild: bool = False) -> ReadySta
         print(f"[qa] 索引需要重建（{reason}），开始建库；首次约 30~60 秒…")
         from .pipeline import RagPipeline
 
-        # force=rebuild：rebuild 的语义是「无视 sha1 强制重解析」，不传就只能靠切块层重算，
-        # 改了 law_parser 的解析逻辑时新规则永不生效。
         RagPipeline(verbose=True).build(force=rebuild, with_vector=build_dense)
         stats = Indexer(verbose=False).load_stats()
-        if stats is None:  # 建完仍读不到快照，说明 index 阶段没真正落盘
+        if stats is None:
             raise QaError(f"建库未写出索引快照：{config.INDEX_META_PATH}")
 
     laws, articles = _manifest_counts()
@@ -165,10 +156,6 @@ def stale_reason(store, stats, *, want_dense: bool) -> str | None:
         return f"集合行数（{actual}）与索引快照（{stats.rows}）不一致"
 
     if want_dense and stats.vector_enabled:
-        # 集合里的向量是哪个模型编的，集合本身看不出来 —— 只记在快照上，所以要显式比对。
-        # 少这一步就会出现「查询用新模型编码、库里是旧模型向量」的静默劣化：换模型时
-        # 维度可能恰好相同（text-embedding-v4 与 bge-large-zh-v1.5 都是 1024），
-        # 行数和 vector_enabled 都不变，下面所有检查都会放行。
         from .kb.indexer import EmbeddingClient
 
         want_label = EmbeddingClient().model_label
@@ -183,8 +170,6 @@ def stale_reason(store, stats, *, want_dense: bool) -> str | None:
 
         notes = Indexer(verbose=False).load_notes()
         if any(note.startswith(EMBED_FAILED_NOTE_PREFIX) for note in notes):
-            # 上次已试过稠密、向量端点挂了。此刻重建只会再失败一次并白 drop 集合，
-            # 所以不自动重试；端点恢复后用 --rebuild 显式补上。
             return None
         return "索引快照为纯 BM25，本次需要向量通道，重建以补上稠密向量字段"
 
@@ -204,7 +189,6 @@ def _count_lines(path) -> int:
         return sum(1 for line in fh if line.strip())
 
 
-# ================================================================== 唯一入口
 def qa(
     question: str,
     *,
@@ -237,8 +221,6 @@ def qa(
     if mode == MODE_SEARCH:
         return rag.search(question, top_k=top_k, channel_debug=debug)
 
-    # 从前这里拆成 search + 生成器两步，只为把 channel_debug 送进检索层
-    # （ask() 那时不接收它）。现在 ask() 自己透传，两步就并回一步了。
     return rag.ask(Question(text=question, top_k=top_k), channel_debug=debug)
 
 
@@ -253,9 +235,8 @@ def _announce(state: ReadyState, debug: bool) -> None:
     _announced = True
 
 
-# ================================================================== 渲染
 def render(result: Answer | RetrievalResult, *, debug: bool = False) -> str:
-    """把 qa() 的返回值渲染成人读文本（命令行入口与 examples 共用）。"""
+    """把 qa() 的返回值渲染成人读文本（命令行入口用它，调用方也可以直接用）。"""
     if isinstance(result, RetrievalResult):
         return result.render()
     text = result.render()

@@ -59,21 +59,14 @@ __all__ = [
     "check_question",
     "build_case",
     "summarize",
-    # 两侧并排跑与全预算汇总：单跳对照（eval.singlehop）复用同一份
     "trace",
     "full_budget_summary",
     "main",
 ]
 
-# `law_id#条号` —— law_id 里没有 `#`，条号里也没有，所以这个分隔符是无歧义的。
-# 不存 parent_id（形如 `law_id@版本#a091`）：版本号一改，整个题集就全失效了。
 SEP = "#"
 
-# 生成时的温度。默认的 0.2 是要它稳定，这里正相反 —— 100 道题要的是多样性，
-# 太低会退化成同一个句式换几个词。
 GEN_TEMPERATURE = 0.8
-# 每条锚点最多试几次。失败大多是模型选了同一部法（G3）或写出了条号（G1），
-# 把失败原因回灌给它，通常第二次就对了。
 GEN_ATTEMPTS = 3
 
 
@@ -88,7 +81,6 @@ def _save(path: Path, payload: Any) -> None:
     Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
-# ================================================================== 键
 def format_key(law_id: str, article_no: str) -> str:
     return f"{law_id}{SEP}{article_no}"
 
@@ -101,7 +93,6 @@ def parse_key(raw: str) -> tuple[str, str]:
     return law_id.strip(), article_no.strip()
 
 
-# ================================================================== 库
 @dataclass(frozen=True, eq=False)
 class Library:
     """题集要用到的最小库视图：条文、`(law_id, 条号)` 索引、全部法名。
@@ -141,11 +132,6 @@ class Library:
         return parent
 
 
-# ================================================================== 护栏
-# 立法依据/立法目的条文：「……根据《X》，制定本条例」「为了……，制定本法」。
-# 这类条文**不含任何实质规则**，拿它出题会得到「第一条规定了本条例依据道交法制定，
-# 再由道交法第 Y 条……」这种空转的多跳 —— 首轮试跑 5 道里踩了 3 道，全是它。
-# 判据放在正文形态上而不是「是不是第一条」：修订后的法规未必把依据条放在第一条。
 RE_PREAMBLE = re.compile(r"制定(?:本|该)(?:条例|法|规定|办法)")
 
 
@@ -164,7 +150,7 @@ def _law_aliases(library: Library) -> tuple[str, ...]:
     for name in library.law_names:
         aliases.add(name)
         short = name.removeprefix("中华人民共和国")
-        if len(short) >= 4:   # 太短的简称（两三个字）到处撞，只留够长的
+        if len(short) >= 4:
             aliases.add(short)
     return tuple(sorted(aliases, key=len, reverse=True))
 
@@ -199,17 +185,17 @@ def build_case(raw: dict, library: Library) -> HopCase:
     if not isinstance(gold_raw, list) or not gold_raw:
         raise HopError("gold 为空")
 
-    parents = [library.resolve(item) for item in gold_raw]          # G2
+    parents = [library.resolve(item) for item in gold_raw]
     laws = tuple(dict.fromkeys(p.law_id for p in parents))
-    if len(laws) < 2:                                               # G3
+    if len(laws) < 2:
         raise HopError(f"gold 全在《{parents[0].law_name}》里，不算跨法规多跳")
-    for parent in parents:                                          # G5
+    for parent in parents:
         if is_preamble(parent):
             raise HopError(f"{parent.citation} 是立法依据条，不含实质规则，不能当 gold")
 
     anchor_raw = (raw.get("anchor") or "").strip()
     if anchor_raw:
-        library.resolve(anchor_raw)                                 # 锚点也必须真实存在
+        library.resolve(anchor_raw)
     anchor_key = parse_key(anchor_raw) if anchor_raw else None
 
     return HopCase(
@@ -231,9 +217,9 @@ class HopCase:
     gold_keys: tuple[tuple[str, str], ...]
     anchor_key: tuple[str, str] | None
     why: str
-    gold_ids: tuple[str, ...]        # 解析出的 parent_id，用来对检索结果
-    gold_laws: tuple[str, ...]       # 去重后的 law_id，>= 2 才算跨法
-    gold_citations: tuple[str, ...]  # 人读
+    gold_ids: tuple[str, ...]
+    gold_laws: tuple[str, ...]
+    gold_citations: tuple[str, ...]
 
     @property
     def is_cross_law(self) -> bool:
@@ -277,7 +263,7 @@ def load_cases(
             case = build_case(item, library)
         except HopError as exc:
             raise HopError(f"{path} 第 {position} 条不合格：{exc}") from exc
-        key = _normalize(case.question)                          # G4
+        key = _normalize(case.question)
         if key in seen:
             dropped += 1
             continue
@@ -286,7 +272,6 @@ def load_cases(
     return cases, dropped
 
 
-# ================================================================== 统计
 def summarize(cases: list[HopCase], *, library: Library | None = None) -> str:
     """题集体检：条数、法规分布、每道题的 gold 跨了几部法。"""
     lines = [f"多跳题集：{len(cases)} 题"]
@@ -319,7 +304,6 @@ def overlap_diagnostic(cases: list[HopCase], library: Library) -> str:
     """
 
     def longest_common(a: str, b: str) -> int:
-        # 经典 DP 滚动数组。题面与条文都只有几百字，不值得上后缀自动机。
         previous = [0] * (len(b) + 1)
         best = 0
         for char_a in a:
@@ -388,8 +372,6 @@ def defect_diagnostic(cases: list[HopCase], library: Library) -> str:
     for case in cases:
         if any("深圳" in law_name.get(law, "") for law in case.gold_laws):
             sz_total += 1
-            # 只认「深圳」两个字。「特区」不认 —— 「经济特区法规」这种词会出现在
-            # 讨论法规适用范围的句子里，跟题目实际发生地不是一回事。
             if "深圳" not in case.question:
                 sz_samples.append(case.question)
         for pid in case.gold_ids:
@@ -463,7 +445,6 @@ def baseline_diagnostic(cases: list[HopCase], *, top_k: int = 6, verbose: bool =
     return payload
 
 
-# ================================================================== 生成
 GEN_SYSTEM = (
     "你是交通法规评测集的出题人。你只输出 JSON，不写任何解释性文字。"
 )
@@ -583,9 +564,6 @@ def generate(
     catalog = "\n".join(f"- {name}" for name in library.law_names)
     accepted: list[dict] = list(seed or [])
     seen = {_normalize(item.get("question", "")) for item in accepted}
-    # 光有题面去重挡不住「同一个锚点再问一遍」：换个说法就绕过去了，补出来的题会全是
-    # 已有题的同 gold 同考点。锚点本身也要记。这里以前比的是 `_normalize(anchor.text) in seen`，
-    # 拿整条法条去撞题面集合，恒不相等 —— 等于没判。
     mined = {item.get("anchor", "") for item in accepted}
     attempts = failures = 0
 
@@ -640,7 +618,7 @@ def generate(
             seen.add(_normalize(case.question))
             mined.add(format_key(anchor.law_id, anchor.article_no))
             accepted.append(case.to_dict())
-            if out is not None:  # 逐条落盘：断了才有东西可当 seed，不然「续跑」是句空话
+            if out is not None:
                 _save(out, accepted)
             if verbose:
                 print(f"[gen] {len(accepted):>3}/{target}  {case.question[:44]}"
@@ -659,7 +637,6 @@ def generate(
     return accepted
 
 
-# ================================================================== 看轨迹
 def _why_of(case: Any) -> str:
     """多跳题带 `why`（这道题为什么算跨法），单跳题没有 —— 一份行格式要能吃两种 case。"""
     return getattr(case, "why", "")
@@ -682,14 +659,14 @@ def trace(
     两条臂怎么跑、行里放什么，只此一处实现，改一次两边同时生效。
     case 只要求有 `question` / `gold_ids` / `gold_citations` 三个字段。
     """
-    from ..agent.graph import AgentRunner  # 延迟导入：只有 graph 拉 langgraph
+    from ..agent.graph import AgentRunner
     from ..api import qa
     from ..contracts import Answer, RetrievalResult
 
     if cases is None:
         cases, _dropped = load_cases()
     cases = list(cases)[:limit]
-    runner = AgentRunner.load(top_k=top_k)   # 图只建一次，10 道题复用
+    runner = AgentRunner.load(top_k=top_k)
 
     rows: list[dict] = []
     for position, case in enumerate(cases, start=1):
@@ -728,7 +705,8 @@ def trace(
                     "answer": agent_answer.text if agent_answer else "",
                     "cited": [e.citation for e in agent_answer.evidences] if agent_answer else [],
                     "steps": state.get("steps"),
-                    "intent": state.get("intent"),
+                    "region": state.get("region"),
+                    "region_scope": list(state.get("region_scope") or ()),
                     "searches": state.get("search_log") or [],
                     "reflections": state.get("reflections") or [],
                     "usage": state.get("usage") or [],
@@ -737,8 +715,6 @@ def trace(
             }
         )
 
-        # 每题落一次盘。100 题这一轮要跑一两个小时，只在结尾写一次的话，
-        # 中途任何一次网络抖动都会把已花掉的钱和时间一起作废。
         if out is not None:
             _save(out, rows)
 
@@ -759,9 +735,6 @@ def full_budget_summary(rows: list[dict]) -> str:
     所以同一份输出里**必须**带上同预算分解（双方都只看第一次检索），
     否则「agent 更强」这个结论分不清是"第一次就查得更准"还是"单纯多查了几轮"。
     """
-    # gold 给的是 parent_id，答案的 `cited` 是引用串，要拿前者去比后者，所以这个映射
-    # 的方向必须是 parent_id → citation。反过来建不会报错，只会让「引用 gold」恒为 0
-    # —— 一个安静到几乎看不出来的错数，实测踩到过一次。
     index: dict[str, str] = {}
     for row in rows:
         for hit in row["rag"]["retrieved"]:
@@ -770,8 +743,6 @@ def full_budget_summary(rows: list[dict]) -> str:
             for hit in search["articles"]:
                 index.setdefault(hit["parent_id"], hit["citation"])
 
-    # 分母从行里数，不写死 2×题数：多跳题恒好两条 gold，单跳题集（gold 一条起、条数不定）
-    # 复用这个汇总时，写死会把分母算错 —— 而算错的方向是**虚高**，正是最不该出的那种错。
     total = sum(len(row["gold_ids"]) for row in rows)
     tally = {
         "rag": {"found": 0, "cited": 0, "rounds": 0},
@@ -825,7 +796,6 @@ def full_budget_summary(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-# ================================================================== 命令行
 USAGE = __doc__
 
 
@@ -863,8 +833,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         options = _parser().parse_args(args)
     except SystemExit as exc:
-        # argparse 在参数不认识 / 取不到值时直接 SystemExit。收回成返回值，
-        # 保住「main() 返回 int、调用方 raise SystemExit(main())」这条全仓一致的契约。
         return exc.code if isinstance(exc.code, int) else 0
 
     out = Path(options.out) if options.out else None

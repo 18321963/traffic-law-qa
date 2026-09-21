@@ -56,9 +56,6 @@ class Runtime:
     ready: ReadyState
     rag: LegalRAG
     boot_ms: float
-    # 稠密通道此刻是否真在工作 —— **观测值**，不是配置。
-    # 与 `ready.dense` 是两件事：后者是 index_meta.json 里「建库时带没带稠密向量」
-    # 的快照，落盘之后就不会变了；这个跟着预热与每次检索走，端点挂了它才会变 False。
     dense_live: bool = False
 
 
@@ -93,22 +90,15 @@ def _boot() -> Runtime:
     started = time.perf_counter()
     ready = ensure_ready()
     rag = LegalRAG.load()
-    # 预热放在装配的最后、并且算进 boot_ms：它是装配的一部分，不是请求的一部分。
-    # 不预热的话，embedding 端点的首次建连（实测 1.5~3s）会算在第一个用户头上。
     warm_ms = rag.warm()
     boot_ms = (time.perf_counter() - started) * 1000
     print(f"[serve] 装配完成（{boot_ms / 1000:.2f}s）：{ready.describe()}")
-    # 措辞故意不写「无 embedding 配置」：warm() 对「压根没配」和「配了但端点连不上」
-    # 都返回 None，断言成前者会在后一种情况下指错方向。真实原因由每次检索的
-    # notes 带着（「查询向量化失败，本次只用 BM25：…」），这里只报事实。
     warm_note = f"{warm_ms:.0f}ms" if warm_ms is not None else "未执行（向量端点未配置或不可达，检索只走 BM25）"
     print(f"[serve] 稠密通道预热 {warm_note}")
-    # 集合压根没有稠密字段时，端点再通也算不上「通道在工作」，所以要 and 上 ready.dense。
     dense_live = ready.dense and warm_ms is not None
     return Runtime(ready=ready, rag=rag, boot_ms=boot_ms, dense_live=dense_live)
 
 
-# ------------------------------------------------------------------ 请求体
 class QaRequest(BaseModel):
     question: str = Field(..., min_length=1, description="用户问题")
     mode: Literal["ask", "search"] = Field("ask", description="ask=检索+生成，search=只检索")
@@ -122,9 +112,6 @@ def _runtime() -> Runtime:
     return rt
 
 
-# ------------------------------------------------------------------ 端点
-# 三个端点都写成同步 def：FastAPI / Starlette 会把同步端点丢进线程池执行，
-# 检索与 LLM 调用都是阻塞 IO —— 写成 async def 反而会卡住整个事件循环。
 @app.get("/health")
 def health() -> dict:
     """存活 + 库内规模 + 装配耗时 + 通道实况。未就绪时返回 503 与原因。
@@ -159,15 +146,12 @@ def ask(req: QaRequest) -> dict:
     rt = _runtime()
     started = time.perf_counter()
     retrieval = rt.rag.search(req.question, top_k=req.top_k)
-    # 把「这次到底走没走稠密」记回运行时，/health 靠它说真话。
-    # 并发下只是「最后一次写的赢」：一个状态提示，不参与控制流，不值得加锁。
     rt.dense_live = retrieval.used_vector
     if req.mode == "search":
         payload = retrieval.to_dict()
     else:
         answer = rt.rag.answer(Question(text=req.question, top_k=req.top_k), retrieval)
         payload = answer.to_dict()
-    # 每请求只做检索+生成；装配成本发生在启动时（见 /health 的 boot_ms）
     payload["request_ms"] = round((time.perf_counter() - started) * 1000, 2)
     return payload
 
@@ -188,7 +172,6 @@ def ask_stream(req: QaRequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            # 关掉反向代理的缓冲，否则 SSE 会被攒成一坨再吐（本地直连无影响）
             "X-Accel-Buffering": "no",
         },
     )
@@ -201,7 +184,6 @@ def _sse_events(rt: Runtime, req: QaRequest):
     except Exception as exc:  # noqa: BLE001 - 检索层失败要给用户一句话而不是断连
         yield _sse("error", {"message": f"检索失败：{exc}"})
         return
-    # 与 ask() 同理：流式这条路也要让 /health 知道本次走没走稠密。
     rt.dense_live = retrieval.used_vector
 
     yield _sse("evidence", retrieval.to_dict())
@@ -238,16 +220,12 @@ def _sse(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-# ------------------------------------------------------------------ 入口
 def main(argv: list[str] | None = None) -> int:
     """tlq-serve [--host H] [--port P]"""
     import sys
 
     import uvicorn
 
-    # 用 argparse 而不是手搓：`--help` 由它在解析阶段就拦下（SystemExit(0)），
-    # 绝不会走到下面那行 uvicorn.run。这一段的哨兵测试钉的就是这条 ——
-    # 手搓版本只做 `if name in args`，`--help` 没人拦，会**真的把服务起起来**。
     parser = argparse.ArgumentParser(
         prog="tlq-serve",
         description="把 qa() 包成 HTTP 服务。装配在启动时做一次，请求只做检索 + 生成。",
@@ -264,8 +242,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         options = parser.parse_args(sys.argv[1:] if argv is None else argv)
     except SystemExit as exc:
-        # argparse 在 --help 和参数错时都会直接 SystemExit。把它收回成返回值，
-        # 让「main() 返回 int、调用方 raise SystemExit(main())」这条全仓一致的契约继续成立。
         return exc.code if isinstance(exc.code, int) else 0
 
     uvicorn.run(app, host=options.host, port=options.port)

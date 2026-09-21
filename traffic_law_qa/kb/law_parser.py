@@ -22,9 +22,8 @@ from .. import config
 from ..contracts import Article, Heading, LawDocument, Paragraph
 from .docx_reader import DocxReader
 
-# ---------------------------------------------------------------- 正则与常量
 CN_NUM = "零一二三四五六七八九十百千"
-CN_CLASS = f"[{CN_NUM}]"  # 注意：中文数字必须写成字符类，写成 (...) 会变成字面量序列
+CN_CLASS = f"[{CN_NUM}]"
 RE_TOC_HEAD = re.compile(r"^目\s*录$")
 RE_CHAPTER = re.compile(rf"^第({CN_CLASS})章[\s　]*(.*)$")
 RE_SECTION = re.compile(rf"^第({CN_CLASS})节[\s　]*(.*)$")
@@ -38,7 +37,6 @@ _MID_ASCII_SPACE = re.compile(r"(?<=[\u4e00-\u9fff])[ \t]+(?=[\u4e00-\u9fff])")
 CN_DIGITS = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 CN_UNITS = {"十": 10, "百": 100, "千": 1000}
 
-# 稳定的英文 law_id：新增法规时在此登记，未登记的退化为 law_<hash>
 LAW_ID_REGISTRY: dict[str, str] = {
     "中华人民共和国道路交通安全法": "road_traffic_safety_law",
     "中华人民共和国道路交通安全法实施条例": "road_traffic_safety_regulation",
@@ -49,7 +47,6 @@ LAW_ID_REGISTRY: dict[str, str] = {
 }
 
 
-# ---------------------------------------------------------------- 文本工具
 def clean_text(text: str) -> str:
     """去零宽字符 + 去 CJK 之间的残留 ASCII 空格。"""
     return _MID_ASCII_SPACE.sub("", _ZERO_WIDTH.sub("", text)).strip()
@@ -65,7 +62,7 @@ def cn_to_int(cn: str) -> int:
             number = CN_DIGITS[ch]
         elif ch in CN_UNITS:
             unit = CN_UNITS[ch]
-            if number == 0:  # "十一" 的前导十
+            if number == 0:
                 number = 1
             section += number * unit
             number = 0
@@ -90,7 +87,6 @@ def sha1_of(path: Path) -> str:
     return digest.hexdigest()
 
 
-# ================================================================== 解析器
 class LawParser:
     """解析器：把段落列表还原成"法 → 章 → 节 → 条"结构。
 
@@ -105,7 +101,6 @@ class LawParser:
     def __init__(self, law_ids: dict[str, str] | None = None) -> None:
         self.law_ids = dict(LAW_ID_REGISTRY if law_ids is None else law_ids)
 
-    # -------------------------------------------------------------- 主接口
     def parse(
         self,
         paragraphs: list[Paragraph],
@@ -192,9 +187,9 @@ class LawParser:
                 continue
 
             if pending_no is not None:
-                buffer.append(text)  # 同一条的后续款
+                buffer.append(text)
             else:
-                leftovers.append(text)  # 正文里既不是章也不是条的段落
+                leftovers.append(text)
 
         flush()
 
@@ -218,7 +213,6 @@ class LawParser:
         paragraphs = (reader or DocxReader()).read(path)
         return self.parse(paragraphs, source_file=path.name)
 
-    # -------------------------------------------------------------- 内部
     @staticmethod
     def _locate_body(paras: list[Paragraph]) -> tuple[int, list[str]]:
         """定位正文起点，并返回目录条目。
@@ -270,7 +264,6 @@ class LawParser:
         return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
 
 
-# ================================================================== 结构层读写
 def render_markdown(law: LawDocument) -> str:
     """人读层：保留章 / 节 / 条层级，便于与原文逐条比对。"""
     lines = [f"# {law.law_name}", "", f"版本：{law.version} ｜ 来源：{law.source_file}", ""]
@@ -303,7 +296,6 @@ class LawLibrary:
         self.text_dir = Path(text_dir or config.TEXT_DIR)
         self.manifest_path = self.parsed_dir / "manifest.json"
 
-    # -------------------------------------------------------------- 单部法规
     def path_of(self, law_id: str) -> Path:
         return self.parsed_dir / f"{law_id}.json"
 
@@ -328,7 +320,6 @@ class LawLibrary:
             ids = sorted(p.stem for p in self.parsed_dir.glob("*.json") if p.name != "manifest.json")
         return [self.load(law_id) for law_id in ids]
 
-    # -------------------------------------------------------------- 清单
     def manifest(self) -> dict:
         if self.manifest_path.exists():
             return json.loads(self.manifest_path.read_text(encoding="utf-8"))
@@ -342,7 +333,7 @@ class LawLibrary:
         manifest = {
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "docx_dir": str(config.DOCX_DIR),
-            "cross_check": False,  # 未接入外部解析器做交叉校验
+            "cross_check": False,
             "laws": entries,
         }
         self.manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -365,7 +356,6 @@ class LawLibrary:
         }
 
 
-# ================================================================== 落盘阶段
 class ParseStage:
     """Layer 2 的落盘封装：docx 目录 → 结构层产物。
 
@@ -443,7 +433,6 @@ class ParseStage:
         return laws
 
 
-# ------------------------------------------------------------------ 调试入口
 def main(argv: list[str] | None = None) -> int:
     """python -m traffic_law_qa.kb.law_parser [--force] [--only law_id]"""
     args = list(sys.argv[1:] if argv is None else argv)

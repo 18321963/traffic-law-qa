@@ -4,8 +4,8 @@
 `Question + RetrievalResult → Answer`，不该被工具调用污染；这里只负责
 「给定消息历史，返回下一条助手消息」。
 
-**这个模块不依赖 langgraph** —— 它只用 `openai` + `config`。所以它可以被顶层 import，
-不需要 `agent.graph` 那样的延迟导入（`tests/test_multihop.py` 钉着这条边界）。
+**这个模块不依赖 langgraph** —— 它只用 `openai` + `config` + 零依赖的 `obs`。所以它可以被
+顶层 import，不需要 `agent.graph` 那样的延迟导入（`tests/test_multihop.py` 钉着这条边界）。
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import time
 from typing import Any
 
 from .. import config
+from ..obs import Tracer
 
 __all__ = ["ToolCallingLLM"]
 
@@ -72,9 +73,16 @@ def _normalize(response: Any) -> tuple[dict, dict]:
 
 
 class ToolCallingLLM:
-    def __init__(self, cfg: config.LLMConfig | None = None, *, retries: int = 2) -> None:
+    def __init__(
+        self,
+        cfg: config.LLMConfig | None = None,
+        *,
+        retries: int = 2,
+        observer: Tracer | None = None,
+    ) -> None:
         self.cfg = cfg or config.llm_config()
         self.retries = retries
+        self._observer = observer or Tracer()
         self._client = None
 
     @property
@@ -87,9 +95,18 @@ class ToolCallingLLM:
         *,
         tools: list[dict] | None = None,
         temperature: float | None = None,
+        name: str = "llm.chat",
     ) -> tuple[dict, dict]:
-        """调一次模型，返回 (助手消息, usage)。重试策略与 generator 一致。"""
-        from openai import OpenAI  # 延迟导入
+        """调一次模型，返回 (助手消息, usage)。重试策略与 generator 一致。
+
+        `name` 只是**观测里那一格的名字**：三个节点调的是同一个方法，云端得能一眼分开
+        是入口判定、规划轮还是审核轮。默认值对得起不观测时的情形。
+
+        整个重试循环包在一个 generation 观察里：失败的尝试没有单独的时间线，
+        只把次数与最后一次的错误记进去 —— 这个模块要的是「这次调用了多久、花了多少 token」，
+        不是一份失败史。
+        """
+        from openai import OpenAI
 
         if self._client is None:
             self._client = OpenAI(base_url=self.cfg.base_url, api_key=self.cfg.api_key)
@@ -97,22 +114,31 @@ class ToolCallingLLM:
         extra: dict[str, Any] = {}
         if tools:
             extra["tools"] = tools
-            # 刻意用 "auto" 而不是 "required"：一是不是所有兼容端点都支持 required
-            # （百炼就不支持），二是本设计本来就需要模型能自主停下来。
             extra["tool_choice"] = "auto"
 
+        effective = self.cfg.temperature if temperature is None else temperature
         last_error: Exception | None = None
-        for attempt in range(1, self.retries + 1):
-            try:
-                response = self._client.chat.completions.create(
-                    model=self.cfg.model,
-                    messages=messages,
-                    temperature=self.cfg.temperature if temperature is None else temperature,
-                    **extra,
-                )
-                return _normalize(response)
-            except Exception as exc:  # noqa: BLE001 - 统一重试
-                last_error = exc
-                if attempt < self.retries:
-                    time.sleep(1.5 * attempt)
+        with self._observer.observation(
+            name,
+            "generation",
+            model=self.cfg.model,
+            input=messages,
+            model_parameters={"temperature": effective},
+        ) as span:
+            for attempt in range(1, self.retries + 1):
+                try:
+                    response = self._client.chat.completions.create(
+                        model=self.cfg.model,
+                        messages=messages,
+                        temperature=effective,
+                        **extra,
+                    )
+                    reply, usage = _normalize(response)
+                    span.update(output=reply, usage_details=usage, metadata={"attempts": attempt})
+                    return reply, usage
+                except Exception as exc:  # noqa: BLE001 - 统一重试
+                    last_error = exc
+                    if attempt < self.retries:
+                        time.sleep(1.5 * attempt)
+            span.update(level="ERROR", status_message=str(last_error))
         raise RuntimeError(f"调用 {self.cfg.model} 失败：{last_error}") from last_error

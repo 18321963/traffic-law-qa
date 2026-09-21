@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
             rebuild="--rebuild" in flags,
         )
     except QaError as exc:
-        print(str(exc))  # 一行中文提示即可，不要把堆栈糊在脸上
+        print(str(exc))
         return 1
 
     if "--json" in flags:

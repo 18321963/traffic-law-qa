@@ -1,15 +1,15 @@
-"""图的装配（6 个节点 + 4 个路由）与门面 `AgentRunner`。
+"""图的装配（5 个节点 + 3 个路由）与门面 `AgentRunner`。
 
-    START → classify ─(条文定位)→ lookup_plan ─┐
-                  └──(法规检索)→ agent ────────┤─(有 tool_calls)→ tools → reflect
-                                              │                          │
-                                  (无 tool_calls)┘      (不够 且 有预算)──┘
-                                              └──→ finalize ←──(够了 / 预算尽)
-                                                     │
-                                                    END
+    START → region → agent ─┬─(有 tool_calls)→ tools → reflect
+                            │                          │
+                            │            (不够 且 补得上 且 有预算) → 回到 agent
+                            │                          │
+                            └─(无 tool_calls)───┐  (够了 / 预算尽 / 缺口在库外)
+                                                ↓      ↓
+                                             finalize → END
 
-**回边指向 agent 而不是 classify**：意图只在入口定一次。第二轮再分类一遍纯属浪费，
-而且可能分到不同意图导致循环抖动。
+**回边指向 agent 而不是 region**：地区只在入口判一次。第二轮再判一遍纯属浪费一次调用，
+而且可能判出不同地区导致检索作用域抖动 —— 同一道题的证据范围在运行中来回变，就没法解释了。
 
 `AgentRunner` 与 `LegalRAG` 平级，是**第二条编排路径**而非替代品：`qa(mode="ask")` 仍是
 默认，走线性管道；Agent 需显式开启。两者产出同一个 `Answer` 契约对象，因此可以直接对照。
@@ -29,18 +29,14 @@ from .. import config
 from ..contracts import Answer, Question
 from ..obs import Tracer, traced
 from ..qa.rag import LegalRAG
-from .intent import INTENT_LOOKUP, INTENT_SEARCH, make_classify_node, make_lookup_plan_node
 from .llm import ToolCallingLLM
 from .nodes import TOOLS, make_agent_node, make_finalize_node, make_tools_node
 from .reflect import make_reflect_node
+from .region import REGION_UNKNOWN, make_region_node
 from .state import AgentState
 from .tools import build_article_index
 
 __all__ = ["route_after_agent", "build_graph", "AgentRunner"]
-
-
-def _route_after_classify(state: AgentState) -> Literal["lookup_plan", "agent"]:
-    return "lookup_plan" if state.get("intent") == INTENT_LOOKUP else "agent"
 
 
 def route_after_agent(state: AgentState) -> Literal["tools", "finalize"]:
@@ -80,49 +76,37 @@ def build_graph(
     rag: LegalRAG,
     llm: ToolCallingLLM,
     cfg: config.AgentConfig,
-    forced_intent: str | None = None,
     reflect_llm: ToolCallingLLM | None = None,
     tracer: Tracer | None = None,
 ):
+    """装配图。`reflect_llm` 是**判断题那一只**模型：入口的地区判定与审核轮共用它，
+    规划轮用主模型 —— 前者要的是判得准且便宜，后者要的是会调工具。"""
     from langgraph.graph import END, START, StateGraph
 
-    # 空 Tracer（默认）下每个 span 只是两次空调用，图的行为与不埋点逐位相同。
     tracer = tracer or Tracer()
 
-    # 审核可以挂另一个模型；不给就用规划轮那个。**默认必须是 `llm` 而不是新建一个
-    # 真客户端** —— 测试注入假 LLM 时，审核要是自己造一个，就会当场去打网络。
     reflect_llm = reflect_llm or llm
 
-    # 条号索引只建一次：classify / lookup_plan / tools 三个节点共用同一份。
-    # 它是纯函数产物、构造后只读，所以共享是安全的，也避免三份各建一遍。
     parents = rag.parents
     by_number = build_article_index(parents)
-    # 库的边界要写进审核提示词，否则审核分不清「这轮没检出来」与「库里根本没有」。
-    # **从 parents 现取，不写死一份名单** —— 新增法规时不该有人记得来这里改。
     laws = sorted({parent.law_name for parent in parents.values()})
 
     graph = StateGraph(AgentState)
-    graph.add_node("classify", traced(tracer, "node.classify", make_classify_node(parents, by_number, forced_intent)))
-    graph.add_node("lookup_plan", traced(tracer, "node.lookup_plan", make_lookup_plan_node(parents, by_number)))
+    graph.add_node("region", traced(tracer, "node.region", make_region_node(reflect_llm, parents, laws)))
     graph.add_node("agent", traced(tracer, "node.agent", make_agent_node(llm, cfg)))
-    graph.add_node("tools", traced(tracer, "node.tools", make_tools_node(rag, cfg, by_number)))
-    graph.add_node("reflect", traced(tracer, "node.reflect", make_reflect_node(reflect_llm, cfg, laws)))
-    graph.add_node("finalize", traced(tracer, "node.finalize", make_finalize_node(rag, cfg)))
-
-    # 入口先定意图：条文定位走规则规划（零 LLM），其余才进 LLM 规划轮
-    graph.add_edge(START, "classify")
-    graph.add_conditional_edges(
-        "classify", _route_after_classify, {"lookup_plan": "lookup_plan", "agent": "agent"}
+    graph.add_node(
+        "tools", traced(tracer, "node.tools", make_tools_node(rag, cfg, by_number, observer=tracer))
     )
-    # lookup_plan 与 agent 共用一条出边：**判据只有「有没有 tool_calls」，与预算无关**。
-    # 共用而不是各写一条，是为了让「有 tool_calls 必去 tools」这条不变量只有一个实现。
+    graph.add_node("reflect", traced(tracer, "node.reflect", make_reflect_node(reflect_llm, cfg, laws)))
+    graph.add_node(
+        "finalize", traced(tracer, "node.finalize", make_finalize_node(rag, cfg, observer=tracer))
+    )
+
+    graph.add_edge(START, "region")
+    graph.add_edge("region", "agent")
     graph.add_conditional_edges(
         "agent", route_after_agent, {"tools": "tools", "finalize": "finalize"}
     )
-    graph.add_conditional_edges(
-        "lookup_plan", route_after_agent, {"tools": "tools", "finalize": "finalize"}
-    )
-    # tools → reflect 是**无条件**的：每一次工具调用的结果都要经过一次审核
     graph.add_edge("tools", "reflect")
     graph.add_conditional_edges(
         "reflect", _route_after_reflect, {"agent": "agent", "finalize": "finalize"}
@@ -150,16 +134,12 @@ class AgentRunner:
         llm: ToolCallingLLM | None = None,
         reflect_llm: ToolCallingLLM | None = None,
         cfg: config.AgentConfig | None = None,
-        forced_intent: str | None = None,
         tracer: Tracer | None = None,
     ) -> None:
         self.rag = rag
         self.cfg = cfg or config.agent_config()
-        self.forced_intent = forced_intent
         self.tracer = tracer or Tracer()
-        self.llm = llm or ToolCallingLLM(retries=self.cfg.retries)
-        # 不单独给就**跟着规划轮那个走**（含测试注入的假客户端）。
-        # 真实第二个客户端只在 `load()` 里造 —— 那里才知道该读 `AGENT_REFLECT_*`。
+        self.llm = llm or ToolCallingLLM(retries=self.cfg.retries, observer=self.tracer)
         self.reflect_llm = reflect_llm or self.llm
         self._graph = None
 
@@ -174,21 +154,16 @@ class AgentRunner:
         with_vector: bool = True,
         cfg: config.AgentConfig | None = None,
         top_k: int | None = None,
-        forced_intent: str | None = None,
         tracer: Tracer | None = None,
     ) -> "AgentRunner":
-        # top_k 必须一路透到 LegalRAG：它是检索层的默认召回条数，
-        # 只存在 AgentRunner 上的话，--top-k 会静默失效（检索仍按配置的 6 条走）。
         agent_cfg = cfg or config.agent_config()
+        observer = tracer or Tracer()
         return cls(
             LegalRAG.load(with_vector=with_vector, top_k=top_k),
             cfg=agent_cfg,
-            forced_intent=forced_intent,
-            tracer=tracer,
-            # 审核单独一个模型。`AGENT_REFLECT_*` 没配时它逐字段回退到 LLM_*，
-            # 于是这里多出来的只是**一个配置相同的客户端**，行为与单模型时逐位相同。
+            tracer=observer,
             reflect_llm=ToolCallingLLM(
-                config.reflect_llm_config(), retries=agent_cfg.retries
+                config.reflect_llm_config(), retries=agent_cfg.retries, observer=observer
             ),
         )
 
@@ -199,9 +174,6 @@ class AgentRunner:
                 rag=self.rag,
                 llm=self.llm,
                 cfg=self.cfg,
-                forced_intent=self.forced_intent,
-                # 漏掉这一行的话 `load()` 造的第二个客户端**根本进不了图**，
-                # 审核悄悄落回规划轮那个模型 —— `AGENT_REFLECT_*` 全程不生效。
                 reflect_llm=self.reflect_llm,
                 tracer=self.tracer,
             )
@@ -212,6 +184,9 @@ class AgentRunner:
 
         外层 `invoke` span 与内层六个 `node.*` 是平的、不嵌套计时 —— 两者相减就是
         langgraph 自己的调度开销，那恰好是「20 分钟里有多少是框架的」的答案。
+
+        `record(initial, final)` 是给真后端用的：根 span 的入参/出参就是整条 trace 的
+        入参/出参（问题进、答案出）。空实现下它什么也不做。
         """
         query = question if isinstance(question, Question) else Question(text=question)
         initial: AgentState = {
@@ -219,37 +194,30 @@ class AgentRunner:
             "history": [tuple(pair) for pair in query.history],
             "top_k": query.top_k or self.top_k,
             "max_steps": self.cfg.max_steps,
-            "intent": "",
+            "region": REGION_UNKNOWN,
+            "region_scope": (),
             "messages": [],
             "search_log": [],
             "steps": 0,
             "usage": [],
             "reflections": [],
         }
-        # 显式设：langgraph 1.x 的默认值是 10007，等于没有限制。
-        # 这条是「路由写错」时的最后一道保险 —— 宁可报错，不要静默死循环。
-        # 它按 superstep 计（不是按轮），所以必须跟着图的形状走。
-        #
-        # **这个余量在加入意图识别时被吃光过一次**：原值是 3*max_steps + 3，
-        # 恰等于新图的最小值 12 —— 一个 superstep 都不能再插，插了就
-        # GraphRecursionError。图变了就得重测最小值，别信推导。
-        # 现测：检索路 3*max_steps + 3；定位路恒为 6。给到 3*max_steps + 6。
-        with self.tracer.span("invoke"):
-            return self.graph().invoke(
+        with self.tracer.span("invoke") as span:
+            final = self.graph().invoke(
                 initial, config={"recursion_limit": 3 * self.cfg.max_steps + 6}
             )
+            span.record(initial, final)
+        return final
 
     def ask(self, question: str | Question) -> Answer:
         """提问 → 带 [依据N] 标注的答案。未配 LLM 时退回线性管道。"""
         query = question if isinstance(question, Question) else Question(text=question)
         if not self.llm.available:
-            # 没有 key 就连规划轮都跑不了，直接退回单轮管道。
-            # 它同样会拒答（UNAVAILABLE_ANSWER），行为与基线一致。
             return self.rag.ask(query)
 
         state = self.invoke(query)
         answer = state.get("answer")
-        if answer is None:  # 图正常跑完必有 answer；真缺了就说出来，不要静默给空
+        if answer is None:
             raise RuntimeError("Agent 未产出答案：图执行异常结束")
         return answer
 
@@ -262,7 +230,7 @@ class AgentRunner:
         return (
             f"Agent：{stats.articles} 条法条 / {stats.chunks} 个子块 | "
             f"稠密通道 {vector_state} | 最多 {self.cfg.max_steps} 轮 | "
-            f"意图 2 类（{'、'.join((INTENT_LOOKUP, INTENT_SEARCH))}，纯规则） | "
+            f"入口判地区（1 次 {self.reflect_llm.cfg.model} 调用，判不出则不限地区） | "
             f"工具 2 个（{'、'.join(tool['function']['name'] for tool in TOOLS)}） | "
             f"LLM {self.llm.cfg.model}"
         )

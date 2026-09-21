@@ -15,7 +15,7 @@ from dataclasses import replace
 from .. import config
 from ..obs import Recorder
 from .graph import AgentRunner
-from .intent import INTENT_LOOKUP, INTENT_SEARCH
+from .langfuse_tracer import LangfuseTracer
 from .trace import render_timing, render_trace
 
 __all__ = ["main", "USAGE"]
@@ -30,44 +30,56 @@ USAGE = """用法：python -m traffic_law_qa.agent "问题" [选项]
   --max-steps N    规划轮数上限，默认 2。设 1 可做近似基线的 A/B
   --top-k N        证据条数上限，默认取 RAG_TOP_K
   --no-vector      只用 BM25 检索
+  --langfuse       把节点状态、模型调用与检索上报到 Langfuse 云端
+                   （需 .env 里配 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY，
+                   并先装 pip install -e ".[langfuse]"；不配就只是不打这份报告）
   --linear         走单轮管道作对照（不发规划轮请求）
-  --intent NAME    强制意图，用于对照：lookup/条文定位 或 search/法规检索。
-                   默认按规则判。给含条号的问题加 --intent search，
-                   就能看到「不做意图识别」时同一道题会怎样。
 
 决策链在终端里会对判别行上色（够了=绿，还不够/未取到=黄）；重定向到文件时自动不上色。
 """
-
-# --intent 的取值别名；中文原值也直接收，省得记两套词
-INTENT_ALIASES = {
-    "lookup": INTENT_LOOKUP,
-    "条文定位": INTENT_LOOKUP,
-    "search": INTENT_SEARCH,
-    "法规检索": INTENT_SEARCH,
-}
 
 
 def _parser() -> argparse.ArgumentParser:
     """只做校验的解析器。
 
     `--help` 与「一个参数都不给」由 `main` 开头那个分支负责打印 `USAGE`，所以这里
-    `add_help=False` —— argparse 自动生成的帮助不如那份 `USAGE` 写得全（它讲了两套
-    意图词的用法），不该抢它的活。这个解析器的唯一职责是**把不认识的开关和取不到值
-    的开关变成错误**，而不是像原先的 `option()` 那样静默忽略。
+    `add_help=False` —— argparse 自动生成的帮助不如那份 `USAGE` 写得全，不该抢它的活。
+    这个解析器的唯一职责是**把不认识的开关和取不到值的开关变成错误**，
+    而不是像原先的 `option()` 那样静默忽略。
     """
     parser = argparse.ArgumentParser(prog="python -m traffic_law_qa.agent", add_help=False)
     parser.add_argument("question", help="用户问题")
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--top-k", type=int, default=None)
-    parser.add_argument("--intent", default=None)
-    # `--trace` 从加进 USAGE 那天起就没被代码读过 —— 轨迹本来就是默认打印的。
-    # 收下它是为了不打断这条一直在用的命令，而不是因为它做了什么（见 USAGE 那行）。
     parser.add_argument("--trace", action="store_true")
     parser.add_argument("--timing", action="store_true")
     parser.add_argument("--no-vector", action="store_true")
+    parser.add_argument("--langfuse", action="store_true")
     parser.add_argument("--linear", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser
+
+
+def _langfuse_tracer(enabled: bool) -> LangfuseTracer | None:
+    """`--langfuse` → 一个真 tracer；任何一步不成就退回 None（= 不观测）。
+
+    **失败只降级、不中断**：没配 key、没装 extra、SDK 版本不对，都只是这一次不上报。
+    提示一律走 stderr —— `--json` 的 stdout 一个字节都不许被污染。
+    打印只出现 host：两个 key 是秘密，任何一部分都不进日志。
+    """
+    if not enabled:
+        return None
+    cfg = config.langfuse_config()
+    if not cfg.ready:
+        print("--langfuse 忽略：未配置 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY", file=sys.stderr)
+        return None
+    try:
+        tracer = LangfuseTracer(cfg)
+    except Exception as exc:  # noqa: BLE001 - 观测装不上，不该拦住提问
+        print(f'--langfuse 忽略：{exc}（装法：pip install -e ".[langfuse]"）', file=sys.stderr)
+        return None
+    print(f"[langfuse] 观测已开启：{cfg.host}（key 不打印）", file=sys.stderr)
+    return tracer
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -79,8 +91,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         options = _parser().parse_args(args)
     except SystemExit as exc:
-        # argparse 在参数不认识 / 取不到值时直接 SystemExit。收回成返回值，
-        # 保住「main() 返回 int、调用方 raise SystemExit(main())」这条全仓一致的契约。
         return exc.code if isinstance(exc.code, int) else 0
 
     question = options.question
@@ -90,25 +100,17 @@ def main(argv: list[str] | None = None) -> int:
         overrides["max_steps"] = options.max_steps
     cfg = replace(config.agent_config(), **overrides) if overrides else None
 
-    forced_intent = None
-    if options.intent is not None:
-        forced_intent = INTENT_ALIASES.get(options.intent, "")
-        if not forced_intent:
-            print(f"--intent 只认 {'、'.join(INTENT_ALIASES)}，收到「{options.intent}」")
-            return 1
-
-    # 上色只在人对着终端看时才有意义；重定向进 data/traces/*.log 时必须整片关掉，
-    # 否则日志里全是转义序列。
     color = sys.stdout.isatty()
+    langfuse = _langfuse_tracer(options.langfuse)
     recorder = Recorder() if options.timing else None
+    tracer = langfuse or recorder
 
     try:
         runner = AgentRunner.load(
             with_vector=not options.no_vector,
             cfg=cfg,
             top_k=options.top_k,
-            forced_intent=forced_intent,
-            tracer=recorder,
+            tracer=tracer,
         )
     except Exception as exc:  # noqa: BLE001 - Milvus 未起、索引未建等
         print(f"装配失败：{exc}")
@@ -118,7 +120,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[agent] {runner.describe()}")
 
     if options.linear:
-        # 同一个 rag：对照实验要的是「同一套检索 + 同一个生成器，只是不走图」
         answer = runner.rag.ask(question)
     else:
         try:
@@ -126,14 +127,15 @@ def main(argv: list[str] | None = None) -> int:
         except RuntimeError as exc:
             print(str(exc))
             return 1
+        finally:
+            if langfuse is not None:
+                langfuse.flush()
         if not options.json:
             print(render_trace(state, color=color))
         answer = state.get("answer")
 
-    # 走 stderr：`--json` 的 stdout 要留给 JSON，而 `[agent] describe` 已经占了第一行，
-    # 计时表再挤进去只会让下游更难解析。
-    if recorder is not None:
-        print(render_timing(recorder.summary(), color=color), file=sys.stderr)
+    if options.timing and isinstance(tracer, Recorder):
+        print(render_timing(tracer.summary(), color=color), file=sys.stderr)
 
     if answer is None:
         print("未产出答案")
