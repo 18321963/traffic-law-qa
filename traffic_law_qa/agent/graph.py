@@ -86,19 +86,12 @@ def build_graph(
 ):
     from langgraph.graph import END, START, StateGraph
 
-    # 空 Tracer（默认）下每个 span 只是两次空调用，图的行为与不埋点逐位相同。
     tracer = tracer or Tracer()
 
-    # 审核可以挂另一个模型；不给就用规划轮那个。**默认必须是 `llm` 而不是新建一个
-    # 真客户端** —— 测试注入假 LLM 时，审核要是自己造一个，就会当场去打网络。
     reflect_llm = reflect_llm or llm
 
-    # 条号索引只建一次：classify / lookup_plan / tools 三个节点共用同一份。
-    # 它是纯函数产物、构造后只读，所以共享是安全的，也避免三份各建一遍。
     parents = rag.parents
     by_number = build_article_index(parents)
-    # 库的边界要写进审核提示词，否则审核分不清「这轮没检出来」与「库里根本没有」。
-    # **从 parents 现取，不写死一份名单** —— 新增法规时不该有人记得来这里改。
     laws = sorted({parent.law_name for parent in parents.values()})
 
     graph = StateGraph(AgentState)
@@ -109,20 +102,16 @@ def build_graph(
     graph.add_node("reflect", traced(tracer, "node.reflect", make_reflect_node(reflect_llm, cfg, laws)))
     graph.add_node("finalize", traced(tracer, "node.finalize", make_finalize_node(rag, cfg)))
 
-    # 入口先定意图：条文定位走规则规划（零 LLM），其余才进 LLM 规划轮
     graph.add_edge(START, "classify")
     graph.add_conditional_edges(
         "classify", _route_after_classify, {"lookup_plan": "lookup_plan", "agent": "agent"}
     )
-    # lookup_plan 与 agent 共用一条出边：**判据只有「有没有 tool_calls」，与预算无关**。
-    # 共用而不是各写一条，是为了让「有 tool_calls 必去 tools」这条不变量只有一个实现。
     graph.add_conditional_edges(
         "agent", route_after_agent, {"tools": "tools", "finalize": "finalize"}
     )
     graph.add_conditional_edges(
         "lookup_plan", route_after_agent, {"tools": "tools", "finalize": "finalize"}
     )
-    # tools → reflect 是**无条件**的：每一次工具调用的结果都要经过一次审核
     graph.add_edge("tools", "reflect")
     graph.add_conditional_edges(
         "reflect", _route_after_reflect, {"agent": "agent", "finalize": "finalize"}
@@ -158,8 +147,6 @@ class AgentRunner:
         self.forced_intent = forced_intent
         self.tracer = tracer or Tracer()
         self.llm = llm or ToolCallingLLM(retries=self.cfg.retries)
-        # 不单独给就**跟着规划轮那个走**（含测试注入的假客户端）。
-        # 真实第二个客户端只在 `load()` 里造 —— 那里才知道该读 `AGENT_REFLECT_*`。
         self.reflect_llm = reflect_llm or self.llm
         self._graph = None
 
@@ -177,16 +164,12 @@ class AgentRunner:
         forced_intent: str | None = None,
         tracer: Tracer | None = None,
     ) -> "AgentRunner":
-        # top_k 必须一路透到 LegalRAG：它是检索层的默认召回条数，
-        # 只存在 AgentRunner 上的话，--top-k 会静默失效（检索仍按配置的 6 条走）。
         agent_cfg = cfg or config.agent_config()
         return cls(
             LegalRAG.load(with_vector=with_vector, top_k=top_k),
             cfg=agent_cfg,
             forced_intent=forced_intent,
             tracer=tracer,
-            # 审核单独一个模型。`AGENT_REFLECT_*` 没配时它逐字段回退到 LLM_*，
-            # 于是这里多出来的只是**一个配置相同的客户端**，行为与单模型时逐位相同。
             reflect_llm=ToolCallingLLM(
                 config.reflect_llm_config(), retries=agent_cfg.retries
             ),
@@ -200,8 +183,6 @@ class AgentRunner:
                 llm=self.llm,
                 cfg=self.cfg,
                 forced_intent=self.forced_intent,
-                # 漏掉这一行的话 `load()` 造的第二个客户端**根本进不了图**，
-                # 审核悄悄落回规划轮那个模型 —— `AGENT_REFLECT_*` 全程不生效。
                 reflect_llm=self.reflect_llm,
                 tracer=self.tracer,
             )
@@ -226,14 +207,6 @@ class AgentRunner:
             "usage": [],
             "reflections": [],
         }
-        # 显式设：langgraph 1.x 的默认值是 10007，等于没有限制。
-        # 这条是「路由写错」时的最后一道保险 —— 宁可报错，不要静默死循环。
-        # 它按 superstep 计（不是按轮），所以必须跟着图的形状走。
-        #
-        # **这个余量在加入意图识别时被吃光过一次**：原值是 3*max_steps + 3，
-        # 恰等于新图的最小值 12 —— 一个 superstep 都不能再插，插了就
-        # GraphRecursionError。图变了就得重测最小值，别信推导。
-        # 现测：检索路 3*max_steps + 3；定位路恒为 6。给到 3*max_steps + 6。
         with self.tracer.span("invoke"):
             return self.graph().invoke(
                 initial, config={"recursion_limit": 3 * self.cfg.max_steps + 6}
@@ -243,13 +216,11 @@ class AgentRunner:
         """提问 → 带 [依据N] 标注的答案。未配 LLM 时退回线性管道。"""
         query = question if isinstance(question, Question) else Question(text=question)
         if not self.llm.available:
-            # 没有 key 就连规划轮都跑不了，直接退回单轮管道。
-            # 它同样会拒答（UNAVAILABLE_ANSWER），行为与基线一致。
             return self.rag.ask(query)
 
         state = self.invoke(query)
         answer = state.get("answer")
-        if answer is None:  # 图正常跑完必有 answer；真缺了就说出来，不要静默给空
+        if answer is None:
             raise RuntimeError("Agent 未产出答案：图执行异常结束")
         return answer
 

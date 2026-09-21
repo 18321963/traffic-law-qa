@@ -48,14 +48,10 @@ class LegalRAG:
         *,
         top_k: int | None = None,
     ) -> None:
-        # 零件私有、配置公开：`top_k` 留在公开面上，与 `HybridRetriever` 保留
-        # `parents` / `embedder` / `cfg` 是同一个取舍。构造参数名仍是 `retriever=` /
-        # `generator=` —— 那是**注入点**（测试要塞替身），与「构造之后谁能看见」是两回事。
         self._retriever = retriever
         self._generator = generator or AnswerGenerator()
         self.top_k = top_k or config.retrieve_config().top_k
 
-    # -------------------------------------------------------------- 装配
     @classmethod
     def load(
         cls,
@@ -69,7 +65,6 @@ class LegalRAG:
             HybridRetriever.load(with_vector=with_vector), generator=generator, top_k=top_k
         )
 
-    # -------------------------------------------------------------- 工具接口
     def search(
         self,
         question: str,

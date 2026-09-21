@@ -72,7 +72,6 @@ def make_reflect_node(llm: ToolCallingLLM, cfg: config.AgentConfig, laws: list[s
     后续决策，问它纯属浪费一次调用。
     """
 
-    # 前缀只算一次：库边界在一次运行内不变，而这是每次审核都要带上的固定开销。
     prompt_head = REFLECT_SYSTEM_PROMPT % {
         "law_count": len(laws),
         "laws": "\n".join(f"- {name}" for name in laws),
@@ -102,15 +101,8 @@ def make_reflect_node(llm: ToolCallingLLM, cfg: config.AgentConfig, laws: list[s
         reflection = _parse_reflection(reply.get("content") or "")
 
         update: dict = {"reflections": [reflection]}
-        # 把「还缺什么」回灌给规划轮。用 user 角色：工具消息之后任何角色都合法，
-        # 而 user 是各家兼容端点支持得最稳的那个。
-        #
-        # **只在真要回边时才回灌**：判成「库外」的那条缺口马上就收尾了，这条消息没人会读到，
-        # 留在历史里反而与「就此停止」的决定自相矛盾。
         if not reflection["sufficient"] and reflection["retrievable"] and reflection["missing"]:
             content = f"[检索审核] 还缺：{reflection['missing']}"
-            # 审核顺手把这个缺口写成了**一句问话**，规划轮可以直接拿它当检索词。
-            # 没写（旧模型/解析不出来）就只发上面那半句 —— 与加这个字段之前逐位相同。
             if reflection.get("next_query"):
                 content += f"\n[检索审核] 建议查：{reflection['next_query']}"
             update["messages"] = [{"role": "user", "content": content}]

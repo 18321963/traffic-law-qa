@@ -19,7 +19,6 @@ from difflib import SequenceMatcher
 
 from ..contracts import Query, RewrittenQuery
 
-# 口语 / 俗称 → 法条用语
 QUERY_ALIASES: dict[str, tuple[str, ...]] = {
     "醉驾": ("醉酒", "醉酒驾驶", "醉酒后驾驶"),
     "酒驾": ("饮酒", "饮酒后驾驶", "饮酒驾驶"),
@@ -39,7 +38,6 @@ QUERY_ALIASES: dict[str, tuple[str, ...]] = {
     "车祸": ("交通事故",),
     "撞人": ("交通事故", "人身伤亡"),
     "记满12分": ("记分", "重新考试"),
-    # 干扰驾驶类：法条写的是"拨打接听手持电话""手动操作移动电话"
     "玩手机": ("拨打接听手持电话", "手持电话", "移动电话", "电子设备", "妨碍安全驾驶"),
     "看手机": ("拨打接听手持电话", "手持电话", "移动电话", "妨碍安全驾驶"),
     "打电话": ("拨打接听手持电话", "手持电话"),
@@ -55,7 +53,6 @@ QUERY_ALIASES: dict[str, tuple[str, ...]] = {
     "乱开远光灯": ("远光灯", "不按规定使用灯光"),
 }
 
-# 这些片段虽然能和法名匹配上，但属于通用词，不能当作法规线索
 GENERIC_FRAGMENTS = frozenset(
     {
         "中华人民共和国",
@@ -80,12 +77,6 @@ GENERIC_FRAGMENTS = frozenset(
         "车辆",
         "汽车",
         "法",
-        # --- 2026-09 接入《道路运输条例》《交强险条例》时补的 ---
-        # 新法名与旧法名共享片段，会凭空造出假线索：问「道路交通安全法」的题
-        # 与「中华人民共和国道路运输条例」的最长公共片段是「中华人民共和国道路」，
-        # 于是**道交法的题被 ×1.5 加权到了道路运输条例头上**（实测 90 道）。
-        # 补进这里之前，先枚举过 4 部法下全语料实际产生过的 16 种线索片段，
-        # 这 8 个一个都不在其中 —— 所以对旧法规行为零影响，只掐新法名的假阳性。
         "中华人民共和国道路",
         "交通事故",
         "交通事故责任",
@@ -122,7 +113,6 @@ class QueryRewriter:
         self.law_names = tuple(law_names)
         self.max_expansions = max_expansions
 
-    # -------------------------------------------------------------- 主接口
     def rewrite(self, query: Query) -> RewrittenQuery:
         text = query.text.strip()
         matched: list[str] = []
@@ -148,7 +138,6 @@ class QueryRewriter:
             law_hints=tuple(hints),
         )
 
-    # -------------------------------------------------------------- 法名线索
     @staticmethod
     def find_law_hints(text: str, law_names: tuple[str, ...]) -> list[str]:
         """取查询与各法名的最长公共片段，作为"问题属于哪部法规"的线索。

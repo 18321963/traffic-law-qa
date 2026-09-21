@@ -39,9 +39,6 @@ __all__ = [
     "make_finalize_node",
 ]
 
-# 规划轮能用的工具。两个一起挂是有意的：`search_law` 每次返回的「相关条：第九十九条」
-# 是现有输出里信息量最大、却一直被浪费的字段 —— 有了 get_article，模型才能跟着它去取那一条。
-# 这才是真正的多跳：检索负责找到「相关的」，取条负责拿到「就是它」。
 TOOLS = [SEARCH_LAW_TOOL, GET_ARTICLE_TOOL]
 
 
@@ -121,7 +118,6 @@ def make_tools_node(
 
             try:
                 result = rag.search(query, top_k=top_k, **kwargs)
-                # 摘要窗口按检索层实际用的词定位（含口语对齐），不按模型原话
                 match_text = rag.expand(query)
             except Exception as exc:  # noqa: BLE001 - 工具失败不该打断循环
                 return None, f"检索失败：{exc}。可以换一组关键词再试，或用更通用的说法。"
@@ -145,9 +141,6 @@ def make_tools_node(
             )
             if result is None:
                 return None, error
-            # 精确取条没有查询词可用来定位窗口，match_text 留空 → 摘要落在条文开头
-            # （也就是写着处罚的那句「帽子」），这正是用户点名要看的那一段。
-            # 摘要上限用 article_chars 而不是 snippet_chars：只取一条，给得起更大的窗口。
             return result, render_tool_result(
                 result,
                 index=position(),
@@ -176,7 +169,7 @@ def make_tools_node(
             result, text = handler(function.get("arguments") or "")
             out_messages.append(tool_message(call_id, text))
             if result is None:
-                continue  # 失败：已经回了一条说明，这一轮不进证据
+                continue
 
             row = result.to_dict()
             out_logs.append(row)
@@ -201,7 +194,7 @@ def _trajectory_notes(state: AgentState, merged: RetrievalResult, cfg: config.Ag
         if message.get("role") == "assistant"
         for call in message.get("tool_calls") or ()
     ]
-    plans = len(state.get("usage") or ())          # agent 每调一次模型写一行
+    plans = len(state.get("usage") or ())
     searches = calls.count(SEARCH_LAW_NAME)
     lookups = calls.count(GET_ARTICLE_NAME)
     reviews = len(state.get("reflections") or ())
@@ -210,15 +203,10 @@ def _trajectory_notes(state: AgentState, merged: RetrievalResult, cfg: config.Ag
 
     parts = [f"{plans} 轮 LLM 规划", f"{searches} 次检索"]
     if lookups:
-        parts.append(f"{lookups} 次精确取条")   # 只在真发生过时才出现，别占版面
+        parts.append(f"{lookups} 次精确取条")
     parts += [f"{reviews} 轮审核", f"证据 {len(merged.articles)} 条"]
     notes = ["Agent：" + " / ".join(parts)]
 
-    # 「被迫收尾」的判据要与 `_route_after_reflect` 逐字同源：审核说了不够、且预算真的见底。
-    # 光看 steps >= max_steps 不够 —— 规则取条那条路根本不缺轮次，它是**按设计**一轮结束的。
-    #
-    # 收尾有三种成因，轨迹里要分得开，否则「为什么 2 轮就停了」没法解释：
-    # 审核说够了 / 审核说缺口在库外 / 预算耗尽。
     reflections = state.get("reflections") or []
     verdict = reflections[-1] if reflections else None
     if verdict and not verdict.get("sufficient"):
@@ -251,15 +239,12 @@ def make_finalize_node(
     """
 
     def finalize_node(state: AgentState) -> dict:
-        # `state["top_k"]` 由 invoke 写成 `query.top_k or runner.top_k`，单题覆盖落在它上面。
-        # 兜底读 config 而不另接参数：这个值的真源只有 config 一处，与 tools_node 同款。
         active_top_k = state.get("top_k", config.retrieve_config().top_k)
         logs = list(state.get("search_log") or ())
         extra: list[dict] = []
         notes: list[str] = []
 
         if not logs:
-            # 模型一次都没检索 → 按单轮管道兜底。这一条保证 Agent 严格增量，不比基线差。
             result = rag.search(state["question"], top_k=active_top_k)
             logs = [result.to_dict()]
             extra = list(logs)
@@ -276,12 +261,8 @@ def make_finalize_node(
         question = Question(
             text=state["question"],
             history=tuple(tuple(pair) for pair in state.get("history") or ()),
-            # 生成器今天并不读 `Question.top_k`（`build_evidence` 用的是 `show_top`），
-            # 所以这一行不改变任何行为；跟着 `active_top_k` 走只为不再留两个 top_k ——
-            # 哪天生成器开始读它，不会把这个坑悄悄带回来。
             top_k=active_top_k,
         )
-        # 既有入口，零改动：Agent 的答案与线性管道的答案是同一段代码产出的
         answer = rag.answer(question, merged)
         return {"answer": replace(answer, notes=answer.notes + tuple(notes)), "search_log": extra}
 

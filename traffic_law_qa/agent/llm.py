@@ -89,7 +89,7 @@ class ToolCallingLLM:
         temperature: float | None = None,
     ) -> tuple[dict, dict]:
         """调一次模型，返回 (助手消息, usage)。重试策略与 generator 一致。"""
-        from openai import OpenAI  # 延迟导入
+        from openai import OpenAI
 
         if self._client is None:
             self._client = OpenAI(base_url=self.cfg.base_url, api_key=self.cfg.api_key)
@@ -97,8 +97,6 @@ class ToolCallingLLM:
         extra: dict[str, Any] = {}
         if tools:
             extra["tools"] = tools
-            # 刻意用 "auto" 而不是 "required"：一是不是所有兼容端点都支持 required
-            # （百炼就不支持），二是本设计本来就需要模型能自主停下来。
             extra["tool_choice"] = "auto"
 
         last_error: Exception | None = None

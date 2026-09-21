@@ -69,7 +69,6 @@ class HybridRetriever:
             law_names=tuple(dict.fromkeys(p.law_name for p in parents.values()))
         )
 
-    # -------------------------------------------------------------- 装配
     @classmethod
     def load(
         cls,
@@ -118,7 +117,6 @@ class HybridRetriever:
             return None
         return (time.perf_counter() - started) * 1000
 
-    # -------------------------------------------------------------- 门面支撑
     def expand(self, text: str) -> str:
         """复算改写器的口语对齐，返回**真正会被拿去检索的那串词**。
 
@@ -163,7 +161,6 @@ class HybridRetriever:
             collection=self._store.collection,
         )
 
-    # -------------------------------------------------------------- 主接口
     def retrieve(self, query: Query) -> RetrievalResult:
         query = query.normalized()
         started = time.perf_counter()
@@ -181,7 +178,6 @@ class HybridRetriever:
         search_text = rewritten.expanded
         filter_expr = MilvusStore.law_filter_expr(query.law_filter)
 
-        # 稠密通道：没配 embedding 或集合里没建稠密字段时自动只走 BM25
         dense_vector: list[float] | None = None
         if query.use_vector:
             if not self._store.has_dense_field():
@@ -190,9 +186,6 @@ class HybridRetriever:
                 notes.append("本次禁用了稠密向量，只用 BM25 召回")
             else:
                 try:
-                    # 查询前缀只加在**这一条路径**上：search_text 在下面还以
-                    # query_text=search_text 喂给 BM25，往它身上拼前缀会把关键词
-                    # 通道的查询串一起污染。embed_query 内部处理，两路因此各得其宜。
                     dense_vector = self.embedder.embed_query(search_text)
                 except Exception as exc:  # noqa: BLE001 - 向量端点是外部依赖
                     notes.append(f"查询向量化失败，本次只用 BM25：{exc}")
@@ -235,7 +228,6 @@ class HybridRetriever:
             )
         )
 
-    # -------------------------------------------------------------- 通道明细
     def _channel_detail(
         self,
         query: Query,
@@ -268,7 +260,6 @@ class HybridRetriever:
                 raw_scores[chunk_id][name] = score
         return ranks, raw_scores
 
-    # -------------------------------------------------------------- 父块聚合
     def _group_to_articles(
         self,
         hits: list[tuple[str, float]],
@@ -285,7 +276,7 @@ class HybridRetriever:
         grouped: dict[str, list[tuple[str, float]]] = defaultdict(list)
         for chunk_id, score in hits:
             chunk = self._chunks.get(chunk_id)
-            if chunk is None:  # 集合与本地块文件不同步
+            if chunk is None:
                 continue
             grouped[chunk.parent_id].append((chunk_id, score))
 

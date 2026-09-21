@@ -38,7 +38,6 @@ USAGE = """用法：python -m traffic_law_qa.agent "问题" [选项]
 决策链在终端里会对判别行上色（够了=绿，还不够/未取到=黄）；重定向到文件时自动不上色。
 """
 
-# --intent 的取值别名；中文原值也直接收，省得记两套词
 INTENT_ALIASES = {
     "lookup": INTENT_LOOKUP,
     "条文定位": INTENT_LOOKUP,
@@ -60,8 +59,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--intent", default=None)
-    # `--trace` 从加进 USAGE 那天起就没被代码读过 —— 轨迹本来就是默认打印的。
-    # 收下它是为了不打断这条一直在用的命令，而不是因为它做了什么（见 USAGE 那行）。
     parser.add_argument("--trace", action="store_true")
     parser.add_argument("--timing", action="store_true")
     parser.add_argument("--no-vector", action="store_true")
@@ -79,8 +76,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         options = _parser().parse_args(args)
     except SystemExit as exc:
-        # argparse 在参数不认识 / 取不到值时直接 SystemExit。收回成返回值，
-        # 保住「main() 返回 int、调用方 raise SystemExit(main())」这条全仓一致的契约。
         return exc.code if isinstance(exc.code, int) else 0
 
     question = options.question
@@ -97,8 +92,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"--intent 只认 {'、'.join(INTENT_ALIASES)}，收到「{options.intent}」")
             return 1
 
-    # 上色只在人对着终端看时才有意义；重定向进 data/traces/*.log 时必须整片关掉，
-    # 否则日志里全是转义序列。
     color = sys.stdout.isatty()
     recorder = Recorder() if options.timing else None
 
@@ -118,7 +111,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[agent] {runner.describe()}")
 
     if options.linear:
-        # 同一个 rag：对照实验要的是「同一套检索 + 同一个生成器，只是不走图」
         answer = runner.rag.ask(question)
     else:
         try:
@@ -130,8 +122,6 @@ def main(argv: list[str] | None = None) -> int:
             print(render_trace(state, color=color))
         answer = state.get("answer")
 
-    # 走 stderr：`--json` 的 stdout 要留给 JSON，而 `[agent] describe` 已经占了第一行，
-    # 计时表再挤进去只会让下游更难解析。
     if recorder is not None:
         print(render_timing(recorder.summary(), color=color), file=sys.stderr)
 

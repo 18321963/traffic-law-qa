@@ -79,7 +79,6 @@ class RagPipeline:
         self._rag_with_vector: bool | None = None
         self._index_stats: IndexStats | None = None
 
-    # ============================================================== 单层接口
     def read(self, docx_path) -> list[Paragraph]:
         """层 1：读单个 docx。"""
         return self.reader.read(docx_path)
@@ -95,7 +94,7 @@ class RagPipeline:
     def index(self, chunk_set: ChunkSet, *, with_vector: bool = True) -> IndexStats:
         """层 4：父子块 → BM25 + 向量索引。"""
         self._index_stats = self.indexer.build(chunk_set, with_vector=with_vector)
-        self._rag = None  # 索引变了，缓存的检索器作废
+        self._rag = None
         self._rag_with_vector = None
         return self._index_stats
 
@@ -111,12 +110,10 @@ class RagPipeline:
             self._rag_with_vector = with_vector
         return self._rag
 
-    # ============================================================== 全流程
     def build(self, *, force: bool = False, with_vector: bool = True) -> PipelineReport:
         """跑完 read → parse → chunk → index（read 体现在 parse 阶段内部）。"""
         stages: list[StageReport] = []
 
-        # 1) read + 2) parse
         stage_started = time.perf_counter()
         laws = self.parse_stage.run(force=force)
         skipped = bool(self.parse_stage.last_skipped)
@@ -132,7 +129,6 @@ class RagPipeline:
             )
         )
 
-        # 3) chunk
         stage_started = time.perf_counter()
         chunk_set = self.chunk_stage.run(laws)
         stages.append(
@@ -146,7 +142,6 @@ class RagPipeline:
             )
         )
 
-        # 4) index
         stage_started = time.perf_counter()
         stats = self.index(chunk_set, with_vector=with_vector)
         stages.append(
@@ -168,7 +163,6 @@ class RagPipeline:
             index=stats,
         )
 
-    # ============================================================== 自述
     def layers(self) -> str:
         lines = ["RAG 管道各层：", ""]
         for index, (name, cls, input_desc, output_desc) in enumerate(self.LAYERS, start=1):
@@ -211,7 +205,6 @@ class RagPipeline:
         return "\n".join(lines)
 
 
-# ================================================================== CLI
 USAGE = __doc__
 
 
@@ -222,10 +215,6 @@ def _flag(args: list[str], name: str) -> bool:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
-    # --help 必须在 command 推断之前拦掉。原来没有这个分支，而
-    # `command = args[0] if ... not startswith("--") else "build"` 会把 `--help`
-    # 当成「无子命令」→ 直接跑 build，也就是一次完整的重新切块 + 重新 embedding。
-    # 查一次用法花掉一次 embedding 钱，这个坑踩过一次。
     if any(a in ("--help", "-h", "help") for a in args):
         print(USAGE)
         return 0

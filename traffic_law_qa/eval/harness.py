@@ -62,7 +62,6 @@ __all__ = ["main", "evaluate", "build_cases", "EvalCase", "EvalReport"]
 
 RE_LAW = re.compile(r"《([^》]{2,40})》")
 RE_ARTICLE = re.compile(r"第[零一二三四五六七八九十百千]+条")
-# 条号必须紧跟在法名后面才算数，隔太远就不敢认了（正文里可能提到别的法规）
 CITE_WINDOW = 50
 KS = (1, 3, 6)
 
@@ -73,17 +72,17 @@ class EvalCase:
 
     question: str
     gold_ids: tuple[str, ...]
-    gold_citations: tuple[str, ...]   # 人读，用于打印
-    gold_laws: tuple[str, ...]        # 去重后的法规名，用于分组统计
+    gold_citations: tuple[str, ...]
+    gold_laws: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class CaseResult:
     case: EvalCase
-    hit_ids: tuple[str, ...]                  # 检索到的 parent_id，按排名
-    hit_citations: tuple[str, ...]            # 同上，人读版（含条号）
-    rank: int | None                          # 第一个 gold 的名次；None = 没命中
-    used_vector: bool                         # 实际是否走了稠密通道（没 key / 纯 BM25 集合会降级）
+    hit_ids: tuple[str, ...]
+    hit_citations: tuple[str, ...]
+    rank: int | None
+    used_vector: bool
 
     @property
     def hit(self) -> bool:
@@ -93,9 +92,9 @@ class CaseResult:
 @dataclass(frozen=True)
 class EvalReport:
     results: tuple[CaseResult, ...]
-    total_raw: int                    # 语料原始条数
-    skipped_no_gold: int              # 构造不出 gold 的
-    skipped_named: int                # 题面自己点名了条号或法名的
+    total_raw: int
+    skipped_no_gold: int
+    skipped_named: int
     top_k: int
     used_vector: bool
     elapsed_ms: float
@@ -204,7 +203,6 @@ class EvalReport:
         return "\n".join(lines)
 
 
-# ================================================================== 语料 → 评测题
 def _normalize_law(name: str) -> str:
     """去掉「中华人民共和国」前缀，让简称和全称能对上。
 
@@ -227,7 +225,6 @@ class LawResolver:
         if norm in self.by_norm:
             return self.by_norm[norm]
         candidates = [full for key, full in self.by_norm.items() if key.endswith(norm)]
-        # 只认唯一候选：「条例」这种对到多部的，宁可放弃也不猜
         return candidates[0] if len(candidates) == 1 else None
 
 
@@ -280,7 +277,6 @@ def build_cases(
     cases: list[EvalCase] = []
     no_gold = named = 0
 
-    # 题面 → 每个变体引到的条（去重保序，空表示这个变体解析不出 gold）
     groups: dict[str, list[list[tuple[str, str]]]] = {}
     named_questions: set[str] = set()
 
@@ -294,7 +290,6 @@ def build_cases(
             if (law, art) in known
         ]
         groups.setdefault(question, []).append(list(dict.fromkeys(pairs)))
-        # 题面自己点名了条号或法名 → 查询自带定位信息，检索必然命中，测不出检索能力
         if RE_ARTICLE.search(question) or RE_LAW.search(question):
             named_questions.add(question)
 
@@ -334,7 +329,6 @@ def _kb_index() -> tuple[LawResolver, set[tuple[str, str]], dict[tuple[str, str]
     return resolver, known, id_of
 
 
-# ================================================================== 跑评测
 def evaluate(
     *,
     data_path: Path | None = None,
@@ -395,7 +389,6 @@ def evaluate(
     )
 
 
-# ================================================================== 规则取条臂
 def _verdict(rule_hits: int, base_hits: int) -> str:
     """规则臂 vs 基线 hit@1 的那一句结论 —— **算出来**，不许写死。
 
@@ -419,9 +412,9 @@ class ReferenceCase:
 
     question: str
     gold_citations: tuple[str, ...]
-    located: str | None      # 规则取条拿到的引用；None = 没走这条路（回退检索）
-    located_is_gold: bool    # 拿到的那条是不是 gold
-    baseline_rank: int | None  # 基线检索里第一个 gold 的名次；None = 未命中或没跑
+    located: str | None
+    located_is_gold: bool
+    baseline_rank: int | None
 
 
 @dataclass(frozen=True)
@@ -436,8 +429,8 @@ class ReferenceReport:
     total_raw: int
     skipped_no_gold: int
     elapsed_ms: float
-    questions: int = 0           # 语料去重后的题面数（本臂只取其中一部分，凑不回去）
-    baseline_ran: bool = False   # 基线那一列是否真的跑了（Milvus 没起时为 False）
+    questions: int = 0
+    baseline_ran: bool = False
 
     @property
     def cases(self) -> int:
@@ -591,11 +584,7 @@ def evaluate_reference(
 
     resolver, _known, id_of = _kb_index()
     cases, no_gold, _named = build_cases(data_path, resolver, id_of, include_named=True)
-    # 去重后的题面数 = 有 gold 的（含点名桶）+ 无 gold 的。要在**切之前**取，
-    # 切完就只剩本臂那一部分了，题头「475 条 → N 道」的 N 得是全量。
     questions = len(cases) + no_gold
-    # 只留「题面真的点名了某一条」的题：既没条号又没法名的那些，题面给不出可定位的目标，
-    # 拿它们算分母会把定位率稀释成一个没有意义的数。
     cases = [c for c in cases if RE_ARTICLE.search(c.question) or RE_LAW.search(c.question)]
     if limit:
         cases = cases[:limit]
@@ -616,9 +605,6 @@ def evaluate_reference(
 
             top_k = top_k or max(KS)
             for item in cases:
-                # mode="search" 回的是 RetrievalResult（不是 Answer）—— 只检索、不花 LLM 的钱。
-                # `qa` 的注明类型是 `Answer | RetrievalResult`，这里断言一下把它收窄，
-                # 顺便把「mode 传错就会拿到没有 .articles 的对象」这件事变成一句明确的话。
                 retrieval = qa(
                     item.question, mode="search", top_k=top_k, with_vector=with_vector, debug=False
                 )
@@ -659,7 +645,6 @@ def evaluate_reference(
     )
 
 
-# ------------------------------------------------------------------ 命令行
 USAGE = __doc__
 
 
@@ -696,15 +681,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         options = _parser().parse_args(args)
     except SystemExit as exc:
-        # argparse 在参数不认识 / 取不到值时直接 SystemExit。收回成返回值，
-        # 保住「main() 返回 int、调用方 raise SystemExit(main())」这条全仓一致的契约。
         return exc.code if isinstance(exc.code, int) else 0
 
     data_path = Path(options.data) if options.data else None
 
     try:
         if options.reference:
-            # 规则取条臂：测的是**定位**，不是检索。默认那一支的行为逐字节不变。
             reference = evaluate_reference(
                 data_path=data_path,
                 limit=options.limit,

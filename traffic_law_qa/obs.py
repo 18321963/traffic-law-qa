@@ -49,7 +49,6 @@ class _Span:
         return self
 
     def __exit__(self, *exc: Any) -> bool:
-        # 异常也记：崩在哪个节点比耗时更有用。**不吞异常** —— 返回 False 让它继续往上抛。
         self._sink.append({"name": self.name, "seconds": time.perf_counter() - self._start})
         return False
 

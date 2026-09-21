@@ -28,15 +28,10 @@ from ..kb.law_parser import cn_to_int
 
 SEARCH_LAW_NAME = "search_law"
 
-# 参数的上下界。Schema 里也写了，但那只对模型是「提示」——实测模型会给 999 这类值，
-# 所以服务端必须自己再夹一次，不能指望 Schema 校验。
 TOP_K_MIN = 1
 TOP_K_MAX = 20
 
-# 摘要里「帽子句」的长度上限：法条几乎都写成
-# 「第X条　<主体规则/处罚>：下列…（一）…（二）…」，处罚写在帽子里、适用情形写在列举里。
 CHAPEAU_CHARS = 40
-# 拼接帽子句之后，留给最佳窗口的最小字数；小于它说明预算太小，退回只给窗口
 MIN_BODY_CHARS = 40
 
 SEARCH_LAW_TOOL: dict[str, Any] = {
@@ -54,10 +49,6 @@ SEARCH_LAW_TOOL: dict[str, Any] = {
             "properties": {
                 "query": {
                     "type": "string",
-                    # 措辞必须与 AGENT_SYSTEM_PROMPT 第 2 条一致：这里曾经写的是
-                    # 「尽量靠近法条用语，例如『醉酒驾驶 机动车 处罚』」，与系统提示词的
-                    # 「第一次检索原样使用用户的问题，不要改写」正面冲突 —— 而 schema 挂在
-                    # 模型真正填参数的那个字段上，于是它赢了：100 题里只有 2 题照搬原话。
                     "description": (
                         "检索词。**第一轮直接用用户的原话** —— 检索层会自动做口语对齐"
                         "（醉驾→醉酒驾驶）与混合召回，拆成关键词反而稀释信号。"
@@ -84,7 +75,6 @@ SEARCH_LAW_TOOL: dict[str, Any] = {
 }
 
 
-# ============================================================ 参数解析
 def resolve_law_id(
     law_name: str, parents: dict[str, ParentChunk]
 ) -> tuple[str | None, list[str]]:
@@ -171,7 +161,6 @@ def tool_message(call_id: str, text: str) -> dict:
     return {"role": "tool", "tool_call_id": call_id, "content": text}
 
 
-# ============================================================ 第二个工具：精确取条
 GET_ARTICLE_NAME = "get_article"
 
 GET_ARTICLE_TOOL: dict[str, Any] = {
@@ -203,15 +192,10 @@ GET_ARTICLE_TOOL: dict[str, Any] = {
     },
 }
 
-# 条号：中文数字与阿拉伯数字都收。库里的条文一律是中文数字（实测 508 条全是），
-# 但真实用户会写「第90条」，收下来成本为零。
 RE_ARTICLE_CN = re.compile(r"第\s*([零一二三四五六七八九十百千]+)\s*条")
 RE_ARTICLE_AR = re.compile(r"第\s*(\d{1,4})\s*条")
-# 书名号里的法名。上限给到 80 而不是 40：库里没有英文法名，但用户可能抄来一个很长的
-# 别名，截断了反而解析不到 —— 能不能对上由 resolve_law_id 说了算，正则不必先卡一道。
 RE_LAW_TITLE = re.compile(r"《([^》]{2,80})》")
 
-# 「中华人民共和国」前缀：法规的通用简称就是全名去掉它
 _LAW_PREFIX = "中华人民共和国"
 
 
@@ -285,10 +269,6 @@ def find_article(
     if number is None:
         return None
 
-    # 先看有没有指名道姓的法规（书名号）。题面里可能有好几个《》，其中引用了库外法规
-    # （如《机动车管理办法》）是很常见的写法，不能因此放弃 —— 所以**只看能解析到的**：
-    # 恰好解析到一部就用它；解析到两部及以上说明题面真的牵涉多部法规，
-    # 而「第一个条号配第一部法规」只是猜测，退回检索。
     bracketed = {
         law_id
         for name in _law_names_in(text)
@@ -299,21 +279,13 @@ def find_article(
     if bracketed:
         return None
 
-    # 没写书名号，再试试有没有直接把法名写进句子的（含去掉「中华人民共和国」的简称）。
-    # 真实用户就这个写法：「道路交通安全法实施条例第六十六条怎么规定的」。
-    #
-    # **长名必须吃掉短名。** 短名是长名的子串 ——「道路交通安全法」整段出现在
-    # 「道路交通安全法实施条例」里 —— 所以「命中两个法名就判歧义」会把**唯一确定**的
-    # 情形误判成歧义。实测这条（按当时的 208 行口径）让点名桶里 18 行白白退回检索，其中十几行题面
-    # 只提到了「实施条例」这一部法规。
-    spans: list[tuple[int, int, str]] = []  # (起点, 终点, law_id)
+    spans: list[tuple[int, int, str]] = []
     for law_id, law_name in {(p.law_id, p.law_name) for p in parents.values()}:
         for needle in {law_name, law_name.removeprefix(_LAW_PREFIX)}:
             start = text.find(needle)
             while start >= 0:
                 spans.append((start, start + len(needle), law_id))
                 start = text.find(needle, start + 1)
-    # 被更长的命中完整盖住的那个不算：同一处文字只指一部法规。
     outer = [
         span
         for span in spans
@@ -326,9 +298,8 @@ def find_article(
     if len(law_ids) == 1:
         return index.get((law_ids.pop(), number))
     if law_ids:
-        return None  # 真的提到两部法规，不知道问的是哪一部
+        return None
 
-    # 完全没说法规：只有当这个条号在全库唯一时才敢取
     candidates = [chunk for (_, no), chunk in index.items() if no == number]
     return candidates[0] if len(candidates) == 1 else None
 
@@ -435,7 +406,6 @@ def lookup_article(
     return _single(candidates[0], query=article_no), ""
 
 
-# ============================================================ 摘要
 def _bigrams(text: str) -> set[str]:
     """中文字符二元组。不做分词 —— 摘要是要「找得到那段话」，不是要语义理解，
     二元组对中文足够，且不需要引入分词依赖。"""
@@ -509,7 +479,7 @@ def _snippet(text: str, query: str, width: int) -> str:
     for i, mark in enumerate(marks):
         prefix[i + 1] = prefix[i] + mark
 
-    if prefix[-1] == 0:  # 与查询毫无字面重叠
+    if prefix[-1] == 0:
         return text[:width] + "…"
 
     best_start, best_score = 0, -1
@@ -518,18 +488,9 @@ def _snippet(text: str, query: str, width: int) -> str:
         if score > best_score:
             best_start, best_score = start, score
 
-    # 窗口覆盖的**字符**区间是 [best_start, best_start + width] —— 首尾都含。
-    # 多出来的那个 1 不是笔误：marks[i] 是「以字符 i 开头的二元组」的分数，
-    # 它同时属于字符 i 和 i+1。滑窗累加的是 marks[start..start+width-1]，
-    # 于是最后一个二元组把字符 start+width 也带了进来。按 width 切片会**切掉
-    # 最佳窗口的最后一个字** —— 实测「…应当停车让行」被切成「…应当停车让」，
-    # 恰好弄丢查询词的收尾字。窗口长度与切片长度差 1 这种事不会报错，
-    # 只会让模型看见半句话。
     window_end = best_start + width + 1
 
     if best_start <= CHAPEAU_CHARS:
-        # 命中项就在开头附近：帽子句本来就在视野里，给一段连续文本即可，
-        # 但要多给一截，保证整个最佳窗口都包进来。
         end = min(len(text), window_end)
         return f"{text[:end]}{'…' if end < len(text) else ''}"
 
@@ -542,7 +503,6 @@ def _snippet(text: str, query: str, width: int) -> str:
     return f"{head}…{text[best_start : best_start + body_len]}{tail}"
 
 
-# ============================================================ 渲染给模型看
 def render_tool_result(
     result: RetrievalResult,
     *,
@@ -578,8 +538,6 @@ def render_tool_result(
     if not total:
         lines.append("没有命中的法条。请换一组更接近法条原文的关键词，或补上具体违法情形与地点后重试。")
     elif not fresh:
-        # 「新增 0」是模型判断「该停了」的直接依据，埋在标题行里会被忽略 —— 实测模型
-        # 会一直换词重检同一个意思，把预算烧完才被迫收尾。所以单独挑明一行。
         lines.append("⚠ 本轮没有新增法条，与之前的检索重复。换个完全不同的角度，或直接结束检索。")
 
     for order, hit in enumerate(result.articles, start=1):
@@ -593,7 +551,6 @@ def render_tool_result(
     return "\n".join(lines)
 
 
-# ============================================================ 合并回一个 RetrievalResult
 def merge_retrievals(
     logs: list[dict],
     *,
@@ -624,7 +581,6 @@ def merge_retrievals(
     seen: set[str] = set()
     missing = 0
 
-    # 轮转交错：外层是「轮次内排名」，内层是「第几次检索」
     depth = max((len(row.get("articles") or ()) for row in logs), default=0)
     for rank in range(depth):
         for row in logs:
@@ -664,7 +620,6 @@ def merge_retrievals(
         for note in row.get("notes") or ():
             notes.append(f"检索#{number}：{note}")
     if len(logs) > 1:
-        # 说「轮工具调用」而不是「次检索」：`get_article` 的产物同形状，但它没检索。
         notes.append(f"共 {len(logs)} 轮工具调用，合并去重后 {deduped} 条")
     if truncated:
         notes.append(f"证据按排名截断至 {max_evidence} 条（合并后共 {deduped} 条）")

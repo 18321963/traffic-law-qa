@@ -29,7 +29,6 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-# ============================================================ 1. read 层
 @dataclass(frozen=True)
 class Paragraph:
     """docx 里的一个段落（原样文本 + 段落样式名）。"""
@@ -39,13 +38,12 @@ class Paragraph:
     style: str | None = None
 
 
-# ============================================================ 2. parse 层
 @dataclass(frozen=True)
 class Heading:
     """章 / 节标题。"""
 
-    no: str      # 例：第一章
-    title: str   # 例：总则（已去掉排版用全角空格）
+    no: str
+    title: str
 
     @property
     def display(self) -> str:
@@ -63,13 +61,13 @@ class Heading:
 class Article:
     """一条法条：定位信息 + 原文 + 款 + 交叉引用。"""
 
-    article_no: str            # 例：第十九条
-    article_index: int         # 例：19（1-based，按正文出现顺序）
-    chapter: str | None        # 所属章，例：第二章 车辆和驾驶人
-    section: str | None        # 所属节，无则为 None
-    text: str                  # 完整条文（多款用 \n 连接，含条号前缀）
-    paragraphs: tuple[str, ...]  # 逐款原文，[0] 含"第X条"前缀
-    refs: tuple[str, ...]      # 本条内提到的其他条号，例：("第九十九条",)
+    article_no: str
+    article_index: int
+    chapter: str | None
+    section: str | None
+    text: str
+    paragraphs: tuple[str, ...]
+    refs: tuple[str, ...]
 
     @property
     def paragraph_count(self) -> int:
@@ -111,15 +109,15 @@ class LawDocument:
 
     law_id: str
     law_name: str
-    version: str                # 例：2021-04-29
+    version: str
     source_file: str
-    citation: str               # 例：《中华人民共和国道路交通安全法》(2021-04-29)
+    citation: str
     articles: tuple[Article, ...]
     chapters: tuple[Heading, ...] = ()
     sections: tuple[Heading, ...] = ()
-    toc: tuple[str, ...] = ()       # 目录条目原文
-    preamble: tuple[str, ...] = ()  # 正文前的标题 / 修订说明 / 目录
-    leftovers: tuple[str, ...] = ()  # 归不到任何条文的正文段落（应为空）
+    toc: tuple[str, ...] = ()
+    preamble: tuple[str, ...] = ()
+    leftovers: tuple[str, ...] = ()
 
     @property
     def article_count(self) -> int:
@@ -166,7 +164,6 @@ class LawDocument:
         )
 
 
-# ============================================================ 3. chunk 层
 @dataclass(frozen=True)
 class ParentChunk:
     """条级父块：检索命中子块后，回灌给 LLM 的就是它。"""
@@ -217,10 +214,10 @@ class Chunk:
     citation: str
     article_no: str
     article_index: int
-    part_index: int            # 第几款，从 0 开始
-    part_total: int            # 该条共几款
-    text: str                  # 原文（展示用）
-    embed_text: str            # 带法名/章/条号前缀的向量化文本
+    part_index: int
+    part_total: int
+    text: str
+    embed_text: str
     chapter: str | None = None
     section: str | None = None
     refs: tuple[str, ...] = ()
@@ -285,7 +282,6 @@ class ChunkSet:
         return cls(parents=parents, chunks=chunks, stats=stats)
 
 
-# ============================================================ 4. index 层
 @dataclass(frozen=True)
 class IndexStats:
     """建索引的结果摘要，落到 index/index_meta.json。
@@ -312,21 +308,19 @@ class IndexStats:
 
     @classmethod
     def from_dict(cls, data: dict) -> "IndexStats":
-        # 忽略旧版本遗留字段（例：Chroma 时代的 chunk_count），避免读历史快照时直接崩
         known = {field.name for field in dataclass_fields(cls)}
         return cls(**{key: value for key, value in data.items() if key in known})
 
 
-# ============================================================ 5. rewrite 层
 @dataclass(frozen=True)
 class RewrittenQuery:
     """检索前的查询改写结果（口语词对齐 + 法名线索）。"""
 
     original: str
-    expanded: str                                # 实际送去检索的文本（原文 + 法条用语）
-    matched_aliases: tuple[str, ...] = ()        # 命中的口语词
-    expansions: tuple[str, ...] = ()             # 实际追加的法条用语
-    law_hints: tuple[str, ...] = ()              # 命中法名的片段
+    expanded: str
+    matched_aliases: tuple[str, ...] = ()
+    expansions: tuple[str, ...] = ()
+    law_hints: tuple[str, ...] = ()
 
     @property
     def changed(self) -> bool:
@@ -342,7 +336,6 @@ class RewrittenQuery:
         }
 
 
-# ============================================================ 6. retrieve 层
 @dataclass(frozen=True)
 class Query:
     """检索请求。"""
@@ -352,13 +345,10 @@ class Query:
     candidates: int = 20
     use_vector: bool = True
     use_bm25: bool = True
-    law_filter: tuple[str, ...] = ()   # 只在这些 law_id 内检索；空 = 全库
-    channel_debug: bool = False        # 额外跑一次单通道检索，拿到两路各自的分/排名
+    law_filter: tuple[str, ...] = ()
+    channel_debug: bool = False
 
     def normalized(self) -> "Query":
-        # 先归一到合法 top_k 再算 candidates：否则 top_k<=0 时会得到
-        # top_k=1 / candidates=0 这种自相矛盾的请求（candidates 是单通道候选数，
-        # 小于最终条数就意味着必然取不满）。
         top_k = max(1, self.top_k)
         return Query(
             text=self.text.strip(),
@@ -381,8 +371,8 @@ class RetrievedArticle:
     bm25_rank: int | None = None
     vector_score: float | None = None
     bm25_score: float | None = None
-    hit_chunks: tuple[str, ...] = ()   # 命中的子块 id
-    law_hint: str | None = None        # 命中的法名片段（用于法名加成）
+    hit_chunks: tuple[str, ...] = ()
+    law_hint: str | None = None
 
     @property
     def citation(self) -> str:
@@ -411,7 +401,7 @@ class RetrievalResult:
     used_vector: bool
     used_bm25: bool
     elapsed_ms: float
-    notes: tuple[str, ...] = ()   # 降级/警告信息，例：向量未启用
+    notes: tuple[str, ...] = ()
 
     @property
     def is_empty(self) -> bool:
@@ -455,13 +445,12 @@ class RetrievalResult:
         }
 
 
-# ============================================================ 7. generate 层
 @dataclass(frozen=True)
 class Evidence:
     """喂给 LLM 的一条证据（= 一条法条）。"""
 
-    label: str                 # 【依据1】
-    citation: str              # 《…法》(版本) 第十九条
+    label: str
+    citation: str
     text: str
     score: float
     article: ParentChunk
@@ -475,7 +464,7 @@ class Question:
     """生成请求：问题 + 可选的多轮上下文。"""
 
     text: str
-    history: tuple[tuple[str, str], ...] = ()   # ((role, content), ...)
+    history: tuple[tuple[str, str], ...] = ()
     top_k: int | None = None
 
 
@@ -518,7 +507,6 @@ class Answer:
         return "\n".join(parts)
 
 
-# ============================================================ 8. 编排层
 @dataclass(frozen=True)
 class StageReport:
     """单个阶段的执行结果。"""
@@ -561,7 +549,6 @@ class PipelineReport:
         return "\n".join(lines)
 
 
-# ============================================================ 9. 门面层
 @dataclass(frozen=True)
 class CorpusStats:
     """已装配语料的规模与通道状态（`LegalRAG.stats()` 的产物）。
@@ -581,7 +568,6 @@ class CorpusStats:
     collection: str
 
 
-# ============================================================ jsonl 工具
 def _write_jsonl(path: Path, rows: Iterable[dict]) -> None:
     with path.open("w", encoding="utf-8", newline="\n") as fh:
         for row in rows:

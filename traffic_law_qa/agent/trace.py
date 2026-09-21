@@ -18,8 +18,6 @@ from .state import AgentState
 
 __all__ = ["render_trace", "render_timing"]
 
-# 上色**只给有判别价值的行**（审核结论、未取到），不是通篇上色 —— 通篇上色等于没重点，
-# 而且这个输出会被重定向进 data/traces/*.log，那时必须整片关掉。
 _COLORS = {"green": "\033[32m", "yellow": "\033[33m", "dim": "\033[2m"}
 _RESET = "\033[0m"
 
@@ -61,8 +59,6 @@ def render_trace(state: AgentState, *, color: bool = False) -> str:
             lines.append(f"[agent] 轮 {step}/{max_steps} → 未再调用工具，进入作答")
             continue
 
-        # tool 消息与 tool_call 一一对应、紧跟在助手消息之后（tools 节点的不变量），
-        # 所以这里按数量切片配对，而不是靠扫描。
         replies = messages[cursor : cursor + len(calls)]
         cursor += len(calls)
 
@@ -71,9 +67,6 @@ def render_trace(state: AgentState, *, color: bool = False) -> str:
             name = function.get("name") or "?"
             text = reply.get("content") or ""
             args = function.get("arguments") or "{}"
-            # **只有成功的调用才进 search_log**（失败的只回一条说明）。
-            # 所以命中数不能按「第几个调用」去索引日志 —— 那样一旦前面有失败，
-            # 后面每一轮都会错位，把 A 轮的命中数安到 B 轮头上。
             if not text.startswith("检索#"):
                 lines.append(
                     _paint(
@@ -88,13 +81,10 @@ def render_trace(state: AgentState, *, color: bool = False) -> str:
             hits = len(row.get("articles") or ()) if row else 0
             lines.append(f"[agent] 轮 {step}/{max_steps} → {name}({args}) → 命中 {hits} 条")
 
-        # 这一轮检索之后的审核结论（reflect 每轮至多写一条）
         if step - 1 < len(reflections):
             verdict = reflections[step - 1]
             tail = verdict.get("missing") or verdict.get("reason") or ""
             if verdict.get("sufficient"):
-                # 绿 = 正常收敛；黄 = 非正常收敛（补不上 / 还不够）。整行只上一种色，
-                # 因为读者要判别的正是这个二选一。
                 lines.append(
                     _paint(
                         f"[agent]         审核：够了 —— {verdict.get('reason') or '证据已覆盖问题要素'}",
@@ -103,7 +93,6 @@ def render_trace(state: AgentState, *, color: bool = False) -> str:
                     )
                 )
             elif not verdict.get("retrievable", True):
-                # 「补不上」是个决定性结论，和「还不够」不是一回事，轨迹里要分得开
                 lines.append(
                     _paint(
                         f"[agent]         审核：不够，但缺口在库外、再检也补不上 → 收尾 —— {tail}",
@@ -112,8 +101,6 @@ def render_trace(state: AgentState, *, color: bool = False) -> str:
                     )
                 )
             else:
-                # 一并印出审核拟的检索问句：紧下一行就是规划轮实际发出去的检索词，
-                # 两者挨着才好看出规划轮有没有照办。
                 hint = f" →「{verdict['next_query']}」" if verdict.get("next_query") else ""
                 lines.append(
                     _paint(f"[agent]         审核：不够 —— {tail}{hint}", "yellow", color)
@@ -121,12 +108,8 @@ def render_trace(state: AgentState, *, color: bool = False) -> str:
 
     answer = state.get("answer")
     if answer is not None:
-        # 只挑 Agent 自己加的那几条，把生成层的既有 note 滤掉（它们不属于决策链）。
-        # 「本轮未取到任何证据」必须在列：它解释了「0 次检索」为什么还能有证据 ——
-        # 没有这句话，轨迹就成了自相矛盾的两行。
         for note in answer.notes:
             if note.startswith(("Agent：", "已达", "规划轮", "本轮未取到", "共 ", "证据按")):
-                # 这两条讲的都是「没按预期收敛」，与绿/黄是同一套语义
                 lines.append(
                     _paint(f"[agent] {note}", "yellow", color)
                     if note.startswith(("已达", "本轮未取到"))

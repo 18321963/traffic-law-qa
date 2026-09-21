@@ -30,8 +30,6 @@ from .law_parser import LawLibrary
 
 RE_ARTICLE_PREFIX = re.compile(r"^第[零一二三四五六七八九十百千]+条[\s　]*")
 RE_SENTENCE_END = re.compile(r"[。；]")
-# 列举项开头：（一）/1./①/一、
-# 分几个片段拼是为了行宽（全角字符按两列算），拼接后与原表达式逐字符相同。
 RE_LIST_MARKER = re.compile(
     r"^\s*(?:[（(][一二三四五六七八九十百千\d]+[）)]"
     r"|[①-⑳]"
@@ -62,7 +60,6 @@ class LawChunker:
         self.max_part_chars = max_part_chars
         self.with_chapter_prefix = with_chapter_prefix
 
-    # -------------------------------------------------------------- 主接口
     def chunk(self, law: LawDocument) -> ChunkSet:
         """切一部法规。"""
         parents: list[ParentChunk] = []
@@ -139,7 +136,6 @@ class LawChunker:
         }
         return ChunkSet(parents=tuple(parents), chunks=tuple(chunks), stats=stats)
 
-    # -------------------------------------------------------------- 命名规则
     @staticmethod
     def parent_id_of(law: LawDocument, article_index: int) -> str:
         """父块 id：law_id@版本#条序号 —— 含版本，避免新旧版本串号。"""
@@ -153,7 +149,6 @@ class LawChunker:
             head += f"{article.chapter} "
         return f"{head}{article.article_no}：{body}"
 
-    # -------------------------------------------------------------- 切分规则
     def split_parts(self, paragraphs: tuple[str, ...]) -> list[str]:
         """款级切分：合并列举项 → 合并过短款 → 切分过长款。"""
         merged: list[str] = []
@@ -163,8 +158,6 @@ class LawChunker:
                 continue
             is_list_item = bool(RE_LIST_MARKER.match(para))
             if merged and (is_list_item or len(para) < self.min_part_chars):
-                # 列举项（项）必须附在引出它的那一款上，否则「（一）兜售物品…」
-                # 这种子块既搜不到也读不懂
                 merged[-1] = f"{merged[-1]}\n{para}"
             else:
                 merged.append(para)
@@ -236,7 +229,6 @@ class ChunkStage:
         return ChunkSet.read(self.chunks_path, self.parents_path)
 
 
-# ------------------------------------------------------------------ 调试入口
 def main(argv: list[str] | None = None) -> int:
     """python -m traffic_law_qa.kb.chunker [--show 条号]"""
     args = list(sys.argv[1:] if argv is None else argv)

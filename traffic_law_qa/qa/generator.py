@@ -34,8 +34,6 @@ USER_TEMPLATE = """问题：{question}
 
 请依据上述条文回答问题，并在每条结论后标注 [依据N]。"""
 
-# 两条不走 LLM 的兜底文案。抽成常量是因为流式与非流式两条路径必须说同样的话 ——
-# 同一句拒答在两个入口里措辞不同，用户会以为是两种不同的失败。
 EMPTY_RETRIEVAL_ANSWER = (
     "现有法规库中未检索到与问题相关的条文，无法给出有依据的回答。"
     "建议补充更具体的违法情形、地点，或确认是否属于本知识库覆盖的 6 部法规范围。"
@@ -64,11 +62,7 @@ class AnswerGenerator:
     ) -> None:
         self.cfg = cfg or config.llm_config()
         self.retries = retries
-        self.show_top = show_top  # 0 表示全部依据都给 LLM
-        # `client` 是**构造期注入点**（测试要塞替身），与「构造之后谁能看见」是两件事：
-        # 属性仍叫 `_client`、仍是私有的。公开一个懒建的缓存位等于邀请调用方在构造之后
-        # 改它 —— 这条是有前科的，见 `qa/rag.py` 开头 `_generator` 那段。
-        # 不传（None）就与没有这个参数逐位相同：首次调用时按 cfg 懒建。
+        self.show_top = show_top
         self._client = client
 
     @property
@@ -79,7 +73,6 @@ class AnswerGenerator:
     def unavailable_reason(self) -> str:
         return "" if self.available else "未配置 LLM_API_KEY，无法生成答案（可用 search 查看检索结果）"
 
-    # -------------------------------------------------------------- 证据组织
     def build_evidence(self, retrieval: RetrievalResult, top_n: int = 0) -> list[Evidence]:
         """把召回的法条编成【依据N】。"""
         limit = top_n or self.show_top or len(retrieval.articles)
@@ -100,7 +93,6 @@ class AnswerGenerator:
         blocks = "\n\n".join(e.render() for e in evidences)
         return USER_TEMPLATE.format(question=question.text, count=len(evidences), evidences=blocks)
 
-    # -------------------------------------------------------------- 主接口
     def generate(self, question: Question, retrieval: RetrievalResult) -> Answer:
         evidences = self.build_evidence(retrieval)
         started = time.perf_counter()
@@ -140,7 +132,6 @@ class AnswerGenerator:
             notes=tuple(notes),
         )
 
-    # -------------------------------------------------------------- 流式
     def stream(self, question: Question, retrieval: RetrievalResult):
         """流式生成：依次产出 `("delta", 文本片段)` 与末尾的 `("usage", dict)`。
 
@@ -153,7 +144,6 @@ class AnswerGenerator:
         evidences = self.build_evidence(retrieval)
 
         if retrieval.is_empty or not self.available:
-            # 与非流式同样的兜底，只是以「一个 delta」的形式给出
             text = EMPTY_RETRIEVAL_ANSWER if retrieval.is_empty else UNAVAILABLE_ANSWER
             yield "delta", text
             yield "usage", {}
@@ -164,8 +154,6 @@ class AnswerGenerator:
             if delta:
                 yield "delta", delta
             if getattr(chunk, "usage", None) is not None:
-                # 流式下 usage 只在末块出现，且不是所有兼容端点都会给
-                # （DashScope 默认就不给）—— 拿不到就如实返回空 dict
                 usage = chunk.usage
                 yield "usage", {
                     "prompt_tokens": usage.prompt_tokens,
@@ -174,7 +162,7 @@ class AnswerGenerator:
                 }
 
     def _stream_llm(self, question: Question, evidences: list[Evidence]):
-        from openai import OpenAI  # 延迟导入
+        from openai import OpenAI
 
         if self._client is None:
             self._client = OpenAI(base_url=self.cfg.base_url, api_key=self.cfg.api_key)
@@ -193,9 +181,8 @@ class AnswerGenerator:
         except Exception as exc:  # noqa: BLE001 - 首字节前失败，翻译成一句可读的话
             raise RuntimeError(f"调用 {self.cfg.model} 失败：{exc}") from exc
 
-    # -------------------------------------------------------------- 调用
     def _call_llm(self, question: Question, evidences: list[Evidence]) -> tuple[str, dict]:
-        from openai import OpenAI  # 延迟导入
+        from openai import OpenAI
 
         if self._client is None:
             self._client = OpenAI(base_url=self.cfg.base_url, api_key=self.cfg.api_key)

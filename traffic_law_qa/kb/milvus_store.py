@@ -25,7 +25,6 @@ from typing import Any, Iterable, cast
 from .. import config
 from ..contracts import Chunk
 
-# 集合字段名（改这里要同步 row_of / _output_fields）
 F_CHUNK_ID = "chunk_id"
 F_TEXT = "text"
 F_DENSE = "dense"
@@ -33,11 +32,10 @@ F_SPARSE = "sparse"
 F_PARENT = "parent_id"
 F_LAW_ID = "law_id"
 
-TEXT_MAX_LENGTH = 4096          # 字符数上限，最长条文 + 前缀约 650 字
-SHORT_MAX_LENGTH = 256          # 法名 / 章节名 / 引用串
-VARCHAR_MAX_LENGTH = 128        # 各种 id
+TEXT_MAX_LENGTH = 4096
+SHORT_MAX_LENGTH = 256
+VARCHAR_MAX_LENGTH = 128
 
-# 检索时需要的标量字段
 OUTPUT_FIELDS = (
     F_PARENT,
     F_LAW_ID,
@@ -110,7 +108,6 @@ class MilvusStore:
         self._dim: int | None = None
         self._has_dense: bool | None = None
 
-    # ============================================================ 连接
     @property
     def client(self):
         """懒加载 Milvus 客户端。"""
@@ -157,7 +154,6 @@ class MilvusStore:
         if self.has_collection():
             self.client.drop_collection(self.collection)
 
-    # ============================================================ 建集合
     def recreate(self, *, dim: int | None = None) -> dict:
         """重建集合。dim 为 None 时不建稠密向量字段（纯 BM25 模式）。"""
         from pymilvus import DataType, Function, FunctionType
@@ -191,7 +187,6 @@ class MilvusStore:
             schema.add_field(F_DENSE, DataType.FLOAT_VECTOR, dim=dim)
         schema.add_field(F_SPARSE, DataType.SPARSE_FLOAT_VECTOR)
 
-        # 关键：BM25 函数把 text 字段转成稀疏向量存进 sparse 字段
         schema.add_function(
             Function(
                 name="text_bm25_emb",
@@ -226,7 +221,6 @@ class MilvusStore:
         """
         if not self.has_collection():
             return {}
-        # pymilvus 的存根把 describe_collection 归到了异步重载，这里显式声明同步返回 dict
         info = cast(dict[str, Any], self.client.describe_collection(self.collection))
 
         fields = []
@@ -271,7 +265,6 @@ class MilvusStore:
         self._has_dense = any(field.get("name") == F_DENSE for field in info.get("fields", []))
         return self._has_dense
 
-    # ============================================================ 写入
     def insert(self, rows: list[dict], *, batch_size: int = 200) -> int:
         if not rows:
             return 0
@@ -283,7 +276,6 @@ class MilvusStore:
         self.client.flush(self.collection)
         return written
 
-    # ============================================================ 检索
     def hybrid_search(
         self,
         *,
@@ -313,7 +305,7 @@ class MilvusStore:
             )
         requests.append(
             AnnSearchRequest(
-                data=[query_text],          # 传原文，BM25 函数负责转稀疏向量
+                data=[query_text],
                 anns_field=F_SPARSE,
                 param={"metric_type": "BM25"},
                 limit=candidates,
@@ -378,7 +370,6 @@ class MilvusStore:
         )
         return _parse_hits(response, limit)
 
-    # ============================================================ 工具
     @staticmethod
     def law_filter_expr(law_ids: Iterable[str]) -> str | None:
         """把 law_id 列表变成 Milvus 过滤表达式。"""
@@ -432,7 +423,7 @@ def _parse_hits(response: Any, limit: int) -> list[tuple[str, float]]:
         if isinstance(hit, dict):
             chunk_id = hit.get(F_CHUNK_ID) or hit.get("id") or hit.get("pk")
             score = hit.get("distance", hit.get("score", 0.0))
-        else:  # 老式 Hit 对象
+        else:
             chunk_id = getattr(hit, "id", None) or getattr(hit, "pk", None)
             score = getattr(hit, "distance", getattr(hit, "score", 0.0))
         if chunk_id is None:

@@ -27,8 +27,8 @@ __all__ = [
     "make_lookup_plan_node",
 ]
 
-INTENT_LOOKUP = "条文定位"   # 题面直接给出了条号 → 跳过检索，精确取条
-INTENT_SEARCH = "法规检索"   # 其余一切 → 走混合检索
+INTENT_LOOKUP = "条文定位"
+INTENT_SEARCH = "法规检索"
 
 
 def classify_intent(
@@ -92,8 +92,6 @@ def make_lookup_plan_node(
     def lookup_plan_node(state: AgentState) -> dict:
         target = find_article(state["question"], parents=parents, index=index)
         if target is None:
-            # classify 已经校验过，正常到不了这里。真到了就退化成一次普通检索，
-            # 不要抛异常 —— 意图判断失手不该让整个图崩掉。
             return {
                 "messages": [
                     {
@@ -123,8 +121,6 @@ def make_lookup_plan_node(
                     "content": "",
                     "tool_calls": [
                         {
-                            # id 固定即可：这条路每个会话只走一次，
-                            # 而 agent 那边的 call id 由端点生成，不会撞。
                             "id": "call_lookup_1",
                             "type": "function",
                             "function": {
