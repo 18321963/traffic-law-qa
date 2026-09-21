@@ -43,7 +43,6 @@ RUN pip install --no-cache-dir ".[api]" \
 # 「向量化」那一步要花一次 embedding 的钱 —— 那次验证是接桩端点跑完的（桩收到 63 批 / 620 条），零成本。
 COPY 法规知识库/ ./法规知识库/
 COPY data/ ./data/
-COPY examples/ ./examples/
 
 # 非 root 运行。这两个派生目录必须**先建好并改属主**：
 # compose 的命名卷在首次创建时会继承镜像里同路径目录的属主，

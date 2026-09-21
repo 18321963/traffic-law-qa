@@ -14,7 +14,7 @@
 3. **把失败翻译成一行中文提示**（含该执行的命令），而不是 pymilvus 的堆栈。
 
 失败一律抛 `QaError`：库里不该替调用方打印，但消息本身就是给用户看的那一行。
-命令行入口（`python -m traffic_law_qa`）与 examples/quickstart.py 会把它接住并打印。
+命令行入口（`python -m traffic_law_qa`）会把它接住并打印。
 """
 
 from __future__ import annotations
@@ -236,7 +236,7 @@ def _announce(state: ReadyState, debug: bool) -> None:
 
 
 def render(result: Answer | RetrievalResult, *, debug: bool = False) -> str:
-    """把 qa() 的返回值渲染成人读文本（命令行入口与 examples 共用）。"""
+    """把 qa() 的返回值渲染成人读文本（命令行入口用它，调用方也可以直接用）。"""
     if isinstance(result, RetrievalResult):
         return result.render()
     text = result.render()
