@@ -192,6 +192,31 @@ def agent_config() -> AgentConfig:
 
 
 @dataclass(frozen=True)
+class LangfuseConfig:
+    """Langfuse 云端追踪的凭据（可选，只有 agent 命令行用）。
+
+    两个 key 缺一即 `ready=False`，此时一个客户端都不建、一个字节都不外发 ——
+    与没有这个功能时逐位相同。**host 不是秘密，两个 key 是**：任何打印只许出现 host。
+    """
+
+    public_key: str
+    secret_key: str
+    host: str = "https://cloud.langfuse.com"
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.public_key and self.secret_key)
+
+
+def langfuse_config() -> LangfuseConfig:
+    return LangfuseConfig(
+        public_key=_env("LANGFUSE_PUBLIC_KEY"),
+        secret_key=_env("LANGFUSE_SECRET_KEY"),
+        host=_env("LANGFUSE_HOST", "https://cloud.langfuse.com"),
+    )
+
+
+@dataclass(frozen=True)
 class MilvusConfig:
     uri: str
     token: str

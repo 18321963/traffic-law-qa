@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "交通法规问答 Agent：分层 RAG 管道 + Agentic RAG（Milvus 混合检索 / 强制引用式生成）"
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{ name = "陈淼森" }]
+authors = [{ name = "18321963" }]
 keywords = ["rag", "agent", "langgraph", "milvus", "legal", "traffic-law"]
 
 # 基础安装刻意保持精简，延续项目「能不加依赖就不加」的取舍：
@@ -37,6 +37,17 @@ agent = [
 api = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
+]
+# 云端观测（`python -m traffic_law_qa.agent --langfuse`）：**不并进 all**。
+#
+# 与上面两组的区别是它会**往外发数据**（题目原文、提示词、法条片段、模型输出都会到
+# Langfuse 云端），属于「要用才装」的那一类，不该因为装了 all 就默认躺在环境里。
+# 不装、不配 key、不加 --langfuse 时，agent 的行为与没有这个功能时逐位相同。
+#
+# 钉 4.x：v3 那套 `start_as_current_span` / `set_trace_io` 在 4 里换成了
+# `start_as_current_observation`，且 `set_trace_io` 已标 deprecated。
+langfuse = [
+    "langfuse>=4.15,<5",
 ]
 dev = [
     "pytest>=8.0",

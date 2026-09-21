@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from .intent import INTENT_LOOKUP, INTENT_SEARCH
+from .region import REGION_UNKNOWN
 from .state import AgentState
 
 __all__ = ["render_trace", "render_timing"]
@@ -35,15 +35,16 @@ def render_trace(state: AgentState, *, color: bool = False) -> str:
     reflections = state.get("reflections") or []
     max_steps = state.get("max_steps", 0)
 
-    intent = state.get("intent") or INTENT_SEARCH
+    region = state.get("region") or REGION_UNKNOWN
+    scope = state.get("region_scope") or ()
     route = (
-        "规则直接取条（零 LLM、零向量/BM25）"
-        if intent == INTENT_LOOKUP
-        else "进入 LLM 规划轮"
+        f"检索该地区条例 + 国家法，共 {len(scope)} 部"
+        if scope
+        else "不限地区（全库）"
     )
     lines = [
         f"[agent] 提问：{state.get('question', '')}",
-        f"[agent] 意图：{intent}（纯规则）→ {route}",
+        f"[agent] 地区：{region} → {route}",
     ]
 
     step = logged = 0
@@ -101,7 +102,12 @@ def render_trace(state: AgentState, *, color: bool = False) -> str:
                     )
                 )
             else:
-                hint = f" →「{verdict['next_query']}」" if verdict.get("next_query") else ""
+                parts = []
+                if verdict.get("next_tool"):
+                    parts.append(f"用 {verdict['next_tool']}")
+                if verdict.get("next_query"):
+                    parts.append(f"「{verdict['next_query']}」")
+                hint = f" → {' '.join(parts)}" if parts else ""
                 lines.append(
                     _paint(f"[agent]         审核：不够 —— {tail}{hint}", "yellow", color)
                 )

@@ -16,7 +16,9 @@ from .llm import ToolCallingLLM
 from .prompts import REFLECT_SYSTEM_PROMPT
 from .state import AgentState
 
-__all__ = ["make_reflect_node"]
+__all__ = ["NEXT_TOOL_NONE", "make_reflect_node"]
+
+NEXT_TOOL_NONE = "none"
 
 
 def _parse_reflection(text: str) -> dict:
@@ -33,6 +35,11 @@ def _parse_reflection(text: str) -> dict:
 
     `next_query`（缺口写成的一句问话）缺失时默认 **空串**，空串 = 不给规划轮这句提示，
     也就是与加这个字段之前逐位相同。它只是给下一轮的**补充信息**，缺了不影响回边与否。
+
+    `next_tool`（下一轮调哪个工具）缺失时默认 **空串**，空串 = 工具交给规划轮自己选，
+    同上逐位相同。它取 `none` 时**归一到 `retrievable=False`**，而不是新加一个布尔：
+    「不要再查了」本来就是 `retrievable` 那句话的意思（缺口在库外，或再查也补不上），
+    归一到既有字段上，路由、`_trajectory_notes`、trace 三处一行都不用改。
     """
     raw = (text or "").strip()
     start, end = raw.find("{"), raw.rfind("}")
@@ -42,12 +49,14 @@ def _parse_reflection(text: str) -> dict:
         except json.JSONDecodeError:
             data = None
         if isinstance(data, dict):
+            tool = str(data.get("next_tool") or "").strip()
             return {
                 "sufficient": bool(data.get("sufficient", True)),
-                "retrievable": bool(data.get("retrievable", True)),
+                "retrievable": False if tool == NEXT_TOOL_NONE else bool(data.get("retrievable", True)),
                 "reason": str(data.get("reason") or "").strip(),
                 "missing": str(data.get("missing") or "").strip(),
                 "next_query": str(data.get("next_query") or "").strip(),
+                "next_tool": "" if tool == NEXT_TOOL_NONE else tool,
             }
     return {
         "sufficient": True,
@@ -55,11 +64,12 @@ def _parse_reflection(text: str) -> dict:
         "reason": f"审核输出无法解析，按已足够处理：{raw[:60]}",
         "missing": "",
         "next_query": "",
+        "next_tool": "",
     }
 
 
 def make_reflect_node(llm: ToolCallingLLM, cfg: config.AgentConfig, laws: list[str]):
-    """读：question / history / messages / steps / max_steps / search_log
+    """读：question / history / messages / steps / max_steps
     写：{"reflections": [结论], "messages": [给规划轮的补充说明]}
 
     温度用 0：这是判断题，不要它发挥。
@@ -88,6 +98,7 @@ def make_reflect_node(llm: ToolCallingLLM, cfg: config.AgentConfig, laws: list[s
                         "reason": f"已达最大轮数 {max_steps}",
                         "missing": "",
                         "next_query": "",
+                        "next_tool": "",
                     }
                 ]
             }
@@ -97,14 +108,20 @@ def make_reflect_node(llm: ToolCallingLLM, cfg: config.AgentConfig, laws: list[s
         prompt.append({"role": "user", "content": state["question"]})
         prompt.extend(state.get("messages") or ())
 
-        reply, _usage = llm.chat(prompt, temperature=0.0)
+        reply, _usage = llm.chat(prompt, temperature=0.0, name="llm.reflect")
         reflection = _parse_reflection(reply.get("content") or "")
 
         update: dict = {"reflections": [reflection]}
         if not reflection["sufficient"] and reflection["retrievable"] and reflection["missing"]:
             content = f"[检索审核] 还缺：{reflection['missing']}"
             if reflection.get("next_query"):
-                content += f"\n[检索审核] 建议查：{reflection['next_query']}"
+                if reflection.get("next_tool"):
+                    content += (
+                        f"\n[检索审核] 下一轮用 {reflection['next_tool']} 查："
+                        f"{reflection['next_query']}"
+                    )
+                else:
+                    content += f"\n[检索审核] 建议查：{reflection['next_query']}"
             update["messages"] = [{"role": "user", "content": content}]
         return update
 
