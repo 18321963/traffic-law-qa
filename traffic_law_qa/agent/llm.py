@@ -1,11 +1,11 @@
-"""带工具调用能力的 LLM 客户端（规划轮与审核轮专用）。
+"""带工具调用能力的 LLM 客户端（规划轮与入口判定专用）。
 
 与 `AnswerGenerator` 分开，是因为两者的**层契约**不同：生成层的契约是
 `Question + RetrievalResult → Answer`，不该被工具调用污染；这里只负责
 「给定消息历史，返回下一条助手消息」。
 
 **这个模块不依赖 langgraph** —— 它只用 `openai` + `config` + 零依赖的 `obs`。所以它可以被
-顶层 import，不需要 `agent.graph` 那样的延迟导入（`tests/test_multihop.py` 钉着这条边界）。
+顶层 import，不需要 `agent.graph` 那样的延迟导入。
 """
 
 from __future__ import annotations
@@ -78,10 +78,14 @@ class ToolCallingLLM:
         cfg: config.LLMConfig | None = None,
         *,
         retries: int = 2,
+        timeout: float = 30.0,
+        max_tokens: int = 1024,
         observer: Tracer | None = None,
     ) -> None:
         self.cfg = cfg or config.llm_config()
         self.retries = retries
+        self.timeout = timeout
+        self.max_tokens = max_tokens
         self._observer = observer or Tracer()
         self._client = None
 
@@ -99,12 +103,21 @@ class ToolCallingLLM:
     ) -> tuple[dict, dict]:
         """调一次模型，返回 (助手消息, usage)。重试策略与 generator 一致。
 
-        `name` 只是**观测里那一格的名字**：三个节点调的是同一个方法，云端得能一眼分开
-        是入口判定、规划轮还是审核轮。默认值对得起不观测时的情形。
+        `name` 只是**观测里那一格的名字**：两个节点调的是同一个方法，云端得能一眼分开
+        是入口判定还是规划轮。默认值对得起不观测时的情形。
 
         整个重试循环包在一个 generation 观察里：失败的尝试没有单独的时间线，
         只把次数与最后一次的错误记进去 —— 这个模块要的是「这次调用了多久、花了多少 token」，
         不是一份失败史。
+
+        `timeout` / `max_tokens` 是**兜底，不是调优**。2026-09-22 实测：入口那只模型一次返回了
+        24901 字的自我复读、烧掉 14464 个 token、占住 223 秒，而 `create()` 两个上限都没传 ——
+        SDK 默认 timeout 是 600 秒，整条链路没有任何一层会拦。30 秒是实测最慢的正常调用
+        （3.47 秒）的八倍余量；1024 有 `data/traces/` 里 871 次规划/审核调用的实测垫底
+        （最大 693，无一超过 1024）。**拦住那次 223 秒的是 `max_tokens`，不是 `timeout`** ——
+        `timeout` 拦的是「迟迟不来字节」，一直在吐、一直在复读的那种它拦不住（理由见
+        `qa/generator.py` 的同类说明）。撞上任何一个，重试循环会照常接住，最后抛成一句可读的
+        `RuntimeError`。
         """
         from openai import OpenAI
 
@@ -131,6 +144,8 @@ class ToolCallingLLM:
                         model=self.cfg.model,
                         messages=messages,
                         temperature=effective,
+                        timeout=self.timeout,
+                        max_tokens=self.max_tokens,
                         **extra,
                     )
                     reply, usage = _normalize(response)

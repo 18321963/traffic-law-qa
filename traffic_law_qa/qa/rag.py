@@ -8,9 +8,8 @@
 这一层是管道里唯一对外的"RAG 工具"，上层（pipeline / FastAPI / Agent）只依赖它，
 不关心底层是 BM25 还是向量、是 Chroma 还是别的库。
 
-**这句话以前是假的，现在是结构性的**：`HybridRetriever` 只在本模块被 import
-（`tests/test_rag_boundary.py` 用 AST 盯着这条），它的 `store` / `chunks` /
-`rewriter` 都是私有属性，外面伸手进来会立刻 `AttributeError`。
+**这句话以前是假的，现在是结构性的**：`HybridRetriever` 只在本模块被 import，
+它的 `store` / `chunks` / `rewriter` 都是私有属性，外面伸手进来会立刻 `AttributeError`。
 所以上层需要什么能力，就得在这里变成一个方法 —— `expand` 与 `stats` 就是这么来的：
 它们从前分别是 `agent_tools.expand_query` 里的 `getattr(retriever, "rewriter")`
 与两处各写一遍的 try/except。

@@ -27,7 +27,7 @@ USAGE = """用法：python -m traffic_law_qa.agent "问题" [选项]
                    给不给都一样。想反过来——要 JSON 也要轨迹——目前没有开关）
   --json           输出 JSON（Answer.to_dict）
   --timing         额外打印每个节点的耗时表，走 stderr（不污染 --json）
-  --max-steps N    规划轮数上限，默认 2。设 1 可做近似基线的 A/B
+  --max-steps N    规划轮数上限，默认 3。设 1 可做近似基线的 A/B
   --top-k N        证据条数上限，默认取 RAG_TOP_K
   --no-vector      只用 BM25 检索
   --langfuse       把节点状态、模型调用与检索上报到 Langfuse 云端
@@ -35,7 +35,7 @@ USAGE = """用法：python -m traffic_law_qa.agent "问题" [选项]
                    并先装 pip install -e ".[langfuse]"；不配就只是不打这份报告）
   --linear         走单轮管道作对照（不发规划轮请求）
 
-决策链在终端里会对判别行上色（够了=绿，还不够/未取到=黄）；重定向到文件时自动不上色。
+决策链在终端里会给「没取到」那种行上色（黄）；重定向到文件时自动不上色。
 """
 
 

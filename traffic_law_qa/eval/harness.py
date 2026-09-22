@@ -1,4 +1,4 @@
-"""离线检索评测：data/eval_corpus.json（指令语料）→ hit@1/@3/@6 + MRR。
+"""离线检索评测：data/eval_retrieval.json → hit@1/@3/@6 + MRR。
 
     python -m traffic_law_qa.eval                    # 跑全部可用评测题（82 道）
     python -m traffic_law_qa.eval --limit 20         # 先跑 20 条看链路
@@ -8,72 +8,46 @@
 
 另一条臂（测「条文定位」而不是检索）：
 
-    python -m traffic_law_qa.eval --reference        # 题面含条号那批题 → 规则取条能否唯一定位
+    python -m traffic_law_qa.eval --reference        # 换跑 data/eval_reference.json（112 道）
     python -m traffic_law_qa.eval --reference --no-compare   # 连基线对照都不跑，纯离线
 
-为什么需要第二条臂：构造评测题时会**剔除**题面自带条号或法名的题（查询里已经给了定位信息，检索必然命中），
-所以评测集那 82 道里含「第…条」的是 0 道 —— 检索指标在结构上永远衡量不到规则取条这条新路径。
-被剔除的那批反而是一份现成的、已标注的探针集，`--reference` 就是拿它来测。
+为什么需要第二条臂：题面自带条号或法名的题**进不了**检索题集 —— 查询里已经给了定位信息，
+检索必然命中，衡量不出检索能力。所以那 82 道里含「第…条」的是 0 道，检索指标在结构上
+永远衡量不到规则取条这条新路径。被剔出去的那批反而是一份现成的、已标注的探针集，
+`--reference` 就是拿它来测：其中写了条号的 109 道里 107 道那个条号就是 gold。
 
-语料本身不是评测集：475 条 instruction/output、**去重后 239 道题面**，只有一部分能当检索题用。
+**题集不是本模块造的。** 三份桶文件（检索 82 / 点名 112 / 无 gold 45）都由 `eval.corpus`
+从源语料 data/eval_corpus.json 切出来，各是什么、gold 怎么取交集，文档在那个模块里。
+本模块只读文件 —— 换题集是换文件，不是改代码。
 
-**先说去重。** 这 475 条是每道题**存了两遍**（同一句题面、两份不同的 `output` —— 两次生成），
-所以往下一切筛选与计数都按**题面**走：`build_cases` 先把两个变体合并成一道、gold 取交集
-（细则见该函数）。不合并的话，同一句检索词会被算两遍、分母虚高四成，而两次生成引的条
-不一致时（全库 9 例，多是相邻条）还会拿互相矛盾的两套标准去判同一次检索。
+指标口径（三条都影响读数，改口径等于换了一把尺子）：
 
-- **45 道**构造不出 ground truth：答案里没引本库条号，或两次生成引的条不一致
-- **112 道**的题面自己点名了「第X条」或《法名》→ 查询自带定位信息，检索必然"命中"，
-  衡量不出检索能力（这批改当规则取条那一臂的题集，即 `--reference`）
-- 剩下 **82 道**题面不带定位信息、又能定位 gold → 本模块跑这些
-  → hit@1 69.5% / hit@3 84.1% / hit@6 91.5% / MRR 0.777
-  （当前配置：本地 bge-large-zh-v1.5 + 查询指令前缀。换向量模型这组数会动，
-  各模型下的数见 docs/DESIGN.md §6 —— **别把这组数当模型的属性，它是配置的属性**。）
+- 每条都用 `qa(..., mode="search")` 跑，所以测的就是对外那个接口本身
+- ground truth 取答案里引用的**全部**本库条号，不是只取第一条：一条答案合法引用多条
+  是常态，只认第一条会低估命中率
+- 命中 = 期望的 parent_id 出现在返回列表里，名次取**最靠前**的那个；报告里的
+  82 道 → hit@1 69.5% / hit@3 84.1% / hit@6 91.5% / MRR 0.777 是**当前配置的属性**，
+  换向量模型这组数就会动，别当成模型的属性。
 
-**这 475 条是删过的。** 原语料 779 条里有 **296 条美国自动驾驶事故叙述**
-（Waymo / Cruise / Zoox 在旧金山、洛杉矶的碰撞叙述），本库是中国交通法规，
-一条也覆盖不了，而且它们的 gold 是硬凑的 —— 检索一律返回深圳条例第五十三条
-反而是合理行为，域外 hit@3 仅 4.5%，混进合计会把 hit@3 从 85% 拉到 45%。
-另删 8 条英文版深圳条例题（跨语言检索不是本评测要测的东西）。
-两类合起来 304 条，2026-09 一次性删净，删法见 docs/DESIGN.md。
-
-原先为此设的**「域内外分开报」机制已一并拆除**：域外题清零后，`in_domain` 标记、
+原先设过的**「域内外分开报」机制已拆除**：域外题清零后，`in_domain` 标记、
 `--in-domain` 开关、报告里的域外行全都失去了真实调用，留着就是一份没人执行的契约。
-
-ground truth 取答案里引用的**全部**本库条号，不是只取第一条：一条答案合法引用
-多条是常态，只认第一条会低估命中率。
-
-每条都用 `qa(..., mode="search")` 跑，所以测的就是对外那个接口本身。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from .. import config
 from ..contracts import RetrievalResult
+from .corpus import BucketError, EvalCase, display_path, load_bucket
 
-__all__ = ["main", "evaluate", "build_cases", "EvalCase", "EvalReport"]
+__all__ = ["main", "evaluate", "evaluate_reference", "EvalReport", "ReferenceReport"]
 
-RE_LAW = re.compile(r"《([^》]{2,40})》")
-RE_ARTICLE = re.compile(r"第[零一二三四五六七八九十百千]+条")
-CITE_WINDOW = 50
 KS = (1, 3, 6)
-
-
-@dataclass(frozen=True)
-class EvalCase:
-    """一条评测题：问题 + 期望命中的法条（parent_id）。"""
-
-    question: str
-    gold_ids: tuple[str, ...]
-    gold_citations: tuple[str, ...]
-    gold_laws: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -92,9 +66,7 @@ class CaseResult:
 @dataclass(frozen=True)
 class EvalReport:
     results: tuple[CaseResult, ...]
-    total_raw: int
-    skipped_no_gold: int
-    skipped_named: int
+    source: str
     top_k: int
     used_vector: bool
     elapsed_ms: float
@@ -102,15 +74,6 @@ class EvalReport:
     @property
     def cases(self) -> int:
         return len(self.results)
-
-    @property
-    def questions(self) -> int:
-        """语料里不同题面的总数 —— 每道题面恰好落进「跑了 / 无 gold / 点名」之一。
-
-        语料是每道题存两遍的，所以这个数**小于** `total_raw`；题头那句来源靠它
-        跟 `total_raw` 一起才说得通（`total_raw` 条 → 去重后 `questions` 道）。
-        """
-        return self.cases + self.skipped_no_gold + self.skipped_named
 
     def hit_at(self, k: int, subset: tuple[CaseResult, ...] | None = None) -> float:
         rows = self.results if subset is None else subset
@@ -148,10 +111,7 @@ class EvalReport:
 
         return {
             "cases": self.cases,
-            "questions": self.questions,
-            "total_raw": self.total_raw,
-            "skipped_no_gold": self.skipped_no_gold,
-            "skipped_named": self.skipped_named,
+            "source": self.source,
             "top_k": self.top_k,
             "used_vector": self.used_vector,
             "elapsed_ms": round(self.elapsed_ms, 1),
@@ -180,9 +140,7 @@ class EvalReport:
         lines = [
             f"检索评测：{self.cases} 题"
             f" ｜ {mode} ｜ top_k={self.top_k} ｜ 耗时 {self.elapsed_ms / 1000:.1f}s",
-            f"来源：{self.total_raw} 条语料 → 去重后 {self.questions} 道题面"
-            f"（同题两变体合并、gold 取交集）",
-            f"      剔除 {self.skipped_no_gold} 道无 gold、{self.skipped_named} 道题面自带条号/法名",
+            f"题集：{self.source}",
             "",
             self._line("合计", self.results),
             "",
@@ -203,132 +161,6 @@ class EvalReport:
         return "\n".join(lines)
 
 
-def _normalize_law(name: str) -> str:
-    """去掉「中华人民共和国」前缀，让简称和全称能对上。
-
-    不这么做的话，「道路交通安全法」会同时是「…道路交通安全法」和
-    「…道路交通安全法实施条例」的子串，简称会被解析到错的那一部。
-    """
-    name = name.strip()
-    prefix = "中华人民共和国"
-    return name[len(prefix):] if name.startswith(prefix) and len(name) > len(prefix) else name
-
-
-class LawResolver:
-    """把答案里写的《法名》对到本库的法规上。"""
-
-    def __init__(self, law_names: list[str]) -> None:
-        self.by_norm = {_normalize_law(name): name for name in law_names}
-
-    def resolve(self, name: str) -> str | None:
-        norm = _normalize_law(name)
-        if norm in self.by_norm:
-            return self.by_norm[norm]
-        candidates = [full for key, full in self.by_norm.items() if key.endswith(norm)]
-        return candidates[0] if len(candidates) == 1 else None
-
-
-def _cited_articles(text: str, resolver: LawResolver) -> list[tuple[str, str]]:
-    """答案里（法名, 条号）的配对：条号归属于它前面最近的那个《法名》。"""
-    laws = [(m.start(), m.group(1)) for m in RE_LAW.finditer(text)]
-    if not laws:
-        return []
-
-    pairs: list[tuple[str, str]] = []
-    for match in RE_ARTICLE.finditer(text):
-        preceding = [(start, name) for start, name in laws if 0 <= match.start() - start <= CITE_WINDOW]
-        if not preceding:
-            continue
-        law = resolver.resolve(preceding[-1][1])
-        if law:
-            pairs.append((law, match.group(0)))
-    return pairs
-
-
-def build_cases(
-    data_path: Path,
-    resolver: LawResolver,
-    id_of: dict[tuple[str, str], str],
-    *,
-    include_named: bool = False,
-) -> tuple[list[EvalCase], int, int]:
-    """语料 → 评测题；返回（题目, 无 gold 题数, 题面自带条号或法名的题数）。
-
-    **先按题面合并，再分类。** 语料里每道题都存了两遍（同一 `instruction`、
-    两份不同的 `output`/`complexCOT` —— 两次生成的答案）。gold 是从答案里解析的，
-    所以不合并的话同一道题会带着**两份可能不一样的标注**各占一行：同一句检索词
-    被算两遍，碰到两次生成引的条不同时（全库 9 例，多是相邻条，如 39/40、16/17），
-    还会拿两条互相矛盾的标准去判同一次检索。
-
-    合并规则：gold 取两次生成所引条号的**交集** —— 只认两次都引了的条。
-    交集为空 = 两次生成互相矛盾、没有可信的 ground truth，整题算「无 gold」
-    （`no_gold` 桶里因此有两个成因：答案没引本库条号、或两次引的条不一致）。
-
-    计数一律是**题面数**：三类各计一次，`len(cases) + no_gold + named`
-    （`include_named=False` 时）恒等于语料里的不同题面数 —— 报告的题头靠这个凑得回。
-
-    `include_named=True` 时把「题面自带条号/法名」那批**收进**评测集而不是剔除。
-    它们对检索指标毫无价值（查询里已经写明要哪一条，BM25 必然命中），但正是
-    **规则取条**那条路的探针：写了条号的 109 道里 107 道那个条号就是 gold（98%），
-    是一份已经标注好、规模比手搓探针集大一个量级的现成测试集。
-    """
-    raw = json.loads(Path(data_path).read_text(encoding="utf-8"))
-    known = set(id_of)
-    cases: list[EvalCase] = []
-    no_gold = named = 0
-
-    groups: dict[str, list[list[tuple[str, str]]]] = {}
-    named_questions: set[str] = set()
-
-    for item in raw:
-        question = (item.get("instruction") or "").strip()
-        if not question:
-            continue
-        pairs = [
-            (law, art)
-            for law, art in _cited_articles(item.get("output") or "", resolver)
-            if (law, art) in known
-        ]
-        groups.setdefault(question, []).append(list(dict.fromkeys(pairs)))
-        if RE_ARTICLE.search(question) or RE_LAW.search(question):
-            named_questions.add(question)
-
-    for question, variants in groups.items():
-        with_gold = [pairs for pairs in variants if pairs]
-        gold_pairs = (
-            [pair for pair in with_gold[0] if all(pair in pairs for pairs in with_gold)]
-            if with_gold
-            else []
-        )
-        if not gold_pairs:
-            no_gold += 1
-            continue
-        if question in named_questions:
-            named += 1
-            if not include_named:
-                continue
-
-        cases.append(
-            EvalCase(
-                question=question,
-                gold_ids=tuple(id_of[(law, art)] for law, art in gold_pairs),
-                gold_citations=tuple(f"《{law}》{art}" for law, art in gold_pairs),
-                gold_laws=tuple(dict.fromkeys(law for law, _ in gold_pairs)),
-            )
-        )
-    return cases, no_gold, named
-
-
-def _kb_index() -> tuple[LawResolver, set[tuple[str, str]], dict[tuple[str, str], str]]:
-    from ..kb.chunker import ChunkStage
-
-    parents = ChunkStage(verbose=False).load().parents
-    resolver = LawResolver(sorted({p.law_name for p in parents}))
-    known = {(p.law_name, p.article_no) for p in parents}
-    id_of = {(p.law_name, p.article_no): p.parent_id for p in parents}
-    return resolver, known, id_of
-
-
 def evaluate(
     *,
     data_path: Path | None = None,
@@ -340,20 +172,19 @@ def evaluate(
     """逐题跑检索，统计 hit@k 与 MRR。"""
     from ..api import qa
 
-    data_path = Path(data_path or config.EVAL_CORPUS_PATH)
+    data_path = Path(data_path or config.EVAL_RETRIEVAL_PATH)
     if not data_path.exists():
         from ..api import QaError
 
-        raise QaError(f"评测语料不存在：{data_path}")
+        raise QaError(f"题集不存在：{data_path}（先跑 python -m traffic_law_qa.eval.corpus build）")
 
-    resolver, _known, id_of = _kb_index()
-    cases, no_gold, named = build_cases(data_path, resolver, id_of)
+    cases = load_bucket(data_path)
     if limit:
         cases = cases[:limit]
     if not cases:
         from ..api import QaError
 
-        raise QaError(f"{data_path} 里没有可用的评测题（无 gold {no_gold} 道 / 题面自带条号或法名 {named} 道）")
+        raise QaError(f"{display_path(data_path)} 里没有题")
 
     top_k = top_k or max(KS)
     started = time.perf_counter()
@@ -380,9 +211,7 @@ def evaluate(
 
     return EvalReport(
         results=tuple(results),
-        total_raw=len(json.loads(data_path.read_text(encoding="utf-8"))),
-        skipped_no_gold=no_gold,
-        skipped_named=named,
+        source=display_path(data_path),
         top_k=top_k,
         used_vector=any(row.used_vector for row in results),
         elapsed_ms=(time.perf_counter() - started) * 1000,
@@ -426,10 +255,8 @@ class ReferenceReport:
     """
 
     results: tuple[ReferenceCase, ...]
-    total_raw: int
-    skipped_no_gold: int
+    source: str
     elapsed_ms: float
-    questions: int = 0
     baseline_ran: bool = False
 
     @property
@@ -484,9 +311,7 @@ class ReferenceReport:
         lines = [
             f"规则取条评测：{total} 题（题面含条号或法名的「点名桶」）"
             f" ｜ 离线 ｜ 耗时 {self.elapsed_ms / 1000:.1f}s",
-            f"来源：{self.total_raw} 条语料 → 去重后 {self.questions} 道题面"
-            f"（同题两变体合并、gold 取交集）",
-            f"      剔除 {self.skipped_no_gold} 道无 gold ｜ 本臂只取题面含条号或法名的 {total} 道",
+            f"题集：{self.source}",
             "",
             f"  规则定位到唯一一条：{len(self.located)}/{total}"
             f"（{len(self.located) / total:.1%}）"
@@ -542,8 +367,7 @@ class ReferenceReport:
     def to_dict(self) -> dict:
         return {
             "cases": self.cases,
-            "total_raw": self.total_raw,
-            "skipped_no_gold": self.skipped_no_gold,
+            "source": self.source,
             "elapsed_ms": round(self.elapsed_ms, 1),
             "located": len(self.located),
             "correct": len(self.correct),
@@ -576,22 +400,19 @@ def evaluate_reference(
     from ..agent.tools import build_article_index, find_article
     from ..kb.chunker import ChunkStage
 
-    data_path = Path(data_path or config.EVAL_CORPUS_PATH)
+    data_path = Path(data_path or config.EVAL_REFERENCE_PATH)
     if not data_path.exists():
         from ..api import QaError
 
-        raise QaError(f"评测语料不存在：{data_path}")
+        raise QaError(f"题集不存在：{data_path}（先跑 python -m traffic_law_qa.eval.corpus build）")
 
-    resolver, _known, id_of = _kb_index()
-    cases, no_gold, _named = build_cases(data_path, resolver, id_of, include_named=True)
-    questions = len(cases) + no_gold
-    cases = [c for c in cases if RE_ARTICLE.search(c.question) or RE_LAW.search(c.question)]
+    cases = load_bucket(data_path)
     if limit:
         cases = cases[:limit]
     if not cases:
         from ..api import QaError
 
-        raise QaError(f"{data_path} 里没有「题面含条号或法名」的题")
+        raise QaError(f"{display_path(data_path)} 里没有题")
 
     parents = ChunkStage(verbose=False).load().parent_map()
     index = build_article_index(parents)
@@ -637,10 +458,8 @@ def evaluate_reference(
 
     return ReferenceReport(
         results=tuple(results),
-        total_raw=len(json.loads(data_path.read_text(encoding="utf-8"))),
-        skipped_no_gold=no_gold,
+        source=display_path(data_path),
         elapsed_ms=(time.perf_counter() - started) * 1000,
-        questions=questions,
         baseline_ran=baseline_ran,
     )
 
@@ -661,7 +480,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-vector", action="store_true", help="只走 BM25，做 A/B 对照")
     parser.add_argument("--quiet", action="store_true", help="不打印逐题进度")
     parser.add_argument("--json", action="store_true", help="输出机器可读的报告")
-    parser.add_argument("--data", default=None, help="换一份语料（默认 data/eval_corpus.json）")
+    parser.add_argument(
+        "--data",
+        default=None,
+        help="换一份题集文件（默认 data/eval_retrieval.json；--reference 时默认 data/eval_reference.json）",
+    )
     parser.add_argument("--limit", type=int, default=None, help="只跑前 N 道")
     parser.add_argument("--top-k", type=int, default=None, help="覆盖默认召回条数")
     parser.add_argument("--show-misses", type=int, default=None, help="打印 N 道没命中的题")
@@ -709,7 +532,7 @@ def main(argv: list[str] | None = None) -> int:
             with_vector=not options.no_vector,
             verbose=not options.quiet,
         )
-    except QaError as exc:
+    except (QaError, BucketError) as exc:
         print(str(exc))
         return 1
 

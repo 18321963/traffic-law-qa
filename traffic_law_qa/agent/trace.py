@@ -1,7 +1,7 @@
 """把跑完的这次运行渲染成人看的两张脸：决策链（`render_trace`）与耗时（`render_timing`）。
 
-**纯函数**：只读传进来的 dict，不碰图、不碰网络、不读时钟。所以它能在离线测试里直接喂
-构造好的状态（`tests/test_agent.py` 就是这么钉住每条分支的输出的）。
+**纯函数**：只读传进来的 dict，不碰图、不碰网络、不读时钟 —— 离线测试里可以直接喂
+构造好的状态。
 
 两个渲染器共用同一套约定：输出都带 `[agent] ` 前缀、都能重定向进 `data/traces/*.log`、
 于是 `color` 的默认值必须是 `False` —— 上色只在人对着 TTY 看时才有意义（`cli.py` 用
@@ -18,7 +18,7 @@ from .state import AgentState
 
 __all__ = ["render_trace", "render_timing"]
 
-_COLORS = {"green": "\033[32m", "yellow": "\033[33m", "dim": "\033[2m"}
+_COLORS = {"yellow": "\033[33m", "dim": "\033[2m"}
 _RESET = "\033[0m"
 
 
@@ -32,7 +32,6 @@ def _paint(text: str, color: str, enabled: bool) -> str:
 def render_trace(state: AgentState, *, color: bool = False) -> str:
     messages = state.get("messages") or ()
     logs = state.get("search_log") or []
-    reflections = state.get("reflections") or []
     max_steps = state.get("max_steps", 0)
 
     region = state.get("region") or REGION_UNKNOWN
@@ -81,36 +80,6 @@ def render_trace(state: AgentState, *, color: bool = False) -> str:
             row = logs[logged - 1] if logged <= len(logs) else None
             hits = len(row.get("articles") or ()) if row else 0
             lines.append(f"[agent] 轮 {step}/{max_steps} → {name}({args}) → 命中 {hits} 条")
-
-        if step - 1 < len(reflections):
-            verdict = reflections[step - 1]
-            tail = verdict.get("missing") or verdict.get("reason") or ""
-            if verdict.get("sufficient"):
-                lines.append(
-                    _paint(
-                        f"[agent]         审核：够了 —— {verdict.get('reason') or '证据已覆盖问题要素'}",
-                        "green",
-                        color,
-                    )
-                )
-            elif not verdict.get("retrievable", True):
-                lines.append(
-                    _paint(
-                        f"[agent]         审核：不够，但缺口在库外、再检也补不上 → 收尾 —— {tail}",
-                        "yellow",
-                        color,
-                    )
-                )
-            else:
-                parts = []
-                if verdict.get("next_tool"):
-                    parts.append(f"用 {verdict['next_tool']}")
-                if verdict.get("next_query"):
-                    parts.append(f"「{verdict['next_query']}」")
-                hint = f" → {' '.join(parts)}" if parts else ""
-                lines.append(
-                    _paint(f"[agent]         审核：不够 —— {tail}{hint}", "yellow", color)
-                )
 
     answer = state.get("answer")
     if answer is not None:

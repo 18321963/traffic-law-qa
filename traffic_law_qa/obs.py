@@ -1,11 +1,11 @@
 """可选的耗时观测 —— **基类本身就是空实现**。
 
-    with tracer.span("node.reflect"):
+    with tracer.span("node.agent"):
         ...
 
 `Tracer()` 是所有方法都 no-op 的那一个，也是默认值：不装观测时每个 span 只是两次空调用，
 **行为与加这个文件之前逐位相同**（本仓一贯的判据，同 `EMBED_QUERY_PREFIX` 空串、
-`retrievable` 缺省 True、`next_query` 空串）。
+`LANGFUSE_*` 未配时一个客户端都不建）。
 
 要真记录就给一个 `Recorder`（把 span 收进列表）或 `agent/langfuse_tracer.LangfuseTracer`
 （把 span 与节点状态送到 Langfuse 云端）。**本文件自己零依赖、不 import 任何后端** ——

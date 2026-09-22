@@ -8,7 +8,7 @@
 **父链显式钉，不靠 OTEL 的隐式上下文。** 根 span（`AgentRunner.invoke` 那一层）建出一条新
 trace 并记下 `trace_id` 与它自己的 span id，之后每个节点 span 都带
 `trace_context={"trace_id": …, "parent_span_id": …}` 指回根。langgraph 会不会换线程跑节点
-不在我们掌控内，隐式上下文一断，五个节点就各自变成一条孤立 trace —— 「看着有数据、其实
+不在我们掌控内，隐式上下文一断，四个节点就各自变成一条孤立 trace —— 「看着有数据、其实
 全散了」是最难发现的那种失败，宁可多传两个 id。**节点内部**再开的 generation / retriever
 反而走隐式上下文：那已经是节点自己的调用栈，稳。
 
@@ -42,8 +42,8 @@ _MAX_DEPTH = 6
 def _trim(value: Any, *, depth: int = 0) -> Any:
     """把 state 削到「云端看得懂、又不至于爆掉」的尺寸。**全套只有这一条规则。**
 
-    一次提问的终态里有 N 轮 messages（每轮都带几百字的法条片段）、search_log、reflections
-    与整篇答案，原样送上去轻松几百 KB。削的尺度按「人在面板上愿不愿意滚」定，不按字节预算定。
+    一次提问的终态里有 N 轮 messages（每轮都带几百字的法条片段）、search_log 与整篇答案，
+    原样送上去轻松几百 KB。削的尺度按「人在面板上愿不愿意滚」定，不按字节预算定。
     """
     if depth > _MAX_DEPTH:
         return "…（层级太深，略）"
