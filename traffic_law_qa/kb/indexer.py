@@ -21,7 +21,7 @@ from typing import Any
 
 from .. import config
 from ..contracts import ChunkSet, IndexStats
-from .milvus_store import MilvusError, MilvusStore, row_of
+from .milvus_store import MilvusStore, row_of
 
 EMBED_FAILED_NOTE_PREFIX = "向量化失败"
 
@@ -217,31 +217,7 @@ class Indexer:
         return self.store.ping()
 
 
-def main(argv: list[str] | None = None) -> int:
-    """python -m traffic_law_qa.kb.indexer [--no-vector] [--query 词]"""
-    import sys
-
-    from .chunker import ChunkStage
-    from .milvus_store import wait_until_ready
-
-    args = list(sys.argv[1:] if argv is None else argv)
-    chunk_set = ChunkStage(verbose=False).load()
-    indexer = Indexer()
-    print(f"[index] Milvus 版本 {wait_until_ready(indexer.store)}")
-    try:
-        indexer.build(chunk_set, with_vector="--no-vector" not in args)
-    except MilvusError as exc:
-        print(f"[index] 失败：{exc}")
-        return 1
-
-    if "--query" in args:
-        query = args[args.index("--query") + 1]
-        store = indexer.store
-        print(f"\n仅 BM25 通道：{query}")
-        for chunk_id, score in store.sparse_search(query, limit=5):
-            print(f"  {score:8.3f}  {chunk_id}")
-    return 0
-
-
+# 命令行入口在 `../pipeline.py`（`python -m traffic_law_qa.pipeline index`）；这一层是纯库，没有 `main`。
+# 下面这个闸只为拦「按老习惯敲了 `-m`」：不给它的话模块级代码跑完就退 0，敲的人以为活儿干完了。
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit("已收口：请用 python -m traffic_law_qa.pipeline index（清单见 README「所有入口」）")

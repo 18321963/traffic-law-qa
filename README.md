@@ -19,12 +19,12 @@
 读表前先知道五件事：
 
 1. **第一行是这套配置的属性，不是这个项目的属性。** 同一条管道，云端 `text-embedding-v4` 跑出过 hit@1 75.6% / MRR 0.805；默认的本地 `bge-large-zh-v1.5` 不花钱、不出网，代价就是上表那组。引用这些数时带上向量模型。
-2. **后三行都要带上 LLM。** agent 那一臂的检索词是模型自己写的，换个模型这几格就会动 —— 这组数出自 `qwen3-next-80b-a3b-instruct`（本机 `.env` 的值；`.env.example` 的默认值仍是 `qwen-flash`），最后一行是 `qwen-max`。
+2. **后三行都要带上 LLM。** agent 那一臂的检索词是模型自己写的，换个模型这几格就会动 —— 这组数出自 `qwen3-next-80b-a3b-instruct`；本机 `.env` 现已换成 `qwen3-30b-a3b-instruct-2507`，`.env.example` 的默认值仍是 `qwen-flash`。最后一行是 `qwen-max`。
 3. **第四行两组数要一起读。** 全预算 agent 36/76 比 rag 的 31/76 高，但那是用 1.9 次检索换来的；两边都只看第一次检索，总数完全相同 —— 38 题里 4 题多中、4 题少中、1 题数量相同但换了条，正好抵消。多中的那几条全来自「愿意再查一次」，不是第一次就查得更准。还有一个数没进表：agent 查到 36 条，最终只引用了 33 条。
 4. **同预算那格逐题重不重合，两行不一样。** 单跳 82 题逐题重合（三个臂逐位相同）—— 首轮检索词有 17 题与原话有出入，但都是删个问号、去掉一句「这个条款中的……是什么」这类等价改写，命中结果一字不差。多跳这 38 题有 9 题出入：那 9 题的第 1 轮把场景压成了关键词短查询（「我骑共享单车闯红灯被拍了，交警说要罚我，但我不是机动车……」→「骑共享单车闯红灯怎么处罚」）。
 5. **第四行只有 38 题，是全 63 题的前 38 题** —— 跑到第 39 题时模型端免费额度用尽，断了。是截断，不是抽样：38 题不能当 63 题读。最后一行是同一批 38 题在旧模型上的数，两行之间只差模型，与题集无关。
 
-表里 agent 那几格跑的是现在的循环：单节点，模型自己判断证据够不够、自己决定停；**末端另有一个复核节点**，逐个 `[依据N]` 判它引的那条原文撑不撑得住那句结论，支撑比例低于阈值（默认 0.6）的答案**不直接输出** —— 换成「依据不足」+ 候选法条，并标记需人工复审。**这道闸的检测力还没标定**：机制、判据、降级都通了，但拿「往一条依据后面追一句它原文里没有的话」探过两次，今天配的那只小模型两次都判支撑（细节与三条改进路径在 `.env.example`）。上面这几组数出自复核节点落地之前：复核只换答案文案、不动证据，所以引用那几列不受影响。它们也都早于工具结果的精简（规划轮那段文本后来按「只印模型能据此动一下的东西」删掉了相关度、通道开关、耗时与版本日期，见 `agent/tools/render.py`）—— 那一处改的**正是模型的输入**，要严格对齐就得重跑，而主模型配额已用尽，未重跑。轨迹都在 `data/traces/` 里（`single82_q3next.json` / `hop63_q3next.json` / 换模型那组 `hop63.json`），每一格都能从轨迹重算。
+表里 agent 那几格跑的是现在的循环：单节点，模型自己判断证据够不够、自己决定停；**末端另有一个复核节点**，逐个 `[依据N]` 判它引的那条原文撑不撑得住那句结论，支撑比例低于阈值（默认 0.6）的答案**不直接输出** —— 换成「依据不足」+ 候选法条，并标记需人工复审。**这道闸的检测力还没标定**：机制、判据、降级都通了，但拿「往一条依据后面追一句它原文里没有的话」探过两次，今天配的那只小模型（复核默认复用入口模型，`.env` 里是 `tongyi-intent-detect-v3`）两次都判支撑（细节与三条改进路径在 `.env.example`）。上面这几组数出自复核节点落地之前：复核只换答案文案、不动证据，所以引用那几列不受影响。它们也都早于工具结果的精简（规划轮那段文本后来按「只印模型能据此动一下的东西」删掉了相关度、通道开关、耗时与版本日期，见 `agent/tools/render.py`）—— 那一处改的**正是模型的输入**，要严格对齐就得重跑，而主模型配额已用尽，未重跑。轨迹都在 `data/traces/` 里（`single82_q3next.json` / `hop63_q3next.json` / 换模型那组 `hop63.json`），每一格都能从轨迹重算。
 
 ## 跑起来
 
@@ -71,17 +71,14 @@ print(qa("深圳 行人在机动车道 罚款多少", mode="search").render())  
 
 ## 所有入口
 
-装好包（`pip install -e .`）之后能敲的全部路径。`kb/` 那四个不认 `--help` —— 它们手搓解析 `sys.argv`，`--help` 会被当成普通参数**真的开始干活**，其余七个都由 argparse 在解析阶段拦下。
+装好包（`pip install -e .`）之后能敲的全部路径：下表 **9 条 = 7 个 `-m` + 2 个短命令**。
+
+一个命令一条路径，`--help` 也因此只有一个规矩：**全部走 argparse，只打印用法，不碰磁盘、不连 Milvus**。`pipeline` 不给子命令时打印用法并退出 2 —— 它不替你挑默认动作（从前会直接整库重建）。
 
 | 命令 | 干什么 |
 |---|---|
-| `python -m traffic_law_qa "问题"` | 提问：确保索引就绪 → 检索 → 生成 |
-| `python -m traffic_law_qa.pipeline build \| status \| layers` | 建库 / 看库内规模 / 看七层管道的输入输出 |
-| `python -m traffic_law_qa.kb.docx_reader [docx …]` | 建库第一步：docx → 段落，不给路径就跑全部 |
-| `python -m traffic_law_qa.kb.law_parser [--force] [--only 法id]` | 第二步：段落 → 法→章→节→条，sha1 没变就跳过 |
-| `python -m traffic_law_qa.kb.chunker [--show 条号]` | 第三步：条文 → 父子块 |
-| `python -m traffic_law_qa.kb.indexer [--no-vector] [--query 词]` | 第四步：块 → Milvus 集合 |
-| `python -m traffic_law_qa.agent "问题" [--trace]` | Agentic RAG：模型自己决定查什么、查几轮（配了 `LANGFUSE_*` 就自动上报，见 `.env.example`） |
+| `python -m traffic_law_qa "问题" [--agent]` | 提问：确保索引就绪 → 检索 → 生成。不带 `--agent` 是线性管道（评测基线）；带 `--agent` 走 Agentic RAG，模型自己决定查什么、查几轮（配了 `LANGFUSE_*` 就自动上报，见 `.env.example`） |
+| `python -m traffic_law_qa.pipeline <子命令>` | 建库与查状态，七个子命令见下表 |
 | `python -m traffic_law_qa.eval.corpus build \| check` | 题集文件：把源语料切成三份桶文件（82 / 112 / 45）；`check` 只读比对有没有跟源语料走散 |
 | `python -m traffic_law_qa.eval [--reference]` | 读 `data/eval_retrieval.json` 跑域内 82 题：hit@k / MRR；`--reference` 换读 112 道点名桶，量规则取条能否唯一定位 |
 | `python -m traffic_law_qa.eval.singlehop` | 单跳 82 题：rag vs agent 两臂对照 |
@@ -90,9 +87,21 @@ print(qa("深圳 行人在机动车道 罚款多少", mode="search").render())  
 | `tlq-qa "问题"` | 短命令，等价 `python -m traffic_law_qa` |
 | `tlq-serve` | 短命令，等价 `python -m traffic_law_qa.server` |
 
-`…eval` 与 `…agent` 各是一次纯转发：实现在 `eval/harness.py` 和 `agent/cli.py`，那两个模块也能直接 `-m` 跑（`…eval.harness` / `…agent.cli`），转发文件存在的意义只是让重构前记熟的那条命令继续能用。
+`pipeline` 的七个子命令 —— 前三个是整条与查询，后四个就是建库四步，给「只重跑其中一步」用：
 
-十三条路径都验过：十一条 `-m` 起得来，两个短命令正常，服务那条 `/health` 返回 200。
+| 子命令 | 干什么 |
+|---|---|
+| `build [--force] [--no-vector]` | 整条：parse → chunk → index，另加每层计时报告 |
+| `status` | 库内规模、索引快照、Milvus 连接、当前模型名 |
+| `layers` | 七层管道各自的输入输出 |
+| `docx [docx …]` | 第一步：docx → 段落，不给路径就跑全部 |
+| `parse [--force] [--only 法id]` | 第二步：段落 → 法→章→节→条，sha1 没变就跳过 |
+| `chunk [--show 条号]` | 第三步：条文 → 父子块 |
+| `index [--no-vector] [--query 词]` | 第四步：块 → Milvus 集合（先等 Milvus 就绪） |
+
+`python -m traffic_law_qa.eval` 是一次纯转发：实现在 `eval/harness.py`，转发文件（`eval/__main__.py`）存在的意义只是让重构前记熟的那条命令继续能用 —— 于是「只给门模块配 `__main__`」这条规矩在 `agent/` 与 `eval/` 里是一致的，`kb/` 那四个模块连 `main` 都不带。
+
+九条路径都验过：七个 `-m` 与两个短命令的 `--help` 逐条扫过（打印用法、磁盘无动静），服务那条 `/health` 返回 200（本次没动 `server.py`，那是上一次的实测）。
 
 ## 它长什么样
 
@@ -114,7 +123,7 @@ print(qa("深圳 行人在机动车道 罚款多少", mode="search").render())  
 |---|---|
 | 语言 | Python 3.11 |
 | 向量库 | Milvus 2.6，稠密 + BM25 双路召回，分词与融合都在服务端 |
-| 模型 | 生成 `qwen-flash` / 向量 `bge-large-zh-v1.5`（本地 Ollama，OpenAI 兼容协议，换模型只改 `.env`） |
+| 模型 | 生成 `qwen3-30b-a3b-instruct-2507`（`.env.example` 默认 `qwen-flash`）/ 向量 `bge-large-zh-v1.5`（本地 Ollama，OpenAI 兼容协议，换模型只改 `.env`） |
 | 服务 | FastAPI + uvicorn，`/qa/stream` 走 SSE 流式 |
 | Agent | LangGraph 状态机，LLM 调用直接走 `openai` SDK |
 | 依赖 | 基础组只有三个包：`openai` · `pymilvus` · `python-dotenv` |
@@ -142,7 +151,8 @@ data/         题集源语料 + 由它切出的三份题集文件 + 跨法多跳
 agent后面加一个审查正确性agent,再加打分agent测正确率
     —— 前半已落：末端复核节点（逐个 [依据N] 判支撑 + 按引用条数算分 + 低分降级转人工）。
        还差后半：按「正确率 / 拒答率」标定阈值（要跑批），今天那个 0.6 是占位值；
-       以及提升检测力 —— 今天配的那只小模型没探过「给一条依据追加它原文里没有的话」那条用例。
+       以及提升检测力 —— 「给一条依据追加它原文里没有的话」那条探过（补提示词前后各一次），
+       两次都判支撑；得换更强的复核模型或加一层代码校验，不是靠改提示词。
 测试
 提示词经过多次迭代有矛盾
 加网页搜索工具
@@ -151,7 +161,6 @@ agent后面加一个审查正确性agent,再加打分agent测正确率
 强化学习
 记忆（这项目好像需求不高）
 环境，依赖问题
-入口疑似太多了
 
 ## 再进阶
 数据库优化

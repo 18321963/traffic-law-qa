@@ -14,7 +14,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -433,13 +432,7 @@ class ParseStage:
         return laws
 
 
-def main(argv: list[str] | None = None) -> int:
-    """python -m traffic_law_qa.kb.law_parser [--force] [--only law_id]"""
-    args = list(sys.argv[1:] if argv is None else argv)
-    only = args[args.index("--only") + 1] if "--only" in args else None
-    ParseStage().run(force="--force" in args, only=only)
-    return 0
-
-
+# 命令行入口在 `../pipeline.py`（`python -m traffic_law_qa.pipeline parse`）；这一层是纯库，没有 `main`。
+# 下面这个闸只为拦「按老习惯敲了 `-m`」：不给它的话模块级代码跑完就退 0，敲的人以为活儿干完了。
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit("已收口：请用 python -m traffic_law_qa.pipeline parse（清单见 README「所有入口」）")

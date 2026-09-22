@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import sys
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -108,22 +107,7 @@ def _paragraph_style(p: ET.Element) -> str | None:
     return style.get(f"{{{W}}}val")
 
 
-def main(argv: list[str] | None = None) -> int:
-    """python -m traffic_law_qa.kb.docx_reader [docx 路径 ...]"""
-    from .. import config
-
-    args = list(sys.argv[1:] if argv is None else argv)
-    targets = [Path(a) for a in args] if args else sorted(config.DOCX_DIR.glob("*.docx"))
-    reader = DocxReader()
-
-    for target in targets:
-        paragraphs = reader.read(target)
-        chars = sum(len(p.text) for p in paragraphs)
-        print(f"\n=== {target.name} | 段落 {len(paragraphs)} | 字符 {chars}")
-        for para in paragraphs[:12]:
-            print(f"  [{para.index:>3}] style={para.style!s:<10} {para.text[:60]}")
-    return 0
-
-
+# 命令行入口在 `../pipeline.py`（`python -m traffic_law_qa.pipeline docx`）；这一层是纯库，没有 `main`。
+# 下面这个闸只为拦「按老习惯敲了 `-m`」：不给它的话模块级代码跑完就退 0，敲的人以为活儿干完了。
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit("已收口：请用 python -m traffic_law_qa.pipeline docx（清单见 README「所有入口」）")

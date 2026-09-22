@@ -544,5 +544,9 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+# 入口是 `./__main__.py`（`python -m traffic_law_qa.eval`）—— 与 `agent/cli.py` 同一条规矩：
+# 只有门模块带 `__main__` 块，库模块不带。
+# 下面这个闸只为拦「按老习惯敲了 `-m traffic_law_qa.eval.harness`」：不给它的话模块级代码
+# 跑完就退 0，敲的人以为评测跑过了。
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit("已收口：请用 python -m traffic_law_qa.eval（清单见 README「所有入口」）")

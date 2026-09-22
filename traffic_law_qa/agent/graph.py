@@ -121,7 +121,7 @@ class AgentRunner:
     """Input : 自然语言问题 (str) / Question；Output: Answer（与单轮管道同一个契约对象）。
 
     **依赖的是 `LegalRAG`，不是检索器**：生成器与 top_k 都从 rag 上取，不另存一份 ——
-    存两份就迟早不一致（`--linear` 退回线性管道时要用的正是同一个 rag）。
+    存两份就迟早不一致（兜底的 `rag.ask()`、`describe()` 与工具层读的都是同一个 rag）。
     组图这一侧照同一条走：`build_graph` 与各节点工厂都不接 `top_k` 参数，
     条数只从 `state["top_k"]` 取、兜底读 `config`，真源始终只有一处。
     """

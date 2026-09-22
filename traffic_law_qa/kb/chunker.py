@@ -21,7 +21,6 @@
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
 from .. import config
@@ -229,19 +228,7 @@ class ChunkStage:
         return ChunkSet.read(self.chunks_path, self.parents_path)
 
 
-def main(argv: list[str] | None = None) -> int:
-    """python -m traffic_law_qa.kb.chunker [--show 条号]"""
-    args = list(sys.argv[1:] if argv is None else argv)
-    chunk_set = ChunkStage().run()
-
-    if "--show" in args:
-        target = args[args.index("--show") + 1]
-        for chunk in chunk_set.chunks:
-            if chunk.article_no == target:
-                print(f"\n[{chunk.chunk_id}] part {chunk.part_index + 1}/{chunk.part_total}")
-                print(f"  embed_text: {chunk.embed_text}")
-    return 0
-
-
+# 命令行入口在 `../pipeline.py`（`python -m traffic_law_qa.pipeline chunk`）；这一层是纯库，没有 `main`。
+# 下面这个闸只为拦「按老习惯敲了 `-m`」：不给它的话模块级代码跑完就退 0，敲的人以为活儿干完了。
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit("已收口：请用 python -m traffic_law_qa.pipeline chunk（清单见 README「所有入口」）")

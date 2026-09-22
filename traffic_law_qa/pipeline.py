@@ -13,15 +13,26 @@
 | generate | `AnswerGenerator`  | `Question` + `RetrievalResult`  | `Answer`                    |
 
 命令行用法（只管知识库本身；**问答统一走 `python -m traffic_law_qa "问题"`** ——
-那条路带一致性检查与自动重建，这里的 build/status/layers 都只管建库和查状态）：
-    python -m traffic_law_qa.pipeline build  [--force] [--no-vector]
-    python -m traffic_law_qa.pipeline layers | status
+那条路带一致性检查与自动重建，这里的子命令都只管建库和查状态）：
+
+    python -m traffic_law_qa.pipeline build  [--force] [--no-vector]    # 整条：parse → chunk → index
+    python -m traffic_law_qa.pipeline status | layers                   # 看库内规模 / 看上面那张表
+    python -m traffic_law_qa.pipeline docx  [docx 路径 ...]             # 单步：docx → 段落（不给路径跑全部）
+    python -m traffic_law_qa.pipeline parse [--force] [--only 法id]     # 单步：段落 → 条
+    python -m traffic_law_qa.pipeline chunk [--show 条号]               # 单步：条文 → 父子块
+    python -m traffic_law_qa.pipeline index [--no-vector] [--query 词]  # 单步：块 → Milvus 集合
+
+四个单步子命令就是建库四步（上表里的 read/parse/chunk/index），给「只重跑其中一步」用；
+`build` 是它们串起来，另加每层的计时报告。子命令一个都不给时打印用法并退出 2 ——
+不再默认整库重建（那个默认值会让手滑敲下的 `pipeline` 直接重灌集合）。
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
+from pathlib import Path
 
 from . import config
 from .contracts import (
@@ -36,6 +47,7 @@ from .kb.chunker import ChunkStage
 from .kb.docx_reader import DocxReader
 from .kb.indexer import Indexer
 from .kb.law_parser import LawLibrary, LawParser, ParseStage
+from .kb.milvus_store import MilvusError, wait_until_ready
 from .qa.generator import AnswerGenerator
 from .qa.rag import LegalRAG
 
@@ -205,39 +217,136 @@ class RagPipeline:
         return "\n".join(lines)
 
 
-USAGE = __doc__
+def _parser() -> argparse.ArgumentParser:
+    """七个子命令的解析器。
+
+    与门 / `agent` / `eval` 那几处不同，这里**不手写说明书**：七个子命令各有一套旗标，
+    手写的那份必然漂（少列一条旗标没人会发现），所以直接用 argparse 自带的帮助 ——
+    `-h` 打在子命令前看总览，打在子命令后看那一条自己的旗标。
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m traffic_law_qa.pipeline",
+        description='建库与查状态（问答走 python -m traffic_law_qa "问题"）',
+    )
+    subs = parser.add_subparsers(
+        dest="command", required=True, metavar="{build,status,layers,docx,parse,chunk,index}"
+    )
+
+    build = subs.add_parser("build", help="整条建库：parse → chunk → index")
+    build.add_argument("--force", action="store_true", help="无视 sha1 增量门控，全部重新解析")
+    build.add_argument("--no-vector", action="store_true", help="只建 BM25 字段，不算向量")
+
+    subs.add_parser("status", help="看库内规模、索引快照与 Milvus 连接")
+    subs.add_parser("layers", help="看七层管道各自的输入输出")
+
+    docx = subs.add_parser("docx", help="单步：docx → 段落（不给路径就跑 DOCX_DIR 全部）")
+    docx.add_argument("paths", nargs="*", metavar="docx", help="要预览的 docx 路径")
+
+    parse = subs.add_parser("parse", help="单步：段落 → 法→章→节→条")
+    parse.add_argument("--force", action="store_true", help="无视 sha1 门控，全部重解析")
+    parse.add_argument("--only", metavar="法id", default=None, help="只解析这一部（如 sz_icv_regulation）")
+
+    chunk = subs.add_parser("chunk", help="单步：条文 → 父子块")
+    chunk.add_argument("--show", metavar="条号", default=None, help="切完打印该条号的子块（如 第八条）")
+
+    index = subs.add_parser("index", help="单步：块 → Milvus 集合（先等 Milvus 就绪）")
+    index.add_argument("--no-vector", action="store_true", help="只建 BM25 字段，不算向量")
+    index.add_argument("--query", metavar="词", default=None, help="建完用纯 BM25 试查一次（top-5）")
+    return parser
 
 
-def _flag(args: list[str], name: str) -> bool:
-    return name in args
+def _cmd_docx(paths: list[str]) -> int:
+    """`pipeline docx`：读 docx 并预览段落（原 `kb.docx_reader` 的入口）。"""
+    targets = [Path(a) for a in paths] if paths else sorted(config.DOCX_DIR.glob("*.docx"))
+    reader = DocxReader()
+
+    for target in targets:
+        paragraphs = reader.read(target)
+        chars = sum(len(p.text) for p in paragraphs)
+        print(f"\n=== {target.name} | 段落 {len(paragraphs)} | 字符 {chars}")
+        for para in paragraphs[:12]:
+            print(f"  [{para.index:>3}] style={para.style!s:<10} {para.text[:60]}")
+    return 0
+
+
+def _cmd_parse(*, force: bool, only: str | None) -> int:
+    """`pipeline parse`：段落 → 条（原 `kb.law_parser` 的入口）。"""
+    ParseStage().run(force=force, only=only)
+    return 0
+
+
+def _cmd_chunk(show: str | None) -> int:
+    """`pipeline chunk`：条文 → 父子块（原 `kb.chunker` 的入口）。
+
+    `--show` 是**切完再筛**：切块本身就是产物，不是为看那一条才切。
+    """
+    chunk_set = ChunkStage().run()
+
+    if show:
+        for chunk in chunk_set.chunks:
+            if chunk.article_no == show:
+                print(f"\n[{chunk.chunk_id}] part {chunk.part_index + 1}/{chunk.part_total}")
+                print(f"  embed_text: {chunk.embed_text}")
+    return 0
+
+
+def _cmd_index(*, with_vector: bool, query: str | None) -> int:
+    """`pipeline index`：块 → Milvus 集合（原 `kb.indexer` 的入口）。
+
+    两处与 `build` 不同，都是有意留着的：先 `wait_until_ready` 等 Milvus（单独重灌索引
+    多半发生在「容器刚起来」时），以及把 `MilvusError` 收成一行中文 + 退出码 1。
+    """
+    chunk_set = ChunkStage(verbose=False).load()
+    indexer = Indexer()
+    print(f"[index] Milvus 版本 {wait_until_ready(indexer.store)}")
+    try:
+        indexer.build(chunk_set, with_vector=with_vector)
+    except MilvusError as exc:
+        print(f"[index] 失败：{exc}")
+        return 1
+
+    if query:
+        store = indexer.store
+        print(f"\n仅 BM25 通道：{query}")
+        for chunk_id, score in store.sparse_search(query, limit=5):
+            print(f"  {score:8.3f}  {chunk_id}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    parser = _parser()
 
-    if any(a in ("--help", "-h", "help") for a in args):
-        print(USAGE)
+    if not args:
+        parser.print_help()
+        return 2
+
+    try:
+        options = parser.parse_args(args)
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 0
+
+    if options.command == "layers":
+        print(RagPipeline().layers())
         return 0
 
-    command = args[0] if args and not args[0].startswith("--") else "build"
-    pipeline = RagPipeline()
-
-    if command == "layers":
-        print(pipeline.layers())
+    if options.command == "status":
+        print(RagPipeline().status())
         return 0
 
-    if command == "status":
-        print(pipeline.status())
-        return 0
-
-    if command == "build":
-        report = pipeline.build(force=_flag(args, "--force"), with_vector=not _flag(args, "--no-vector"))
+    if options.command == "build":
+        report = RagPipeline().build(force=options.force, with_vector=not options.no_vector)
         print("\n管道执行结果：")
         print(report.render())
         return 0
 
-    print(USAGE)
-    return 2
+    if options.command == "docx":
+        return _cmd_docx(options.paths)
+    if options.command == "parse":
+        return _cmd_parse(force=options.force, only=options.only)
+    if options.command == "chunk":
+        return _cmd_chunk(options.show)
+    return _cmd_index(with_vector=not options.no_vector, query=options.query)
 
 
 if __name__ == "__main__":
