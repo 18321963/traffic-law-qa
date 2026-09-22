@@ -1,8 +1,12 @@
-"""图的装配（4 个节点 + 2 个路由）与门面 `AgentRunner`。
+"""图的装配（5 个节点 + 2 个路由）与门面 `AgentRunner`。
 
     START → region → agent ─┬─(有 tool_calls)→ tools ─(还有预算)→ 回 agent
                             │                 └─(预算尽)──────┐
-                            └─(无 tool_calls)─────────────────┴→ finalize → END
+                            └─(无 tool_calls)─────────────────┴→ finalize → review → END
+
+**末端 `review` 是全图唯一的「出口闸」**：它读收尾节点产出的答案、逐个 `[依据N]` 复核，
+分低就把答案换成「依据不足」并标记需人工复审（判据与口径见 `review.py`）。它**没有出边
+可选**，也不回边 —— 一次运行只走一次，坏掉就放行。
 
 **停止由规划轮自己说**：这一轮的助手消息没有 `tool_calls` 就是「证据够了」，直接进作答 ——
 标准 ReAct 的形状。代价是「停」要交给一只手上正握着工具的模型（它天然有调用倾向），
@@ -27,10 +31,11 @@ from ..contracts import Answer, Question
 from ..obs import Tracer, traced
 from ..qa.rag import LegalRAG
 from .llm import ToolCallingLLM
-from .nodes import TOOLS, make_agent_node, make_finalize_node, make_tools_node
+from .loop import TOOLS, make_agent_node, make_finalize_node, make_tools_node
 from .region import REGION_UNKNOWN, make_region_node
+from .review import make_review_node
 from .state import AgentState
-from .tools import build_article_index
+from .tools.articles import build_article_index
 
 __all__ = ["route_after_agent", "build_graph", "AgentRunner"]
 
@@ -69,15 +74,20 @@ def build_graph(
     llm: ToolCallingLLM,
     cfg: config.AgentConfig,
     region_llm: ToolCallingLLM | None = None,
+    review_llm: ToolCallingLLM | None = None,
     tracer: Tracer | None = None,
 ):
     """装配图。`region_llm` 是**入口判地区那一只**模型 —— 要的是判得准且便宜；
-    循环用主模型，它要的是会调工具、也会自己判断什么时候停。"""
+    循环用主模型，它要的是会调工具、也会自己判断什么时候停。
+
+    `review_llm` 是末端复核那一只，默认**复用入口那只**（同一类活：一次调用、一段短
+    JSON），也**绝不能是主模型** —— 让生成答案的模型给自己的答案打分就是自己判自己。"""
     from langgraph.graph import END, START, StateGraph
 
     tracer = tracer or Tracer()
 
     region_llm = region_llm or llm
+    review_llm = review_llm or region_llm
 
     parents = rag.parents
     by_number = build_article_index(parents)
@@ -92,6 +102,7 @@ def build_graph(
     graph.add_node(
         "finalize", traced(tracer, "node.finalize", make_finalize_node(rag, cfg, observer=tracer))
     )
+    graph.add_node("review", traced(tracer, "node.review", make_review_node(review_llm, cfg)))
 
     graph.add_edge(START, "region")
     graph.add_edge("region", "agent")
@@ -101,7 +112,8 @@ def build_graph(
     graph.add_conditional_edges(
         "tools", _route_after_tools, {"agent": "agent", "finalize": "finalize"}
     )
-    graph.add_edge("finalize", END)
+    graph.add_edge("finalize", "review")
+    graph.add_edge("review", END)
     return graph.compile()
 
 
@@ -123,6 +135,7 @@ class AgentRunner:
         *,
         llm: ToolCallingLLM | None = None,
         region_llm: ToolCallingLLM | None = None,
+        review_llm: ToolCallingLLM | None = None,
         cfg: config.AgentConfig | None = None,
         tracer: Tracer | None = None,
     ) -> None:
@@ -131,6 +144,7 @@ class AgentRunner:
         self.tracer = tracer or Tracer()
         self.llm = llm or ToolCallingLLM(retries=self.cfg.retries, observer=self.tracer)
         self.region_llm = region_llm or self.llm
+        self.review_llm = review_llm or self.region_llm
         self._graph = None
 
     @property
@@ -147,6 +161,13 @@ class AgentRunner:
         tracer: Tracer | None = None,
     ) -> "AgentRunner":
         agent_cfg = cfg or config.agent_config()
+        if tracer is None:
+            # 配了就开：.env 里有 LANGFUSE_* 就自动上报。延迟 import 是为了没配时连
+            # langfuse 这个包都不必装（同 LangfuseTracer._connect）。
+            # **显式传 tracer 的调用方说了算** —— 临时脚本要安静的替身，传 `Tracer()` 就是安静的。
+            from .langfuse_tracer import from_env
+
+            tracer = from_env()
         observer = tracer or Tracer()
         return cls(
             LegalRAG.load(with_vector=with_vector, top_k=top_k),
@@ -154,6 +175,9 @@ class AgentRunner:
             tracer=observer,
             region_llm=ToolCallingLLM(
                 config.region_llm_config(), retries=agent_cfg.retries, observer=observer
+            ),
+            review_llm=ToolCallingLLM(
+                config.review_llm_config(), retries=agent_cfg.retries, observer=observer
             ),
         )
 
@@ -165,6 +189,7 @@ class AgentRunner:
                 llm=self.llm,
                 cfg=self.cfg,
                 region_llm=self.region_llm,
+                review_llm=self.review_llm,
                 tracer=self.tracer,
             )
         return self._graph
@@ -177,6 +202,12 @@ class AgentRunner:
 
         `record(initial, final)` 是给真后端用的：根 span 的入参/出参就是整条 trace 的
         入参/出参（问题进、答案出）。空实现下它什么也不做。
+
+        `recursion_limit = 2 * max_steps + 4`：最坏一步是 region 1 + 规划 3 + 工具 3 +
+        finalize 1 + review 1 = **9** 步（默认 max_steps=3，上限 10），余量只剩 1。
+        **末端那个 review 节点已经在用这份余量** —— 将来若给它加「不通过就重查一轮」之类的
+        回边，必须同时抬这个上限，否则报的是 langgraph 的 GraphRecursionError，
+        看起来像图坏了，其实是预算没给够。
         """
         query = question if isinstance(question, Question) else Question(text=question)
         initial: AgentState = {
@@ -216,10 +247,20 @@ class AgentRunner:
             vector_state = "未知（Milvus 未连接）"
         else:
             vector_state = "已启用" if stats.dense else "未启用（仅 BM25）"
+        threshold = self.cfg.review_min_score
+        review_state = (
+            "复核已关闭"
+            if threshold < 0
+            else (
+                f"末端复核（1 次 {self.review_llm.cfg.model} 调用，"
+                + (f"支撑 < {threshold:g} 降级转人工）" if threshold > 0 else "只打分不拦截）")
+            )
+        )
         return (
             f"Agent：{stats.articles} 条法条 / {stats.chunks} 个子块 | "
             f"稠密通道 {vector_state} | 最多 {self.cfg.max_steps} 轮 | "
             f"入口判地区（1 次 {self.region_llm.cfg.model} 调用，判不出则不限地区） | "
+            f"{review_state} | "
             f"工具 2 个（{'、'.join(tool['function']['name'] for tool in TOOLS)}） | "
             f"LLM {self.llm.cfg.model}"
         )

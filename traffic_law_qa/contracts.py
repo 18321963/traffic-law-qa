@@ -469,6 +469,46 @@ class Question:
 
 
 @dataclass(frozen=True)
+class Review:
+    """末端复核的结果：答案里每个 [依据N] 是否被它引的那条原文支撑。
+
+    **分数由代码算，不由模型给** —— 模型只逐条回 `supported` 布尔值，这里把
+    `supported / total` 聚合出来。让模型直接吐一个 0~1 的数，既没法复现也没法解释；
+    逐条判据则每一条都能拿原文去对。
+
+    `total` 是答案**引用到的编号个数**（不是证据条数），**越界编号也计入分母、且永不支撑**：
+    引了一条不存在的依据，与引了一条对不上的依据，是同一种错。
+
+    `passed` 是给下游的唯一判据（`score < threshold`，**严格小于**）。规则写在这里而不是
+    让每个调用方自己比，是因为「严格小于」抄错一次就静默多拦或少拦。`score is None`
+    （没打成分）时一律 True：复核是闸不是依赖，自己坏掉不许改变答案能否输出。
+
+    `original_text` 留降级前的原文 —— 降级不是毁证据，人要复审的正是那一段。
+    """
+
+    score: float | None
+    threshold: float
+    total: int
+    supported: int
+    unsupported: tuple[str, ...]
+    original_text: str
+    model: str
+    passed: bool
+
+    def to_dict(self) -> dict:
+        return {
+            "score": self.score,
+            "threshold": self.threshold,
+            "total": self.total,
+            "supported": self.supported,
+            "unsupported": list(self.unsupported),
+            "passed": self.passed,
+            "model": self.model,
+            "original_text": self.original_text,
+        }
+
+
+@dataclass(frozen=True)
 class Answer:
     """管道的最终输出。"""
 
@@ -480,6 +520,8 @@ class Answer:
     usage: dict[str, Any] = field(default_factory=dict)
     retrieval: RetrievalResult | None = None
     notes: tuple[str, ...] = ()
+    review: Review | None = None
+    """末端复核的结果；`None` = 没跑复核（阈值关掉、或线性管道这条路根本没有复核）。"""
 
     def to_dict(self) -> dict:
         return {
@@ -491,6 +533,7 @@ class Answer:
             "notes": list(self.notes),
             "citations": [e.citation for e in self.evidences],
             "retrieval": None if self.retrieval is None else self.retrieval.to_dict(),
+            "review": None if self.review is None else self.review.to_dict(),
         }
 
     def render(self, *, show_citations: bool = True) -> str:
@@ -601,6 +644,7 @@ __all__ = [
     "RetrievalResult",
     "Evidence",
     "Question",
+    "Review",
     "Answer",
     "StageReport",
     "PipelineReport",

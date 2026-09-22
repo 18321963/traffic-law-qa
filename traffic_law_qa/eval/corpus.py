@@ -146,12 +146,15 @@ def _cited_articles(text: str, resolver: LawResolver) -> list[tuple[str, str]]:
 
 
 def _library():
-    """切块产物 → `multihop.Library`（本条路径唯一的库视图）。"""
+    """切块产物 → `multihop.Library`（本条路径唯一的库视图）。
+
+    **这一句只能在函数内 import**：`multihop` 在模块级就 `from .corpus import
+    RE_ARTICLE, RE_LAW`，两边都提到模块级就是双向循环 —— 先 import 哪一边都炸在
+    「半初始化的模块」上，两个方向都实测过。`load_bucket` 里那句 `HopError` 同理。
+    """
     from .multihop import Library
 
     return Library.load()
-
-
 
 
 def _law_maps(library) -> tuple[LawResolver, dict[tuple[str, str], ParentChunk]]:
@@ -246,12 +249,14 @@ def check_buckets(source_path: Path | None = None) -> list[str]:
     return drift
 
 
-def load_bucket(path: Path | None = None, *, library=None) -> list[EvalCase]:
+def load_bucket(path: Path | None = None) -> list[EvalCase]:
     """桶文件 → 评测题。
 
     `gold` 里的 `law_id#条号` 在这里换回条文与 `parent_id` —— 指标比的是
     parent_id，而文件里存的是条号（见模块文档：条号才跟着法规走）。
     解析不到就是题集坏了，`Library.resolve` 直接抛，不静默降级成「无 gold」。
+
+    下面那句 import 也只能在函数内（循环 import，理由见 `_library`）。
     """
     from .multihop import HopError
 
@@ -259,7 +264,7 @@ def load_bucket(path: Path | None = None, *, library=None) -> list[EvalCase]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, list):
         raise BucketError(f"{display_path(path)} 不是桶文件（顶层应是数组）")
-    library = library or _library()
+    library = _library()
 
     cases: list[EvalCase] = []
     for index, item in enumerate(raw, start=1):

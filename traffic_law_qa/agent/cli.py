@@ -13,9 +13,9 @@ import sys
 from dataclasses import replace
 
 from .. import config
-from ..obs import Recorder
+from ..obs import Recorder, Tracer
 from .graph import AgentRunner
-from .langfuse_tracer import LangfuseTracer
+from .langfuse_tracer import from_env
 from .trace import render_timing, render_trace
 
 __all__ = ["main", "USAGE"]
@@ -31,8 +31,10 @@ USAGE = """用法：python -m traffic_law_qa.agent "问题" [选项]
   --top-k N        证据条数上限，默认取 RAG_TOP_K
   --no-vector      只用 BM25 检索
   --langfuse       把节点状态、模型调用与检索上报到 Langfuse 云端
-                   （需 .env 里配 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY，
-                   并先装 pip install -e ".[langfuse]"；不配就只是不打这份报告）
+                   （**这本来就是默认** —— .env 里配了 LANGFUSE_PUBLIC_KEY /
+                   LANGFUSE_SECRET_KEY 就自动开，写出来只为让默认可点名，同 --trace。
+                   还需 pip install -e ".[langfuse]"；没配就一个字节都不外发）
+  --no-langfuse    强制关掉上报（跑批时不想让每一题都往云端灌就加这个）
   --linear         走单轮管道作对照（不发规划轮请求）
 
 决策链在终端里会给「没取到」那种行上色（黄）；重定向到文件时自动不上色。
@@ -55,31 +57,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--timing", action="store_true")
     parser.add_argument("--no-vector", action="store_true")
     parser.add_argument("--langfuse", action="store_true")
+    parser.add_argument("--no-langfuse", action="store_true")
     parser.add_argument("--linear", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser
-
-
-def _langfuse_tracer(enabled: bool) -> LangfuseTracer | None:
-    """`--langfuse` → 一个真 tracer；任何一步不成就退回 None（= 不观测）。
-
-    **失败只降级、不中断**：没配 key、没装 extra、SDK 版本不对，都只是这一次不上报。
-    提示一律走 stderr —— `--json` 的 stdout 一个字节都不许被污染。
-    打印只出现 host：两个 key 是秘密，任何一部分都不进日志。
-    """
-    if not enabled:
-        return None
-    cfg = config.langfuse_config()
-    if not cfg.ready:
-        print("--langfuse 忽略：未配置 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY", file=sys.stderr)
-        return None
-    try:
-        tracer = LangfuseTracer(cfg)
-    except Exception as exc:  # noqa: BLE001 - 观测装不上，不该拦住提问
-        print(f'--langfuse 忽略：{exc}（装法：pip install -e ".[langfuse]"）', file=sys.stderr)
-        return None
-    print(f"[langfuse] 观测已开启：{cfg.host}（key 不打印）", file=sys.stderr)
-    return tracer
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -101,9 +82,11 @@ def main(argv: list[str] | None = None) -> int:
     cfg = replace(config.agent_config(), **overrides) if overrides else None
 
     color = sys.stdout.isatty()
-    langfuse = _langfuse_tracer(options.langfuse)
+    langfuse = None if options.no_langfuse else from_env()
     recorder = Recorder() if options.timing else None
-    tracer = langfuse or recorder
+    # 兜底的 `Tracer()` 不能省：`tracer=None` 对 `load()` 的含义是「没指定，去问 .env」，
+    # 而 `--no-langfuse` 要的正好是相反的事。
+    tracer = langfuse or recorder or Tracer()
 
     try:
         runner = AgentRunner.load(
@@ -128,8 +111,7 @@ def main(argv: list[str] | None = None) -> int:
             print(str(exc))
             return 1
         finally:
-            if langfuse is not None:
-                langfuse.flush()
+            tracer.flush()
         if not options.json:
             print(render_trace(state, color=color))
         answer = state.get("answer")

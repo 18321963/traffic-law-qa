@@ -11,9 +11,9 @@
 （把 span 与节点状态送到 Langfuse 云端）。**本文件自己零依赖、不 import 任何后端** ——
 这里要的是一个有边界的钩子，不是一套观测体系；真后端在它自己那个文件里，且是可选的 extra。
 
-钩子有三个，都是「基类空实现 + 子类覆写」：`span()` 计时、`observation()` 记一次 LLM 调用
-或检索、`record()` 收节点的入参与出参。要接别的后端，继承 `Tracer` 覆写它们即可 ——
-调用方一行都不用改。
+钩子有四个，都是「基类空实现 + 子类覆写」：`span()` 计时、`observation()` 记一次 LLM 调用
+或检索、`record()` 收节点的入参与出参、`flush()` 收尾把攒着的排空。要接别的后端，继承
+`Tracer` 覆写它们即可 —— 调用方一行都不用改。
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ __all__ = ["Tracer", "Recorder", "traced"]
 
 
 class Tracer:
-    """空实现。三个钩子都返回自己，于是 `with` 与 `update` 全都落到这两个 no-op 上。"""
+    """空实现。前三个钩子都返回自己，于是 `with` 与 `update` 全都落到这两个 no-op 上。"""
 
     def span(self, name: str) -> "Tracer":
         return self
@@ -43,6 +43,13 @@ class Tracer:
 
     def update(self, **fields: Any) -> None:
         """空实现下 `observation()` 返回的正是自己，所以这个 no-op 必须存在。"""
+
+    def flush(self) -> None:
+        """收尾。真后端要在这把后台攒着的批量导出排空（不排空就退出会丢最后几条）。
+
+        它跟另外三个钩子不同：**调用方不必知道观测开没开就敢调** —— 跑批收尾只有一处，
+        不该为了「没开观测」包一层 `if`。所以空实现放在基类上，`Recorder` 继承即可。
+        """
 
     def __enter__(self) -> "Tracer":
         return self

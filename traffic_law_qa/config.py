@@ -137,6 +137,25 @@ def region_llm_config() -> LLMConfig:
     )
 
 
+def review_llm_config() -> LLMConfig:
+    """末端复核的模型；**未配置时逐字段回退到 `region_llm_config()`**（再往下一层是 `llm_config()`）。
+
+    为什么默认就复用入口那只：复核与入口是同一类活（一段短 JSON 判断，要判得准且便宜），
+    而**它绝不能是主模型** —— 让生成答案的那只模型给自己的答案打分，等于自己判自己；
+    档位上也说得通：入口与复核都是「一次调用、一段 JSON」，主模型是「多轮工具调用」。
+
+    回退链 `review → region → llm` 与 `region → llm` 同形，三项仍是逐字段回退：
+    只想换复核模型时只写 `AGENT_REVIEW_MODEL` 一项。⚠️ 模型名同样不跨家（理由见上）。
+    """
+    base = region_llm_config()
+    return LLMConfig(
+        base_url=_env("AGENT_REVIEW_BASE_URL") or base.base_url,
+        api_key=_env("AGENT_REVIEW_API_KEY") or base.api_key,
+        model=_env("AGENT_REVIEW_MODEL") or base.model,
+        temperature=base.temperature,
+    )
+
+
 def embed_config() -> EmbedConfig:
     """向量模型配置；未单独配置时回退复用 LLM 端点。"""
     base_url = _env("EMBED_BASE_URL") or _env("LLM_BASE_URL", "https://api.deepseek.com/v1")
@@ -184,6 +203,13 @@ class AgentConfig:
     article_chars: int = 400
     temperature: float = 0.0
     retries: int = 2
+    review_min_score: float = 0.6
+    """末端复核的拦截阈值。`< 0` 关掉复核节点、`0` 只打分不拦截、`> 0` 才拦（`score < 阈值`）。
+
+    **0.6 是占位值，不是标定值** —— 「正确率 / 拒答率」两条曲线还没跑（要跑批，烧 LLM 额度）。
+    今天能说的是它的量级：120 条真答案里引用编号个数 ≤3 的占 70%，也就是多数答案只需要
+    3 条判据里错 1 条就会被拦下来。真跑完标定再回来改这个数。
+    """
 
 
 def agent_config() -> AgentConfig:
@@ -194,12 +220,13 @@ def agent_config() -> AgentConfig:
         article_chars=_env_int("AGENT_ARTICLE_CHARS", 400),
         temperature=_env_float("AGENT_TEMPERATURE", 0.0),
         retries=_env_int("AGENT_RETRIES", 2),
+        review_min_score=_env_float("AGENT_REVIEW_MIN_SCORE", 0.6),
     )
 
 
 @dataclass(frozen=True)
 class LangfuseConfig:
-    """Langfuse 云端追踪的凭据（可选，只有 agent 命令行用）。
+    """Langfuse 云端追踪的凭据（可选；配了就开，agent / 评测 / 脚本都读它）。
 
     两个 key 缺一即 `ready=False`，此时一个客户端都不建、一个字节都不外发 ——
     与没有这个功能时逐位相同。**host 不是秘密，两个 key 是**：任何打印只许出现 host。

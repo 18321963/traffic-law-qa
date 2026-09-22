@@ -1,4 +1,4 @@
-"""把 agent 的节点状态、模型调用与检索送到 Langfuse 云端（可选，`--langfuse` 才走到这里）。
+"""把 agent 的节点状态、模型调用与检索送到 Langfuse 云端（可选；配了 key 就自动开）。
 
 `obs.Tracer` 的空实现保住了「不观测时逐位不变」，这个文件是它的第一个真后端：
 继承 `Recorder`（于是 `--timing` 与云端可以同时开），覆写 `span()` / `observation()` / `record()`。
@@ -32,7 +32,7 @@ from typing import Any
 from .. import config
 from ..obs import Recorder
 
-__all__ = ["LangfuseTracer"]
+__all__ = ["LangfuseTracer", "from_env"]
 
 _MAX_CHARS = 400
 _MAX_ITEMS = 20
@@ -237,3 +237,32 @@ class LangfuseTracer(Recorder):
             self._client.flush()
         except Exception as exc:  # noqa: BLE001 - 观测失败不许弄坏一次提问
             self._warn(f"flush 失败：{exc}")
+
+
+def from_env() -> LangfuseTracer | None:
+    """**配了就开**：`.env` 里两个 key 齐全就给一个真 tracer，否则 None（= 不观测）。
+
+    `AgentRunner.load()` 拿它当默认观测 —— 于是命令行、评测、临时脚本走的是同一条路。
+    在它之前，观测挂在 `--langfuse` 这个开关上，而开关只在 `agent/cli.py` 那一处：
+
+        tracer = Tracer()      # obs.py 里那个全 no-op 的基类
+        runner = AgentRunner(...)
+
+    临时脚本显式传一个空替身（很自然，因为它要跟 `RecordingLLM` 共用一个 tracer），
+    整轮就一个字节都不外发，而**跑的人以为自己一直在被记录**。默认开之后，想安静要
+    显式说：命令行 `--no-langfuse`，代码里 `tracer=Tracer()`。
+
+    工厂放这个文件而不是 `obs.py`：`obs.py` 是零依赖的钩子（它自己写着「不 import 任何
+    后端」），而这个函数天生要认识 config 与 langfuse。没配 key 时它一个客户端都不建 ——
+    与没有这个功能时逐位相同。
+    """
+    cfg = config.langfuse_config()
+    if not cfg.ready:
+        return None
+    try:
+        tracer = LangfuseTracer(cfg)
+    except Exception as exc:  # noqa: BLE001 - 观测装不上，不该拦住提问
+        print(f'[langfuse] 观测未开启：{exc}（装法：pip install -e ".[langfuse]"）', file=sys.stderr)
+        return None
+    print(f"[langfuse] 观测已开启：{cfg.host}（key 不打印）", file=sys.stderr)
+    return tracer
