@@ -23,13 +23,16 @@
 所以 `qa()`、`RagPipeline`、`AgentRunner`、FastAPI 服务调的都是同一个 `LegalRAG`，
 四家不各拿一份检索器。
 
-每个模块都可以单独作为脚本执行，便于分步调试 —— **子包名就是包路径的一部分**：
+命令行入口全在下面这几处，其余模块都是纯库（`kb/` 那四个、`agent/cli.py`、`eval/harness.py`
+都不带 `__main__` 块）—— **子包名就是包路径的一部分**：
 
-    python -m traffic_law_qa.kb.docx_reader
-    python -m traffic_law_qa.kb.law_parser --force
-    python -m traffic_law_qa.kb.chunker --show 第八条
-    python -m traffic_law_qa.kb.indexer --query 醉驾
+    python -m traffic_law_qa "问题" [--agent]        # 问答唯一一条门；--agent 才走 Agent 循环
     python -m traffic_law_qa.pipeline build | status | layers
+    python -m traffic_law_qa.pipeline docx | parse | chunk | index    # 建库四步，可以只重跑一步
+    python -m traffic_law_qa.eval | …eval.corpus | …eval.singlehop | …eval.multihop
+    python -m traffic_law_qa.server
+
+全清单（含 `tlq-qa` / `tlq-serve` 两个短命令）与各自旗标见 README 的「所有入口」。
 """
 
 from .api import QaError, qa, render

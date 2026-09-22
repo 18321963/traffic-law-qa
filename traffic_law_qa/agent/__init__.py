@@ -8,7 +8,7 @@
     prompts.py  三份提示词
     llm.py      带工具调用能力的客户端
     trace.py    终态 → 人读的决策链（纯函数）
-    cli.py      `python -m traffic_law_qa.agent` 的入口
+    cli.py      agent 模式的实现；入口是包门 `python -m traffic_law_qa "问题" --agent`
     tools/      两个工具：search_law / get_article —— schemas / arguments / articles / render / merge
     langfuse_tracer.py  云端观测：节点状态 / 模型调用 / 检索 → Langfuse（配了 key 自动开）
 
