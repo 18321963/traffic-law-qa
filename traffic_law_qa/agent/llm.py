@@ -31,8 +31,8 @@ def _arguments(call: Any) -> str:
 
     脏值一旦写进 `history` 就赖着不走了 —— 之后**每一次**请求都会带上它，整条题
     在重试耗尽后抛 RuntimeError 中断。宁可当空参数：`parse_tool_arguments` 会抛
-    ValueError，节点把它转成「参数不合法，请修正后重试」的观察结果
-    （`nodes.py:109`），模型下一轮自己会改。一次退化成空参，好过整条题报废。
+    ValueError，工具轮把它转成「参数不合法，请修正后重试」的观察结果
+    （`loop.py` 的 `make_tools_node`），模型下一轮自己会改。一次退化成空参，好过整条题报废。
     """
     raw = getattr(call.function, "arguments", None)
     try:

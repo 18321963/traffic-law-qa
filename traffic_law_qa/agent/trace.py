@@ -84,10 +84,12 @@ def render_trace(state: AgentState, *, color: bool = False) -> str:
     answer = state.get("answer")
     if answer is not None:
         for note in answer.notes:
-            if note.startswith(("Agent：", "已达", "规划轮", "本轮未取到", "共 ", "证据按")):
+            # 前缀白名单：不在名单里的 note 只活在 `--json` 里，人看的这条链上**不会出现**。
+            # 新增一类 note 时这里要一起加，否则「复核未通过」这种最该被看见的行会静默消失。
+            if note.startswith(("Agent：", "已达", "规划轮", "本轮未取到", "共 ", "证据按", "复核")):
                 lines.append(
                     _paint(f"[agent] {note}", "yellow", color)
-                    if note.startswith(("已达", "本轮未取到"))
+                    if note.startswith(("已达", "本轮未取到", "复核未通过", "复核未完成"))
                     else f"[agent] {note}"
                 )
     return "\n".join(lines)

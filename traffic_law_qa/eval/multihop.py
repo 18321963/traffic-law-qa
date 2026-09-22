@@ -46,7 +46,7 @@ from typing import Any
 
 from .. import config
 from ..agent.llm import ToolCallingLLM
-from ..agent.tools import build_article_index, parse_article_no, resolve_law_id
+from ..agent.tools.articles import build_article_index, parse_article_no, resolve_law_id
 from ..agent.trace import render_trace
 from ..contracts import ParentChunk
 from .corpus import RE_ARTICLE, RE_LAW
@@ -711,12 +711,25 @@ def trace(
                     "searches": state.get("search_log") or [],
                     "usage": state.get("usage") or [],
                     "trace": render_trace(state),
+                    # 末端复核的结果（含**降级前**的原文，那时 `answer` 那一格是降级文案）。
+                    # 只加这一列、不动任何既有列：`full_budget_summary` 与 `singlehop.metrics`
+                    # 都只读自己那几列，所以这条路的指标不受影响 —— 但下次跑批会把分数分布
+                    # 一并留下，标定阈值时不用再改一次代码。
+                    "review": (
+                        None
+                        if agent_answer is None or agent_answer.review is None
+                        else agent_answer.review.to_dict()
+                    ),
                 },
             }
         )
 
         if out is not None:
             _save(out, rows)
+
+    # 收尾排空观测队列：上报是「配了就开」的，跑批不 flush 会丢最后几题。
+    # 空实现下这一行什么也不做（`obs.Tracer.flush`），所以不必判有没有开观测。
+    runner.tracer.flush()
 
     if out is not None:
         _save(out, rows)

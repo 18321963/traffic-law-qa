@@ -397,7 +397,7 @@ def evaluate_reference(
     `compare_baseline=True` 时额外跑一遍基线检索做对照；Milvus 不可用时
     如实跳过基线那一列，**不**让整个评测失败（离线部分本来就跑得完）。
     """
-    from ..agent.tools import build_article_index, find_article
+    from ..agent.tools.articles import build_article_index, find_article
     from ..kb.chunker import ChunkStage
 
     data_path = Path(data_path or config.EVAL_REFERENCE_PATH)

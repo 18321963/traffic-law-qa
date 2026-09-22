@@ -1,6 +1,8 @@
-"""三个走 LLM / 检索的节点：规划轮、工具执行轮、收尾轮。
+"""循环本身的三个节点：规划轮、工具执行轮、收尾轮。
 
-入口的地区判定在 `region.py`（它只答一个与循环无关的判断题，契约不同）。
+循环**外**那两次调用在 `region.py`（入口判地区）与 `review.py`（末端复核）—— 它们只答一道
+与循环无关的判断题，各自拿一只便宜的模型、温度钉死 0、**失败即放行**，既不写 `messages`
+也不进 `usage`，契约与本模块不同，所以不在这里。
 
 **收尾轮复用既有的 `AnswerGenerator`，提示词一个字都不改** —— 它把 N 次检索合并回一个
 `RetrievalResult`，原样交给 `answer()`。所以「Agent 的答案」和「线性管道的答案」是同一段
@@ -19,18 +21,15 @@ from ..qa.rag import LegalRAG
 from .llm import ToolCallingLLM
 from .prompts import AGENT_SYSTEM_PROMPT
 from .state import AgentState
-from .tools import (
+from .tools.arguments import parse_article_arguments, parse_tool_arguments, tool_message
+from .tools.articles import lookup_article, resolve_law_id
+from .tools.merge import merge_retrievals
+from .tools.render import render_tool_result
+from .tools.schemas import (
     GET_ARTICLE_NAME,
     GET_ARTICLE_TOOL,
     SEARCH_LAW_NAME,
     SEARCH_LAW_TOOL,
-    lookup_article,
-    merge_retrievals,
-    parse_article_arguments,
-    parse_tool_arguments,
-    render_tool_result,
-    resolve_law_id,
-    tool_message,
 )
 
 __all__ = [
@@ -337,7 +336,7 @@ def make_finalize_node(
 ):
     """收尾：把累积的证据合并回一个 RetrievalResult，交给既有生成器。
 
-    读：question / history / search_log / steps / max_steps / usage / top_k
+    读：question / history / messages / search_log / steps / max_steps / usage / top_k
     写：{"answer": Answer, "search_log": [兜底检索那一行，否则 []]}
 
     **这里不喂工具历史、也不 bind_tools** —— 从零重建一次「问题 + 依据」的提示词。
