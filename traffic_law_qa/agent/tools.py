@@ -96,7 +96,7 @@ def resolve_law_id(
     模型下一轮就能自己改对。这顺带白捡了「让 Agent 知道库边界 → 抑制库外法名幻觉」
     的能力，不用为此新增一个 list_laws 工具。
 
-    **不引 eval.LawResolver**：`parents` 里本来就躺着全部法规的 law_name 与 law_id，
+    **不引 eval.corpus.LawResolver**：`parents` 里本来就躺着全部法规的 law_name 与 law_id，
     引评测模块只会把 dev 工具拖进 agent 热路径。
     """
     table = {p.law_name: p.law_id for p in parents.values()}
@@ -203,8 +203,7 @@ def parse_article_no(raw: str) -> int | None:
     """条号 → int。接受「第九十条」「第90条」「90」。解析不出返回 None。
 
     中文数字那一支复用 `law_parser.cn_to_int`（它只吃纯中文数字，所以先剥「第」「条」）。
-    不重写一份：那个函数已被 tests/test_law_parser.py 的参数化用例覆盖，
-    连"第91条"/"91"/"abc" 这类非法输入的行为都锁死了。
+    不重写一份 —— 同一件事有两份实现，就迟早有两份不一致。
     """
     text = (raw or "").strip()
     if not text:
@@ -447,7 +446,7 @@ def _snippet(text: str, query: str, width: int) -> str:
     但**只给窗口还不够**。列举型法条里「处罚」和「情形」是天各一方的：
     处罚在帽子句（「…有下列行为之一的，处三百元罚款：」），情形在列举项里。
     实测第十三条，查询对齐后窗口正确落到了「（七）手动操作移动电话」——
-    结果模型看见「有这一项」却看不见「罚多少」，审核节点照样判「缺罚款具体数额」。
+    结果模型看见「有这一项」却看不见「罚多少」，那一轮照样被判成「缺罚款具体数额」。
     所以要**帽子句 + 最佳窗口两头都给**；窗口本来就在开头时合成一段，不重复也不拼接。
 
     一个二元组都命不中时退回开头（此时本文与查询确实没有字面重叠）。

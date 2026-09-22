@@ -1,12 +1,12 @@
-"""图的装配（5 个节点 + 3 个路由）与门面 `AgentRunner`。
+"""图的装配（4 个节点 + 2 个路由）与门面 `AgentRunner`。
 
-    START → region → agent ─┬─(有 tool_calls)→ tools → reflect
-                            │                          │
-                            │            (不够 且 补得上 且 有预算) → 回到 agent
-                            │                          │
-                            └─(无 tool_calls)───┐  (够了 / 预算尽 / 缺口在库外)
-                                                ↓      ↓
-                                             finalize → END
+    START → region → agent ─┬─(有 tool_calls)→ tools ─(还有预算)→ 回 agent
+                            │                 └─(预算尽)──────┐
+                            └─(无 tool_calls)─────────────────┴→ finalize → END
+
+**停止由规划轮自己说**：这一轮的助手消息没有 `tool_calls` 就是「证据够了」，直接进作答 ——
+标准 ReAct 的形状。代价是「停」要交给一只手上正握着工具的模型（它天然有调用倾向），
+提示词里那段停止条件因此写得比别的几段都重。
 
 **回边指向 agent 而不是 region**：地区只在入口判一次。第二轮再判一遍纯属浪费一次调用，
 而且可能判出不同地区导致检索作用域抖动 —— 同一道题的证据范围在运行中来回变，就没法解释了。
@@ -16,9 +16,6 @@
 
 **只用 LangGraph 的状态机，不用它的 LLM 抽象层。** 带工具的调用直接走 `openai` SDK，
 于是 state 里的 `messages` 就是 OpenAI 线上格式的 `list[dict]`。
-
-设计论证（为什么 reflect 独立成节点、`retrievable` 是怎么补上的、`recursion_limit` 的
-实测最小值、收尾三种成因）见 `docs/DESIGN.md`。
 """
 
 from __future__ import annotations
@@ -31,7 +28,6 @@ from ..obs import Tracer, traced
 from ..qa.rag import LegalRAG
 from .llm import ToolCallingLLM
 from .nodes import TOOLS, make_agent_node, make_finalize_node, make_tools_node
-from .reflect import make_reflect_node
 from .region import REGION_UNKNOWN, make_region_node
 from .state import AgentState
 from .tools import build_article_index
@@ -40,35 +36,31 @@ __all__ = ["route_after_agent", "build_graph", "AgentRunner"]
 
 
 def route_after_agent(state: AgentState) -> Literal["tools", "finalize"]:
-    """最后一条消息带 tool_calls → 必须先去 tools，**没有任何例外**。
+    """最后一条消息带 tool_calls → 必须先去 tools；不带 → 模型自己说够了，进作答。
+
+    这是全图的停止信号：**「够了」不是一句判断，而是「这一轮没调工具」这个动作本身**。
 
     绝不能在这里看预算：一旦在预算用尽时直接跳到 finalize，历史里就会留下一条
     带 tool_calls 却没有对应 tool 消息的助手消息，OpenAI 兼容端点会直接返回 400。
+    预算的守门在 `_route_after_tools` —— 那里最后一条一定是 tool 消息。
     """
     messages = state.get("messages") or []
     return "tools" if messages and messages[-1].get("tool_calls") else "finalize"
 
 
-def _route_after_reflect(state: AgentState) -> Literal["agent", "finalize"]:
-    """审核说不够、缺口补得上、且还有预算 → 回规划轮再查一次；否则收尾。
+def _route_after_tools(state: AgentState) -> Literal["agent", "finalize"]:
+    """工具跑完：还有预算就回规划轮再查一轮，预算用尽就直接收尾作答。
 
-    三个条件是与的关系，缺一不可：**够不够**（`sufficient`）、**补不补得上**
-    （`retrievable`，缺口在库外时再检索一百次也检不到，回边只会白烧一轮检索加两次模型
-    调用）、**还有没有预算**。
+    **这是全图唯一检查预算的地方**，位置由 `route_after_agent` 那条约束反推出来：
+    只有在这里跳 finalize 是安全的，因为最后一条消息一定是 `tools` 产出的 tool 消息，
+    不存在悬空的 tool_calls。
 
-    预算在这里现算（`max_steps - steps`），不落进 state：需要「递减」的字段在
-    `operator.add` reducer 下是读-改-写，写错就是双倍消耗，而且路由器是纯函数、
-    本来就没有写权限。
-
-    放这里而不是 tools 的出边，是因为这三件事本来就是同一个决策的几半，合在一处判断
-    才不会出现「审核说不够、但已经没轮次了」的中间态。
+    预算尽时**不再调一次模型**（从前由审核节点的短路承担同一件事）：那一轮反正要作答，
+    问了也是白花一次调用。判据里的 `steps` 是已发生的规划轮数，由 `agent` 节点累加；
+    「递减」的字段不落进 state —— 在 `operator.add` reducer 下是读-改-写，写错就是双倍
+    消耗，而且路由器是纯函数、本来就没有写权限。
     """
-    reflections = state.get("reflections") or []
-    verdict = reflections[-1] if reflections else None
-    if verdict and not verdict.get("sufficient"):
-        if verdict.get("retrievable", True) and state.get("max_steps", 0) - state.get("steps", 0) > 0:
-            return "agent"
-    return "finalize"
+    return "agent" if state.get("max_steps", 0) - state.get("steps", 0) > 0 else "finalize"
 
 
 def build_graph(
@@ -76,28 +68,27 @@ def build_graph(
     rag: LegalRAG,
     llm: ToolCallingLLM,
     cfg: config.AgentConfig,
-    reflect_llm: ToolCallingLLM | None = None,
+    region_llm: ToolCallingLLM | None = None,
     tracer: Tracer | None = None,
 ):
-    """装配图。`reflect_llm` 是**判断题那一只**模型：入口的地区判定与审核轮共用它，
-    规划轮用主模型 —— 前者要的是判得准且便宜，后者要的是会调工具。"""
+    """装配图。`region_llm` 是**入口判地区那一只**模型 —— 要的是判得准且便宜；
+    循环用主模型，它要的是会调工具、也会自己判断什么时候停。"""
     from langgraph.graph import END, START, StateGraph
 
     tracer = tracer or Tracer()
 
-    reflect_llm = reflect_llm or llm
+    region_llm = region_llm or llm
 
     parents = rag.parents
     by_number = build_article_index(parents)
     laws = sorted({parent.law_name for parent in parents.values()})
 
     graph = StateGraph(AgentState)
-    graph.add_node("region", traced(tracer, "node.region", make_region_node(reflect_llm, parents, laws)))
-    graph.add_node("agent", traced(tracer, "node.agent", make_agent_node(llm, cfg)))
+    graph.add_node("region", traced(tracer, "node.region", make_region_node(region_llm, parents, laws)))
+    graph.add_node("agent", traced(tracer, "node.agent", make_agent_node(llm, cfg, laws)))
     graph.add_node(
         "tools", traced(tracer, "node.tools", make_tools_node(rag, cfg, by_number, observer=tracer))
     )
-    graph.add_node("reflect", traced(tracer, "node.reflect", make_reflect_node(reflect_llm, cfg, laws)))
     graph.add_node(
         "finalize", traced(tracer, "node.finalize", make_finalize_node(rag, cfg, observer=tracer))
     )
@@ -107,9 +98,8 @@ def build_graph(
     graph.add_conditional_edges(
         "agent", route_after_agent, {"tools": "tools", "finalize": "finalize"}
     )
-    graph.add_edge("tools", "reflect")
     graph.add_conditional_edges(
-        "reflect", _route_after_reflect, {"agent": "agent", "finalize": "finalize"}
+        "tools", _route_after_tools, {"agent": "agent", "finalize": "finalize"}
     )
     graph.add_edge("finalize", END)
     return graph.compile()
@@ -132,7 +122,7 @@ class AgentRunner:
         rag: LegalRAG,
         *,
         llm: ToolCallingLLM | None = None,
-        reflect_llm: ToolCallingLLM | None = None,
+        region_llm: ToolCallingLLM | None = None,
         cfg: config.AgentConfig | None = None,
         tracer: Tracer | None = None,
     ) -> None:
@@ -140,7 +130,7 @@ class AgentRunner:
         self.cfg = cfg or config.agent_config()
         self.tracer = tracer or Tracer()
         self.llm = llm or ToolCallingLLM(retries=self.cfg.retries, observer=self.tracer)
-        self.reflect_llm = reflect_llm or self.llm
+        self.region_llm = region_llm or self.llm
         self._graph = None
 
     @property
@@ -162,8 +152,8 @@ class AgentRunner:
             LegalRAG.load(with_vector=with_vector, top_k=top_k),
             cfg=agent_cfg,
             tracer=observer,
-            reflect_llm=ToolCallingLLM(
-                config.reflect_llm_config(), retries=agent_cfg.retries, observer=observer
+            region_llm=ToolCallingLLM(
+                config.region_llm_config(), retries=agent_cfg.retries, observer=observer
             ),
         )
 
@@ -174,7 +164,7 @@ class AgentRunner:
                 rag=self.rag,
                 llm=self.llm,
                 cfg=self.cfg,
-                reflect_llm=self.reflect_llm,
+                region_llm=self.region_llm,
                 tracer=self.tracer,
             )
         return self._graph
@@ -182,7 +172,7 @@ class AgentRunner:
     def invoke(self, question: str | Question) -> AgentState:
         """跑完整图，返回**原始终态**（调试 / 测试 / --json 用）。
 
-        外层 `invoke` span 与内层六个 `node.*` 是平的、不嵌套计时 —— 两者相减就是
+        外层 `invoke` span 与内层四个 `node.*` 是平的、不嵌套计时 —— 两者相减就是
         langgraph 自己的调度开销，那恰好是「20 分钟里有多少是框架的」的答案。
 
         `record(initial, final)` 是给真后端用的：根 span 的入参/出参就是整条 trace 的
@@ -200,11 +190,10 @@ class AgentRunner:
             "search_log": [],
             "steps": 0,
             "usage": [],
-            "reflections": [],
         }
         with self.tracer.span("invoke") as span:
             final = self.graph().invoke(
-                initial, config={"recursion_limit": 3 * self.cfg.max_steps + 6}
+                initial, config={"recursion_limit": 2 * self.cfg.max_steps + 4}
             )
             span.record(initial, final)
         return final
@@ -230,7 +219,7 @@ class AgentRunner:
         return (
             f"Agent：{stats.articles} 条法条 / {stats.chunks} 个子块 | "
             f"稠密通道 {vector_state} | 最多 {self.cfg.max_steps} 轮 | "
-            f"入口判地区（1 次 {self.reflect_llm.cfg.model} 调用，判不出则不限地区） | "
+            f"入口判地区（1 次 {self.region_llm.cfg.model} 调用，判不出则不限地区） | "
             f"工具 2 个（{'、'.join(tool['function']['name'] for tool in TOOLS)}） | "
             f"LLM {self.llm.cfg.model}"
         )

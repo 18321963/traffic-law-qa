@@ -40,6 +40,10 @@ INDEX_META_PATH = INDEX_DIR / "index_meta.json"
 
 DATA_DIR = ROOT / "data"
 EVAL_CORPUS_PATH = DATA_DIR / "eval_corpus.json"
+
+EVAL_RETRIEVAL_PATH = DATA_DIR / "eval_retrieval.json"
+EVAL_REFERENCE_PATH = DATA_DIR / "eval_reference.json"
+EVAL_NOGOLD_PATH = DATA_DIR / "eval_nogold.json"
 EVAL_MULTIHOP_PATH = DATA_DIR / "eval_multihop.json"
 
 ALL_DIRS = (DOCX_DIR, TEXT_DIR, PARSED_DIR, CHUNK_DIR, INDEX_DIR)
@@ -107,26 +111,28 @@ def llm_config() -> LLMConfig:
     )
 
 
-def reflect_llm_config() -> LLMConfig:
-    """审核节点的模型；**未配置时逐字段回退到 `llm_config()`**。
+def region_llm_config() -> LLMConfig:
+    """入口地区裁决的模型；**未配置时逐字段回退到 `llm_config()`**。
 
-    为什么值得单独一个模型：审核是整个循环里唯一一个「判断题 + 严格 JSON 输出」的节点，
-    也是实测下来唯一有明显判断缺口的地方（100 题里 162 次真判定有 64 次误报）；
-    规划轮反而很听话（第 2 轮检索词平均 68% 的字符落在上轮 `missing` 里），不需要换。
+    为什么值得单独一个模型：地区裁决是全循环唯一一处「判断题 + 严格 JSON 输出」，
+    要的是判得准且便宜；规划轮要的是会调工具、也会自己判断什么时候停，两者不是一回事。
 
     回退是**逐字段**的，不是「有一个没配就整体回退」：只想换模型名时写
-    `AGENT_REFLECT_MODEL` 一项即可，不必把 key 和 base_url 再抄一遍。
+    `AGENT_REGION_MODEL` 一项即可，不必把 key 和 base_url 再抄一遍。
     三项都不写 = 与单模型时逐位相同。
 
     ⚠️ 但**模型名不跨家**：`glm-4.7-flash` 只能配智谱的 base_url。只写了模型名而
     base_url 还是百炼的话，端点会回 400 —— 这个失败是响的（`ToolCallingLLM.chat`
     重试后抛 `RuntimeError`），不会静默劣化。
+
+    这三个键 2026-09 之前叫 `AGENT_REFLECT_*`（当时的服务对象是审核节点，那个节点已并入
+    规划轮）。**旧名字不再被读取** —— 留着旧键的 `.env` 会静默回退到 `LLM_*`。
     """
     base = llm_config()
     return LLMConfig(
-        base_url=_env("AGENT_REFLECT_BASE_URL") or base.base_url,
-        api_key=_env("AGENT_REFLECT_API_KEY") or base.api_key,
-        model=_env("AGENT_REFLECT_MODEL") or base.model,
+        base_url=_env("AGENT_REGION_BASE_URL") or base.base_url,
+        api_key=_env("AGENT_REGION_API_KEY") or base.api_key,
+        model=_env("AGENT_REGION_MODEL") or base.model,
         temperature=base.temperature,
     )
 
@@ -172,7 +178,7 @@ class AgentConfig:
     只有一份真源，Agent 不许悄悄换一套检索参数，否则和基线的对照就不是同一个检索了。
     """
 
-    max_steps: int = 2
+    max_steps: int = 3
     max_evidence: int = 0
     snippet_chars: int = 120
     article_chars: int = 400
@@ -182,7 +188,7 @@ class AgentConfig:
 
 def agent_config() -> AgentConfig:
     return AgentConfig(
-        max_steps=_env_int("AGENT_MAX_STEPS", 2),
+        max_steps=_env_int("AGENT_MAX_STEPS", 3),
         max_evidence=_env_int("AGENT_MAX_EVIDENCE", 0),
         snippet_chars=_env_int("AGENT_SNIPPET_CHARS", 120),
         article_chars=_env_int("AGENT_ARTICLE_CHARS", 400),

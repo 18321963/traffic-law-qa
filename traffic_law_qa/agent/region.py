@@ -66,11 +66,20 @@ def national_law_ids(parents: dict[str, ParentChunk]) -> tuple[str, ...]:
 def law_scope(region: str, parents: dict[str, ParentChunk]) -> tuple[str, ...]:
     """地区裁决 → 这次检索限定到哪些 law_id。**空元组 = 不限定（全库）**。
 
-    两条路都退回空元组，且都是宁可退全库：`?`（判不出），以及**库里找不到这个地区**
-    （模型答「广州」，或答「全国」这种不是地区名的词 —— 后者也走这条）。拿一个库内
-    不存在的地区去过滤，结果是一条都检不到。
+    三条路都退回空元组，且都是宁可退全库：`?`（判不出）、**库里找不到这个地区**
+    （模型答「广州」，或答「全国」这种不是地区名的词 —— 后者也走这条），以及**答的是法名**
+    而不是地区（见下）。拿一个库内不存在的地区去过滤，结果是一条都检不到。
+
+    **法名不算地区**：这条是实测撞出来的。判据 `region in p.law_name` 对地区词成立
+    （「深圳」命中两部深圳条例），但对**法名本身**也成立 —— 而模型答不出地区时，很容易
+    顺手把某部法的全名填进 `region`（2026-09-22 实测它就答了《…道路交通安全法实施条例》）。
+    那种输入会让上半段算出「local = 这一部」，于是作用域从 6 部缩到 4 部（答国家法名）
+    或 5 部（答深圳法名）—— **而 region.py 的契约说「其它一切 → 不限定」**。全库判成
+    4 部是静默少检两部深圳条例，比判不出严重得多。所以先认法名、直接退全库。
     """
     if not region or region == REGION_UNKNOWN:
+        return ()
+    if region in {p.law_name for p in parents.values()}:
         return ()
     local = tuple(sorted({p.law_id for p in parents.values() if region in p.law_name}))
     if not local:

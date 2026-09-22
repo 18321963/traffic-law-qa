@@ -1,10 +1,10 @@
-"""题集 A（82 道单跳域内题）上的 rag vs agent 对照。
+"""题集 A（data/eval_retrieval.json，82 道单跳域内题）上的 rag vs agent 对照。
 
     python -m traffic_law_qa.eval.singlehop --compare --limit 5 --out data/traces/single5.json
     python -m traffic_law_qa.eval.singlehop --compare --out data/traces/single82.json
 
-**与多跳那套正相反**：题集 A 的 gold 只有一条法条，问题本身**不需要多跳**
-（题面既不含条号也不含法名，构造时就滤掉了）。所以这里问的是
+**与多跳那套正相反**：题集 A 的 gold 落在少数几条里（77 道 1 条、2 道 2 条、3 道 4 条），
+问题本身**不需要多跳**（题面既不含条号也不含法名，构造时就滤掉了）。所以这里问的是
 「Agent 在不需要它的题上加了多少、又花了多少」。
 
 **两条口径必须分开报**，混在一起就是拿「多打几枪」冒充「打得准」：
@@ -39,11 +39,10 @@ def run(
 ) -> list[dict]:
     """跑题集 A 的两条臂，落盘，返回与多跳那套同格式的行。"""
     from .. import config
-    from .harness import _kb_index, build_cases
+    from .corpus import load_bucket
     from .multihop import trace
 
-    resolver, _known, id_of = _kb_index()
-    cases, _no_gold, _named = build_cases(config.EVAL_CORPUS_PATH, resolver, id_of)
+    cases = load_bucket(config.EVAL_RETRIEVAL_PATH)
     if not cases:
         from ..api import QaError
 
@@ -80,7 +79,7 @@ def metrics(rows: list[dict], *, top_k: int = 6) -> str:
 
     arms = {"rag 单次": [], "agent 首轮": [], "agent 合并": []}
     candidates = dict.fromkeys(arms, 0)
-    plans = searches = reviews = 0
+    plans = searches = 0
 
     for row in rows:
         gold = set(row["gold_ids"])
@@ -94,7 +93,6 @@ def metrics(rows: list[dict], *, top_k: int = 6) -> str:
 
         searches += len(row["agent"]["searches"])
         plans += len(row["agent"]["usage"])
-        reviews += len(row["agent"]["reflections"])
 
     n = len(rows)
     lines = [
@@ -110,7 +108,7 @@ def metrics(rows: list[dict], *, top_k: int = 6) -> str:
 
     lines += [
         "",
-        f"  agent 平均：{plans / n:.1f} 轮 LLM 规划 / {searches / n:.1f} 次检索 / {reviews / n:.1f} 轮审核",
+        f"  agent 平均：{plans / n:.1f} 轮 LLM 规划 / {searches / n:.1f} 次检索",
         "",
         "  ⚠ 「agent 合并」的候选数是另两格的两倍，**不同分母，别直接比 hit@k** ——",
         "     它只说明查得多，不说明查得准。要判断 agent 强不强，看「agent 首轮」那一格。",

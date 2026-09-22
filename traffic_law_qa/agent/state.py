@@ -26,7 +26,6 @@ class AgentState(TypedDict, total=False):
     search_log: Annotated[list[dict], operator.add]
     steps: Annotated[int, operator.add]
     usage: Annotated[list[dict], operator.add]
-    reflections: Annotated[list[dict], operator.add]
 
     region: str
     region_scope: tuple[str, ...]

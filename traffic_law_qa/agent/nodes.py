@@ -1,6 +1,6 @@
 """三个走 LLM / 检索的节点：规划轮、工具执行轮、收尾轮。
 
-入口的地区判定在 `region.py`，审核轮在 `reflect.py`（它不绑工具，契约不同）。
+入口的地区判定在 `region.py`（它只答一个与循环无关的判断题，契约不同）。
 
 **收尾轮复用既有的 `AnswerGenerator`，提示词一个字都不改** —— 它把 N 次检索合并回一个
 `RetrievalResult`，原样交给 `answer()`。所以「Agent 的答案」和「线性管道的答案」是同一段
@@ -42,6 +42,34 @@ __all__ = [
 
 TOOLS = [SEARCH_LAW_TOOL, GET_ARTICLE_TOOL]
 
+_NO_FRESH_EVIDENCE = (
+    "⚠ 本轮一条新证据都没取到（命中的条上一轮都已经给过你了）。同一个方向换词换不出新东西 ——"
+    "要么改问你真正缺的那个要素，要么就此停下作答。\n"
+)
+
+_NO_EVIDENCE_STOP_NUDGE = (
+    "你这一轮没有调用任何工具，而手上一条证据都还没有 ——「够了」这个判断此刻无凭无据，"
+    "循环只会把它读成「模型说够了」直接去作答。请调用 search_law 查一次"
+    "（规则 2 的问法：一字不改地用用户的问题原文）。"
+)
+
+
+def _sum_usage(first: dict, second: dict) -> dict:
+    """两次调用合成一行 —— `usage` 的行数被 `_trajectory_notes` 当作规划轮数来数。"""
+    if not first or not second:
+        return first or second or {}
+    return {key: (first.get(key) or 0) + (second.get(key) or 0) for key in set(first) | set(second)}
+
+
+def _unearned_stop(reply: dict, state: AgentState) -> bool:
+    """这一次「停」有没有资格：没发工具调用，**且手上一条证据都没有**。
+
+    判「够了」要有证据可判。零证据又停，只有一个解释：模型把「缺什么」写成了正文，
+    没有把缺的东西写成那一轮的工具调用。有证据的停（查过一轮之后自己收手）是合法的，
+    不在此列 —— 那是这个循环唯一的停止信号。
+    """
+    return not reply.get("tool_calls") and not state.get("search_log")
+
 
 def _retrieval_digest(result: RetrievalResult) -> dict:
     """检索观察的输出：命中几条、走了哪条通道、多快、头三条是谁。
@@ -58,17 +86,37 @@ def _retrieval_digest(result: RetrievalResult) -> dict:
     }
 
 
-def make_agent_node(llm: ToolCallingLLM, cfg: config.AgentConfig):
-    """规划轮。
+def make_agent_node(llm: ToolCallingLLM, cfg: config.AgentConfig, laws: list[str]):
+    """规划轮。**这个节点同时管判断与检索**：它说「够了」的方式就是不调用工具。
 
     读：question / history / messages / max_steps
     写：{"messages": [助手消息], "steps": 1, "usage": [一行]}
+
+    `laws` 是**库内全部法规名**，写进提示词当「库的边界」。没有它，模型分不清「这一轮没
+    检出来」和「库里根本没有」，会把预算全烧在补不上的缺口上。名单纯从 `parents` 现取，
+    不写死一份：新增法规时不该有人记得来这里改。
+
+    **预算不在这个节点里判**：进得来就说明还有轮次（由 `_route_after_tools` 保证），
+    所以工具照给 —— 模型不必靠「工具被收走」来知道该停。
+
+    **零证据的「停」不成立，会重问一次。** 判「够了」得有证据可判；手上一条都没有时那一轮
+    助手消息却不带 `tool_calls`，只有一个解释 —— 模型把「缺什么」写成了正文，而没把缺的东西
+    写成那一轮的工具调用（2026-09-22 实测：4 次实跑里 2 次这样，那一轮零检索，6 条证据全是
+    收尾节点兜底捞的）。第一次停若手上没证据，就追加一句纠正再问一次，**上限一次**：
+    第二次仍不调工具就照旧收尾，走兜底检索那条路，不会在这里转圈。
     """
+
+    laws_block = "\n".join(f"- {name}" for name in laws)
+    law_count = len(laws)
 
     def agent_node(state: AgentState) -> dict:
         max_steps = state.get("max_steps", cfg.max_steps)
         prompt: list[dict] = [
-            {"role": "system", "content": AGENT_SYSTEM_PROMPT % {"max_steps": max_steps}}
+            {
+                "role": "system",
+                "content": AGENT_SYSTEM_PROMPT
+                % {"max_steps": max_steps, "law_count": law_count, "laws": laws_block},
+            }
         ]
         prompt.extend({"role": r, "content": c} for r, c in state.get("history") or ())
         prompt.append({"role": "user", "content": state["question"]})
@@ -77,6 +125,15 @@ def make_agent_node(llm: ToolCallingLLM, cfg: config.AgentConfig):
         reply, usage = llm.chat(
             prompt, tools=TOOLS, temperature=cfg.temperature, name="llm.agent"
         )
+
+        if _unearned_stop(reply, state):
+            prompt.append(reply)
+            prompt.append({"role": "user", "content": _NO_EVIDENCE_STOP_NUDGE})
+            reply, extra = llm.chat(
+                prompt, tools=TOOLS, temperature=cfg.temperature, name="llm.agent"
+            )
+            usage = _sum_usage(usage, extra)
+
         return {"messages": [reply], "steps": 1, "usage": [usage]}
 
     return agent_node
@@ -104,6 +161,11 @@ def make_tools_node(
 
     `observer` 只用来给每次检索记一笔（观察类型 `retriever`），与检索结果无关；
     不传就是空实现，逐位不变。
+
+    **一条新证据都没取到的那一轮，工具消息开头会加一句警告**（`_NO_FRESH_EVIDENCE`）。这是
+    「这轮白查了」唯一可信的信号：拿检索词的字面相似度去判重复实测分不开 —— 同一句话删掉一个
+    字的重复对是 0.983，而「罚多少 / 记多少分」这种**合法续查**是 0.927，中间没有安全的阈值。
+    只有「返回的条一条都不新」是硬事实，而且它不拦检索、不丢证据，只是把话说破。
     """
 
     observer = observer or Tracer()
@@ -161,13 +223,16 @@ def make_tools_node(
             except Exception as exc:  # noqa: BLE001 - 工具失败不该打断循环
                 return None, f"检索失败：{exc}。可以换一组关键词再试，或用更通用的说法。"
 
-            return result, render_tool_result(
+            text = render_tool_result(
                 result,
                 index=position(),
                 seen=seen,
                 snippet_chars=cfg.snippet_chars,
                 match_text=match_text,
             )
+            if not {hit.article.parent_id for hit in result.articles} - seen:
+                text = _NO_FRESH_EVIDENCE + text
+            return result, text
 
         def run_lookup(arguments: str) -> tuple[RetrievalResult | None, str]:
             try:
@@ -229,10 +294,13 @@ def make_tools_node(
 def _trajectory_notes(state: AgentState, merged: RetrievalResult, cfg: config.AgentConfig) -> list[str]:
     """把循环本身的成本写进 Answer.notes —— 不摆出来，就没法解释「凭什么是 3 倍」。
 
-    **三类计数刻意来自三个不同的源**（`usage` / `tool_call` 名字 / `reflections`），
-    因为它们各自会被别的口径骗 —— `steps` 是预算不是规划轮数，`search_log` 的行数不是
-    检索次数（`get_article` 同形状但零检索）。为什么，见 `docs/DESIGN.md` §9
-    「『花了多少』是怎么数出来的」。
+    **两处计数刻意来自两个不同的源**（`usage` / `tool_call` 名字）：`search_log` 的行数
+    不是检索次数（`get_article` 同形状但零检索），而 `steps` 与 `usage` 的行数今天虽然
+    相等，口径却不是一回事 —— 一个是路由器累加的预算，一个是调用处写下的账单。
+
+    收尾成因只写一种：**预算用尽被强制作答**。判据是「最后一条消息不是助手消息」——
+    助手消息且没有 `tool_calls` 就是模型自己收的手（它说了「够了」），而预算尽那条路上
+    最后一条一定是 `tools` 产出的 tool 消息。
     """
     calls = [
         (call.get("function") or {}).get("name") or ""
@@ -243,23 +311,19 @@ def _trajectory_notes(state: AgentState, merged: RetrievalResult, cfg: config.Ag
     plans = len(state.get("usage") or ())
     searches = calls.count(SEARCH_LAW_NAME)
     lookups = calls.count(GET_ARTICLE_NAME)
-    reviews = len(state.get("reflections") or ())
     steps = state.get("steps", 0)
     max_steps = state.get("max_steps", cfg.max_steps)
 
     parts = [f"{plans} 轮 LLM 规划", f"{searches} 次检索"]
     if lookups:
         parts.append(f"{lookups} 次精确取条")
-    parts += [f"{reviews} 轮审核", f"证据 {len(merged.articles)} 条"]
+    parts.append(f"证据 {len(merged.articles)} 条")
     notes = ["Agent：" + " / ".join(parts)]
 
-    reflections = state.get("reflections") or []
-    verdict = reflections[-1] if reflections else None
-    if verdict and not verdict.get("sufficient"):
-        if steps >= max_steps:
-            notes.append(f"已达最大轮数 {max_steps}，强制进入作答")
-        elif not verdict.get("retrievable", True):
-            notes.append("审核判定缺口不在库内（再检索也补不上），提前进入作答")
+    messages = state.get("messages") or ()
+    last = messages[-1] if messages else {}
+    if steps >= max_steps and last.get("role") != "assistant":
+        notes.append(f"已达最大轮数 {max_steps}，强制进入作答")
     tokens = sum(int(row.get("total_tokens") or 0) for row in state.get("usage") or ())
     if tokens:
         notes.append(f"规划轮 token 合计 {tokens}")

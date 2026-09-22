@@ -49,7 +49,7 @@ from ..agent.llm import ToolCallingLLM
 from ..agent.tools import build_article_index, parse_article_no, resolve_law_id
 from ..agent.trace import render_trace
 from ..contracts import ParentChunk
-from .harness import RE_ARTICLE, RE_LAW
+from .corpus import RE_ARTICLE, RE_LAW
 
 __all__ = [
     "HopError",
@@ -115,7 +115,8 @@ class Library:
 
     @classmethod
     def load(cls) -> Library:
-        """读切块产物（`法规知识库/chunks/`），与 `eval._kb_index()` 同一条路。"""
+        """读切块产物（`法规知识库/chunks/`）—— 全库唯一的条文来源，
+        `eval.corpus` 的桶文件也经这里换回条文。"""
         from ..kb.chunker import ChunkStage
 
         return cls.from_parents(list(ChunkStage(verbose=False).load().parents))
@@ -708,7 +709,6 @@ def trace(
                     "region": state.get("region"),
                     "region_scope": list(state.get("region_scope") or ()),
                     "searches": state.get("search_log") or [],
-                    "reflections": state.get("reflections") or [],
                     "usage": state.get("usage") or [],
                     "trace": render_trace(state),
                 },

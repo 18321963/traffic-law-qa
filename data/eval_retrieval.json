@@ -1,0 +1,505 @@
+[
+ {
+  "question": "驾驶机动车超过规定时速百分之五十以上未超过百分之一百的，处二千元罚款，可以并处吊销机动车驾驶证；超过规定时速百分之一百以上的，处三千元罚款，并处吊销机动车驾驶证。这个条款中的超速驾驶行为处罚措施是什么？",
+  "gold": [
+   "sz_traffic_penalty_regulation#第二十九条"
+  ]
+ },
+ {
+  "question": "完全自动驾驶系统有哪些独特的功能？",
+  "gold": [
+   "sz_icv_regulation#第三条"
+  ]
+ },
+ {
+  "question": "智能网联汽车在道路测试中的具体要求是什么？",
+  "gold": [
+   "sz_icv_regulation#第二条"
+  ]
+ },
+ {
+  "question": "政府在智能网联汽车监管中采取了哪些措施来保障安全？",
+  "gold": [
+   "sz_icv_regulation#第五条"
+  ]
+ },
+ {
+  "question": "在申请机动车驾驶证前，学习道路交通安全法律、法规和相关知识是否需要考试合格？",
+  "gold": [
+   "road_traffic_safety_regulation#第二十条"
+  ]
+ },
+ {
+  "question": "机动车驾驶人初次申领驾驶证后的12个月内可以使用什么实习标志？",
+  "gold": [
+   "road_traffic_safety_regulation#第二十六条"
+  ]
+ },
+ {
+  "question": "在一个记分周期内累积达到12分的道路交通安全违法行为会被如何处理？",
+  "gold": [
+   "road_traffic_safety_regulation#第二十三条"
+  ]
+ },
+ {
+  "question": "车道信号灯显示红色叉形或箭头灯时，车辆通行受到什么限制？",
+  "gold": [
+   "road_traffic_safety_regulation#第四十条"
+  ]
+ },
+ {
+  "question": "机动车在禁止掉头或左转弯的地点以及易危路段，不得进行什么操作？",
+  "gold": [
+   "road_traffic_safety_regulation#第四十九条"
+  ]
+ },
+ {
+  "question": "非机动车在没有专用车道的情况下应如何行驶？",
+  "gold": [
+   "road_traffic_safety_law#第五十七条"
+  ]
+ },
+ {
+  "question": "行人在没有交通信号灯的路口如何通行？",
+  "gold": [
+   "road_traffic_safety_law#第六十二条"
+  ]
+ },
+ {
+  "question": "道路交通安全法中对残疾人机动轮椅车的速度限制是多少？",
+  "gold": [
+   "road_traffic_safety_law#第五十八条"
+  ]
+ },
+ {
+  "question": "乘车人在驾驶时是否可以携带易燃易爆等危险物品？",
+  "gold": [
+   "road_traffic_safety_law#第六十六条"
+  ]
+ },
+ {
+  "question": "如果机动车在道路上发生故障或事故，如何按照规定进行处理？",
+  "gold": [
+   "road_traffic_safety_regulation#第六十条"
+  ]
+ },
+ {
+  "question": "如果智能网联汽车在道路测试期间发生交通违法或事故，该如何处理？",
+  "gold": [
+   "sz_icv_regulation#第十九条"
+  ]
+ },
+ {
+  "question": "申请初次申领机动车号牌和行驶证需要提交哪些证明凭证？",
+  "gold": [
+   "road_traffic_safety_regulation#第四条"
+  ]
+ },
+ {
+  "question": "不属于国务院机动车产品主管部门规定免予安全技术检验的车型，还需提交哪些证明凭证？",
+  "gold": [
+   "road_traffic_safety_regulation#第六条"
+  ]
+ },
+ {
+  "question": "机动车在有交通信号灯控制的交叉路口应当如何进入导向车道？",
+  "gold": [
+   "road_traffic_safety_regulation#第五十一条"
+  ]
+ },
+ {
+  "question": "机动车在没有停止线的情况下应该停在何处？",
+  "gold": [
+   "road_traffic_safety_regulation#第五十一条"
+  ]
+ },
+ {
+  "question": "在右转弯时，如果前方有同车道的车辆等候放行信号，机动车应当如何操作？",
+  "gold": [
+   "road_traffic_safety_regulation#第五十一条"
+  ]
+ },
+ {
+  "question": "根据文档，未参加安全技术检验的车辆有不同的处罚金额，具体是哪几种情况和相应的罚款是多少？",
+  "gold": [
+   "sz_traffic_penalty_regulation#第二十六条"
+  ]
+ },
+ {
+  "question": "智能网联汽车产品在销售时需要满足哪些保险要求？",
+  "gold": [
+   "sz_icv_regulation#第二十八条"
+  ]
+ },
+ {
+  "question": "智能网联汽车在特定路段是否必须遵守交通信号？",
+  "gold": [
+   "sz_icv_regulation#第四十一条"
+  ]
+ },
+ {
+  "question": "智能网联汽车的通信技术设施设备是否需要国家工信部门的入网认证？如果有，认证标准是怎样的？",
+  "gold": [
+   "sz_icv_regulation#第四十三条"
+  ]
+ },
+ {
+  "question": "深圳经济特区政府如何平衡共享车路协同基础设施与数据隐私保护？",
+  "gold": [
+   "sz_icv_regulation#第四十二条"
+  ]
+ },
+ {
+  "question": "市交通运输、公安等部门在智能网联汽车网络安全事件中的具体职责是什么？",
+  "gold": [
+   "sz_icv_regulation#第四十五条"
+  ]
+ },
+ {
+  "question": "智能网联汽车相关企业在数据泄露发生时应采取哪些措施？",
+  "gold": [
+   "sz_icv_regulation#第四十七条"
+  ]
+ },
+ {
+  "question": "在道路交通安全违法情形中，智能网联汽车的驾驶人和车辆所有人的责任是什么？",
+  "gold": [
+   "sz_icv_regulation#第五十一条",
+   "sz_icv_regulation#第五十三条",
+   "sz_icv_regulation#第五十四条",
+   "sz_icv_regulation#第五十五条"
+  ]
+ },
+ {
+  "question": "针对驾驶人在智能网联汽车中发生违法行为的处罚，不会受到驾驶人的记分吗？",
+  "gold": [
+   "sz_icv_regulation#第五十一条"
+  ]
+ },
+ {
+  "question": "当智能网联汽车因存在缺陷导致交通事故时，谁来承担赔偿责任？",
+  "gold": [
+   "sz_icv_regulation#第五十四条"
+  ]
+ },
+ {
+  "question": "智能网联汽车记录的车辆运行状态和周边环境的客观信息，可以作为认定交通事故责任的重要依据吗？",
+  "gold": [
+   "sz_icv_regulation#第五十五条"
+  ]
+ },
+ {
+  "question": "驾驶人在完全自动驾驶模式下行驶时应当如何监控车辆运行状态和周围环境？",
+  "gold": [
+   "sz_icv_regulation#第三十七条"
+  ]
+ },
+ {
+  "question": "智能网联汽车在自动驾驶模式下必须开启哪些外部指示灯，以向其他交通参与者发出安全提示？",
+  "gold": [
+   "sz_icv_regulation#第三十六条"
+  ]
+ },
+ {
+  "question": "智能网联汽车所有人和管理人应当如何进行自动驾驶系统及安全设施的定期维护？",
+  "gold": [
+   "sz_icv_regulation#第三十八条"
+  ]
+ },
+ {
+  "question": "在盲人通行较为集中的路段，是否需要设置声响提示装置？",
+  "gold": [
+   "road_traffic_safety_regulation#第三十二条"
+  ]
+ },
+ {
+  "question": "开辟或调整公交路线时，应当遵循哪些安全和畅通的原则？",
+  "gold": [
+   "road_traffic_safety_regulation#第三十四条",
+   "road_traffic_safety_regulation#第三十五条",
+   "road_traffic_safety_regulation#第三十六条",
+   "road_traffic_safety_regulation#第三十七条"
+  ]
+ },
+ {
+  "question": "如何确定停车泊位的使用时间以确保道路通畅？",
+  "gold": [
+   "road_traffic_safety_regulation#第三十三条"
+  ]
+ },
+ {
+  "question": "在机动车驾驶人可能出现辨认错误的情况下，交通标志和标线的主管部门应当如何进行改善？",
+  "gold": [
+   "road_traffic_safety_regulation#第三十七条"
+  ]
+ },
+ {
+  "question": "道路施工需要车辆绕行的，是否需要设置临时通道，并如何处理交通？",
+  "gold": [
+   "road_traffic_safety_regulation#第三十五条"
+  ]
+ },
+ {
+  "question": "电动自行车、三轮车横过机动车道需要采取什么措施，有何法律依据？",
+  "gold": [
+   "road_traffic_safety_regulation#第七十条"
+  ]
+ },
+ {
+  "question": "自行车、三轮车、电动自行车和残疾人机动轮椅车的驾驶年龄要求分别是多少？",
+  "gold": [
+   "road_traffic_safety_regulation#第七十二条"
+  ]
+ },
+ {
+  "question": "根据规定，行人在道路上有哪些行为是不被允许的？",
+  "gold": [
+   "road_traffic_safety_regulation#第七十四条"
+  ]
+ },
+ {
+  "question": "在繁华路段等危险路段，畜力车是否可以超车？如果可以，需要注意什么事项？",
+  "gold": [
+   "road_traffic_safety_regulation#第七十三条"
+  ]
+ },
+ {
+  "question": "行人可以在车行道内坐卧吗？如果不可以，为什么？",
+  "gold": [
+   "road_traffic_safety_regulation#第七十四条"
+  ]
+ },
+ {
+  "question": "随车幼畜需要如何拴系才能符合规定要求？",
+  "gold": [
+   "road_traffic_safety_regulation#第七十三条"
+  ]
+ },
+ {
+  "question": "使用未经驯服的牲畜驾车是否被禁止？有什么后果吗？",
+  "gold": [
+   "road_traffic_safety_regulation#第七十三条"
+  ]
+ },
+ {
+  "question": "非下肢残疾的人是否可以驾驶残疾人机动轮椅车？需要满足什么条件？",
+  "gold": [
+   "road_traffic_safety_regulation#第七十二条"
+  ]
+ },
+ {
+  "question": "高速公路同方向多个车道之间，最低车速要求分别是多少？",
+  "gold": [
+   "road_traffic_safety_regulation#第八十条"
+  ]
+ },
+ {
+  "question": "什么情况下可以选择不使用人行横道而直接行走？",
+  "gold": [
+   "road_traffic_safety_regulation#第七十五条"
+  ]
+ },
+ {
+  "question": "机动车进入或驶离高速公路时，是否需要特定的转向灯？",
+  "gold": [
+   "road_traffic_safety_regulation#第七十九条"
+  ]
+ },
+ {
+  "question": "在交通事故损害赔偿争议中，各方当事人一致请求调解的条件是什么？",
+  "gold": [
+   "road_traffic_safety_regulation#第九十四条"
+  ]
+ },
+ {
+  "question": "公安机关交通管理部门调解交通事故损害赔偿的期限是多长？",
+  "gold": [
+   "road_traffic_safety_regulation#第九十四条"
+  ]
+ },
+ {
+  "question": "在交通事故致死的情况下，调解程序从什么时候开始？",
+  "gold": [
+   "road_traffic_safety_regulation#第九十四条"
+  ]
+ },
+ {
+  "question": "交通事故造成财产损失的调解程序从什么时候开始？",
+  "gold": [
+   "road_traffic_safety_regulation#第九十四条"
+  ]
+ },
+ {
+  "question": "在什么情况下不允许任何单位或个人收缴机动车驾驶证？",
+  "gold": [
+   "road_traffic_safety_law#第二十条"
+  ]
+ },
+ {
+  "question": "什么情况下可以延长机动车驾驶证的审验期？",
+  "gold": [
+   "road_traffic_safety_law#第二十四条"
+  ]
+ },
+ {
+  "question": "红灯、绿灯、黄灯分别有什么意义？",
+  "gold": [
+   "road_traffic_safety_law#第二十六条"
+  ]
+ },
+ {
+  "question": "在无人看守的情况下，铁路道口应当设置哪些警示设施？",
+  "gold": [
+   "road_traffic_safety_law#第二十七条"
+  ]
+ },
+ {
+  "question": "违法行为包括哪些关于交通信号灯的操作？",
+  "gold": [
+   "road_traffic_safety_law#第二十八条",
+   "road_traffic_safety_law#第三十一条"
+  ]
+ },
+ {
+  "question": "当地政府在接到报告后应该如何处理交通隐患？",
+  "gold": [
+   "road_traffic_safety_law#第三十条"
+  ]
+ },
+ {
+  "question": "如何确保道路配套设施符合交通安全要求？",
+  "gold": [
+   "road_traffic_safety_law#第二十九条"
+  ]
+ },
+ {
+  "question": "高速公路限速标志标明的最高时速是多少？",
+  "gold": [
+   "road_traffic_safety_law#第六十七条"
+  ]
+ },
+ {
+  "question": "在高速公路上，警告标志应当设置的位置是多少米以外？",
+  "gold": [
+   "road_traffic_safety_law#第六十八条"
+  ]
+ },
+ {
+  "question": "如何确定机动车与非机动车驾驶人、行人之间的赔偿责任？",
+  "gold": [
+   "road_traffic_safety_law#第七十六条"
+  ]
+ },
+ {
+  "question": "伪造或变造机动车登记证书的行为会有哪些法律后果？",
+  "gold": [
+   "road_traffic_safety_law#第九十六条"
+  ]
+ },
+ {
+  "question": "未投保机动车第三者责任保险的违法行为会被如何处理？",
+  "gold": [
+   "road_traffic_safety_law#第九十八条"
+  ]
+ },
+ {
+  "question": "超过时速百分之五十驾驶机动车的违规行为会受到怎样的处罚？",
+  "gold": [
+   "road_traffic_safety_law#第九十九条"
+  ]
+ },
+ {
+  "question": "驾驶拼装或报废机动车的违法行为有哪些相应的法律后果？",
+  "gold": [
+   "road_traffic_safety_law#第一百条"
+  ]
+ },
+ {
+  "question": "若道路交通违法行为人在十五日内无异议，可以当场缴纳罚款，此规则对执法人员有什么要求？",
+  "gold": [
+   "road_traffic_safety_law#第一百零八条"
+  ]
+ },
+ {
+  "question": "在深圳经济特区道路交通安全违法行为处罚条例中，机动车驾驶人可以通过什么方式申请获得免费路边停车时间？",
+  "gold": [
+   "sz_traffic_penalty_regulation#第四十三条"
+  ]
+ },
+ {
+  "question": "根据条例规定，在一个记分周期内，未满十二分的机动车驾驶人可以通过哪些方式减少记分？",
+  "gold": [
+   "sz_traffic_penalty_regulation#第四十六条"
+  ]
+ },
+ {
+  "question": "如果因违法行为原因未能在规定时间内完成安全教育或驾驶培训，会有什么后果？",
+  "gold": [
+   "sz_traffic_penalty_regulation#第四十七条",
+   "sz_traffic_penalty_regulation#第四十八条"
+  ]
+ },
+ {
+  "question": "在什么情况下驾驶人可以申请消除道路交通安全违法记录？",
+  "gold": [
+   "sz_traffic_penalty_regulation#第三十九条"
+  ]
+ },
+ {
+  "question": "机动车的所有人在什么情况下可以申请免除一次道路交通安全违法行为的罚款？",
+  "gold": [
+   "sz_traffic_penalty_regulation#第四十一条"
+  ]
+ },
+ {
+  "question": "从事汽车租赁业务的经营单位，违法行为是否会导致加重处罚？",
+  "gold": [
+   "sz_traffic_penalty_regulation#第四十二条"
+  ]
+ },
+ {
+  "question": "公安机关交通管理部门、机动车安全技术检验机构不得要求机动车到指定的场所进行维修、保养吗？",
+  "gold": [
+   "road_traffic_safety_law#第十四条"
+  ]
+ },
+ {
+  "question": "新建、改建、扩建的公共建筑等需配建多少个停车位？",
+  "gold": [
+   "road_traffic_safety_law#第三十三条"
+  ]
+ },
+ {
+  "question": "根据道路交通安全法的相关规定，当遇到自然灾害、恶劣气象条件或者重大交通事故时，公安机关可以采取什么措施来实行交通管制？",
+  "gold": [
+   "road_traffic_safety_law#第四十条"
+  ]
+ },
+ {
+  "question": "在城市道路内，政府有关部门可以如何划设停车泊位？",
+  "gold": [
+   "road_traffic_safety_law#第三十五条",
+   "road_traffic_safety_law#第三十四条",
+   "road_traffic_safety_law#第三十三条",
+   "road_traffic_safety_law#第三十九条"
+  ]
+ },
+ {
+  "question": "在同一条车道内的机动车是否需要保持一定的安全距离？如果不可以超车，有哪些情况是禁止的？",
+  "gold": [
+   "road_traffic_safety_law#第四十三条"
+  ]
+ },
+ {
+  "question": "机动车在人行横道上需要做什么？如果遇到行人正在穿过，是否需要停车？",
+  "gold": [
+   "road_traffic_safety_law#第四十七条"
+  ]
+ },
+ {
+  "question": "机动车运输货物时需要符合哪些条件？是否有关于超载的具体规定？",
+  "gold": [
+   "road_traffic_safety_law#第四十八条"
+  ]
+ }
+]

@@ -34,6 +34,9 @@ USER_TEMPLATE = """问题：{question}
 
 请依据上述条文回答问题，并在每条结论后标注 [依据N]。"""
 
+_STREAM_OPTIONS = {"include_usage": True}
+"""流式请求要 usage 块。理由见 `_stream_llm` —— 不加就是静默少一个字段。"""
+
 EMPTY_RETRIEVAL_ANSWER = (
     "现有法规库中未检索到与问题相关的条文，无法给出有依据的回答。"
     "建议补充更具体的违法情形、地点，或确认是否属于本知识库覆盖的 6 部法规范围。"
@@ -46,6 +49,14 @@ class AnswerGenerator:
 
     Input : Question + RetrievalResult
     Output: Answer
+
+    `timeout` / `max_tokens` 是**兜底，不是调优**（与 `agent/llm.py` 同一套理由，那边记着
+    24901 字 / 223 秒那次实测）。两个数的依据是 `data/traces/` 里 541 次真实答案生成的用量：
+    非思考模型 p50 172、p95 442、最大 730（今天默认的 qwen-flash 是 135 次里最大 445），
+    所以 1024 留了余量。**换成思考型当生成模型时必须调高** —— 思维链算进 `completion_tokens`：
+    实测 `qwen3.8-max` 答 960 字用掉 5201 个，1024 会把它切在思维链中间。另注：`timeout` 拦的
+    是「迟迟不来字节」（httpx 的 read timeout 是两次收到字节之间的上限），一直吐、一直在复读的
+    那种只有 `max_tokens` 拦得住。
     """
 
     layer = "generate"
@@ -59,11 +70,15 @@ class AnswerGenerator:
         retries: int = 2,
         show_top: int = 0,
         client: Any = None,
+        timeout: float = 30.0,
+        max_tokens: int = 1024,
     ) -> None:
         self.cfg = cfg or config.llm_config()
         self.retries = retries
         self.show_top = show_top
         self._client = client
+        self.timeout = timeout
+        self.max_tokens = max_tokens
 
     @property
     def available(self) -> bool:
@@ -162,6 +177,14 @@ class AnswerGenerator:
                 }
 
     def _stream_llm(self, question: Question, evidences: list[Evidence]):
+        """同 `_call_llm` 的两个上限，外加**要求末尾回一个 usage 块**。
+
+        `stream_options={"include_usage": True}` 不是可选项：不加的话流式这条路上一个 token 数
+        都拿不到（非流式的 `response.usage` 照常有），SSE 的 `done` 事件里 `usage` 恒为空 ——
+        2026-09-22 实测确认。支持它的端点会在末尾补一个 `choices` 为空、只带 `usage` 的块，
+        `stream()` 的循环本来就是照这个形状写的（先看 `chunk.choices` 再取 delta）。
+        **不支持的端点会直接 400**，这是有意的：宁可响着坏，也不要静默少一个字段。
+        """
         from openai import OpenAI
 
         if self._client is None:
@@ -176,7 +199,10 @@ class AnswerGenerator:
                 model=self.cfg.model,
                 messages=messages,
                 temperature=self.cfg.temperature,
+                timeout=self.timeout,
+                max_tokens=self.max_tokens,
                 stream=True,
+                stream_options=_STREAM_OPTIONS,
             )
         except Exception as exc:  # noqa: BLE001 - 首字节前失败，翻译成一句可读的话
             raise RuntimeError(f"调用 {self.cfg.model} 失败：{exc}") from exc
@@ -198,6 +224,8 @@ class AnswerGenerator:
                     model=self.cfg.model,
                     messages=messages,
                     temperature=self.cfg.temperature,
+                    timeout=self.timeout,
+                    max_tokens=self.max_tokens,
                 )
                 usage = {}
                 if response.usage is not None:
