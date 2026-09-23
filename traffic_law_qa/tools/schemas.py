@@ -1,10 +1,3 @@
-"""两个工具给模型看的全部契约：JSON schema + 名字常量 + 取值常量。
-
-名字常量（`SEARCH_LAW_NAME` / `GET_ARTICLE_NAME`）在这里，因为 schema 与工具轮
-的分发表都以它为键；`TOP_K_MIN/MAX` 也在这里，因为 schema 的 minimum/maximum
-就是它（`arguments.py` 从这里引）。渲染用的两个长度常量在 `render.py`，不在这儿。
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -48,6 +41,79 @@ SEARCH_LAW_TOOL: dict[str, Any] = {
                     "minimum": TOP_K_MIN,
                     "maximum": TOP_K_MAX,
                     "description": "返回条数，默认 6",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+WEB_SEARCH_NAME = "web_search"
+
+WEB_COUNT_MIN = 1
+WEB_COUNT_MAX = 20
+
+WEB_SEARCH_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": WEB_SEARCH_NAME,
+        "description": (
+            "联网检索公开网页。**只用于时效性问题**：某地是不是刚出了新规定、现在还有效吗、"
+            "最新口径是什么、政策是不是已经改了。"
+            "**问「罚多少」「记几分」「这条怎么规定」一律不许用它** —— 那些答案只在法条里，"
+            "用网搜答等于拿二手转述当法条，整篇答案会被判无依据。"
+            "库内能查到的法条一律不用它；只有问题本身问的就是「最新 / 现在 / 是否已修改」时才用。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "搜索词。要写清楚地区、年份、文件名"
+                        "（如「深圳 电动自行车 管理条例 2026」），不要与上一轮重复。"
+                    ),
+                },
+                "count": {
+                    "type": "integer",
+                    "minimum": WEB_COUNT_MIN,
+                    "maximum": WEB_COUNT_MAX,
+                    "description": "返回条数，默认 5",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+SEARCH_MATERIALS_NAME = "search_materials"
+
+MATERIAL_TOP_K_MIN = 1
+MATERIAL_TOP_K_MAX = 10
+MATERIAL_TOP_K_DEFAULT = 5
+
+SEARCH_MATERIALS_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": SEARCH_MATERIALS_NAME,
+        "description": (
+            "在**用户本次上传的材料**里检索（会话材料，尚未入知识库）。"
+            "只在用户明确说到「我传的这份文件 / 附件 / 材料」时才用它；"
+            "问法条一律用 search_law —— 材料不是法条，引用标记也不同。"
+            "本次会话没上传材料时它会回一句「没有材料」，那就别再调它。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "检索词。用材料里真出现过的说法，别用同义词改写。",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "minimum": MATERIAL_TOP_K_MIN,
+                    "maximum": MATERIAL_TOP_K_MAX,
+                    "description": f"返回段数，默认 {MATERIAL_TOP_K_DEFAULT}",
                 },
             },
             "required": ["query"],

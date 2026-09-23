@@ -1,124 +1,17 @@
-"""Layer 4 · index：ChunkSet → Milvus 集合（稠密向量 + BM25 稀疏向量）。
-
-    EmbeddingClient.embed : list[str] → list[list[float]]（OpenAI 兼容端点）
-    Indexer.build         : ChunkSet → IndexStats
-
-为什么这一层比之前薄了很多：
-- 稀疏向量（BM25）由 Milvus 的 BM25 函数在服务端生成，我们只写原文；
-- 倒排索引、df/postings、分词、落盘 bm25.json 全部不再需要；
-- 融合也移到服务端（retriever 里用 hybrid_search + RRFRanker）。
-
-没配 EMBED_API_KEY 时仍可建库：集合里只建 text / sparse 字段，纯 BM25 跑通整条管道。
-"""
-
 from __future__ import annotations
 
 import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from .. import config
 from ..contracts import ChunkSet, IndexStats
+from ..services.embedding import EMBED_FAILED_NOTE_PREFIX, EmbeddingClient
 from .milvus_store import MilvusStore, row_of
-
-EMBED_FAILED_NOTE_PREFIX = "向量化失败"
-
-
-class EmbeddingClient:
-    """OpenAI 兼容 /embeddings 端点封装（通义百炼 / 智谱 / OpenAI …）。
-
-    Input : list[str]
-    Output: list[list[float]]
-    """
-
-    input_desc = "list[str]"
-    output_desc = "list[list[float]]"
-
-    def __init__(self, cfg: config.EmbedConfig | None = None, *, retries: int = 3) -> None:
-        self.cfg = cfg or config.embed_config()
-        self.retries = retries
-        self._client = None
-
-    @property
-    def available(self) -> bool:
-        return self.cfg.ready
-
-    @property
-    def unavailable_reason(self) -> str:
-        if not self.cfg.api_key:
-            return "未配置 EMBED_API_KEY / LLM_API_KEY，只建 BM25 稀疏索引（纯关键词检索）"
-        return ""
-
-    @property
-    def model_label(self) -> str:
-        return f"{self.cfg.model}@{self.cfg.base_url}"
-
-    def _ensure_client(self):
-        if self._client is None:
-            if not self.available:
-                raise RuntimeError(self.unavailable_reason)
-            from openai import OpenAI
-
-            self._client = OpenAI(base_url=self.cfg.base_url, api_key=self.cfg.api_key)
-        return self._client
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        """分批向量化，失败按指数退避重试。
-
-        **段落侧**：建库时喂的是法条原文，这里绝不加查询前缀 —— 理由见 `embed_query`。
-        """
-        client = self._ensure_client()
-        vectors: list[list[float]] = []
-        batch = max(1, self.cfg.batch)
-        for start in range(0, len(texts), batch):
-            vectors.extend(self._embed_window(client, texts[start : start + batch]))
-        return vectors
-
-    def embed_query(self, text: str) -> list[float]:
-        """向量化一条**查询** —— 与 `embed()` 分开，是因为两者在 bge 上不是同一个用法。
-
-        bge-zh 系列（bge-large-zh-v1.5、bge-m3）是**按「查询加指令前缀、段落不加」训练**的，
-        两边一视同仁就是没按它的用法用。82 题实测，同一进程、同一索引，只差这个前缀：
-
-            无前缀   hit@1 68.3%  hit@3 84.1%  hit@6 87.8%  MRR 0.761
-            加前缀   hit@1 69.5%  hit@3 84.1%  hit@6 91.5%  MRR 0.777
-
-        四项里三项变好、一项持平，所以它现在是默认行为的一部分。
-
-        前缀走 `EMBED_QUERY_PREFIX` 配置而**不是写死在这里**：换成 text-embedding-v4
-        这类不吃前缀的模型时，把它留空就回到原样，不必回来改代码。默认空值另一层意思
-        是「没配前缀的部署与加这个功能之前逐位相同」。
-
-        调用方注意：改这个前缀**不需要重建索引** —— 它只影响查询怎么编码，段落向量
-        与它无关（`stale_reason` 比对的是 embedding_model，不含前缀，这是对的）。
-        """
-        prefix = self.cfg.query_prefix
-        return self.embed([prefix + text if prefix else text])[0]
-
-    def _embed_window(self, client, window: list[str]) -> list[list[float]]:
-        kwargs: dict[str, Any] = {}
-        if self.cfg.dim:
-            kwargs["dimensions"] = self.cfg.dim
-        last_error: Exception | None = None
-        for attempt in range(1, self.retries + 1):
-            try:
-                response = client.embeddings.create(model=self.cfg.model, input=window, **kwargs)
-                return [item.embedding for item in response.data]
-            except Exception as exc:  # noqa: BLE001 - 网络/配额错误统一重试
-                last_error = exc
-                if attempt < self.retries:
-                    time.sleep(1.5 * attempt)
-        raise RuntimeError(f"向量化失败（{self.cfg.model}）：{last_error}") from last_error
 
 
 class Indexer:
-    """建索引阶段：父子块 → Milvus 集合。
-
-    Input : ChunkSet
-    Output: IndexStats（同时写 index/index_meta.json 快照）
-    """
 
     layer = "index"
     input_desc = "ChunkSet"
@@ -150,7 +43,7 @@ class Indexer:
             try:
                 vectors = self.embedder.embed(texts)
                 dim = len(vectors[0]) if vectors else None
-            except Exception as exc:  # noqa: BLE001 - 向量端点挂了也要能建库
+            except Exception as exc:  # noqa: BLE001
                 self.notes.append(f"{EMBED_FAILED_NOTE_PREFIX}，降级为纯 BM25：{exc}")
                 vectors, dim = None, None
         elif with_vector:
@@ -213,11 +106,8 @@ class Indexer:
         return list(json.loads(self.meta_path.read_text(encoding="utf-8")).get("notes", []))
 
     def connect(self) -> str:
-        """探活；返回 Milvus 版本号。"""
         return self.store.ping()
 
 
-# 命令行入口在 `../pipeline.py`（`python -m traffic_law_qa.pipeline index`）；这一层是纯库，没有 `main`。
-# 下面这个闸只为拦「按老习惯敲了 `-m`」：不给它的话模块级代码跑完就退 0，敲的人以为活儿干完了。
 if __name__ == "__main__":
-    raise SystemExit("已收口：请用 python -m traffic_law_qa.pipeline index（清单见 README「所有入口」）")
+    raise SystemExit("已收口：请用 python -m traffic_law_qa.pipeline index（清单见 README「入口」）")

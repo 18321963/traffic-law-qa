@@ -1,4 +1,10 @@
-"""题集 A（data/eval_retrieval.json，82 道单跳域内题）上的 rag vs agent 对照。
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+USAGE = """题集 A（data/eval_retrieval.json，82 道单跳域内题）上的 rag vs agent 对照。
 
     python -m traffic_law_qa.eval.singlehop --compare --limit 5 --out data/traces/single5.json
     python -m traffic_law_qa.eval.singlehop --compare --out data/traces/single82.json
@@ -19,12 +25,6 @@
 两侧都真调 LLM：rag 那侧要 ask 一次（为了「引用 gold」那一列），agent 那侧是多轮循环。
 """
 
-from __future__ import annotations
-
-import argparse
-import sys
-from pathlib import Path
-
 __all__ = ["run", "metrics", "main"]
 
 KS = (1, 3, 6)
@@ -37,7 +37,6 @@ def run(
     out: Path | None = None,
     verbose: bool = True,
 ) -> list[dict]:
-    """跑题集 A 的两条臂，落盘，返回与多跳那套同格式的行。"""
     from .. import config
     from .corpus import load_bucket
     from .multihop import trace
@@ -52,12 +51,10 @@ def run(
 
 
 def _rank(ids: list[str], gold: set[str]) -> int | None:
-    """第一个 gold 的名次；None = 这一格没命中。与 harness 同一套口径。"""
     return next((i for i, parent_id in enumerate(ids, start=1) if parent_id in gold), None)
 
 
 def _merged(searches: list[dict]) -> list[str]:
-    """全部轮次按「先到先得」合并去重 —— 名次就是它第一次被捞到的位置。"""
     ids: list[str] = []
     seen: set[str] = set()
     for search in searches:
@@ -73,7 +70,6 @@ def _first(searches: list[dict]) -> list[str]:
 
 
 def metrics(rows: list[dict], *, top_k: int = 6) -> str:
-    """三格 hit@k/MRR + agent 的循环成本，外加一句别误读的话。"""
     if not rows:
         return "（没有可统计的行）"
 
@@ -116,18 +112,7 @@ def metrics(rows: list[dict], *, top_k: int = 6) -> str:
     return "\n".join(lines)
 
 
-USAGE = __doc__
-
-
 def _parser() -> argparse.ArgumentParser:
-    """只做校验的解析器（`--help` 与「不带参数」由 main 开头那个分支打印 `USAGE`，
-    所以 `add_help=False`）。
-
-    它唯一的职责是把「不认识的开关」和「取不到值的开关」变成错误。原先的 `option()`
-    只做 `if name in args`，两样都静默忽略 —— 而这里的安静是有价格的：
-    `--limit` 敲错一个字母，`option()` 返回 None，`run(limit=None)` 就是**全量 82 道**，
-    两条臂都真调 LLM。文档里那句「先跑 5 道看链路」于是变成一次全额付费。
-    """
     parser = argparse.ArgumentParser(prog="python -m traffic_law_qa.eval.singlehop", add_help=False)
     parser.add_argument("--compare", action="store_true", help="跑两臂对照（不给这个就跑说明书，因为要花钱）")
     parser.add_argument("--quiet", action="store_true", help="不打印逐题进度")

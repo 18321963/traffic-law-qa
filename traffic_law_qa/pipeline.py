@@ -1,38 +1,10 @@
-"""交通法规 RAG 管道的端到端编排与命令行入口。
-
-各层输入输出（也是 `python -m traffic_law_qa.pipeline layers` 打印的内容）：
-
-| 层       | 类                 | 输入                            | 输出                        |
-|----------|--------------------|---------------------------------|-----------------------------|
-| read     | `DocxReader`       | docx 路径 `Path`                | `list[Paragraph]`           |
-| parse    | `ParseStage`       | docx 目录                       | `list[LawDocument]`         |
-| chunk    | `ChunkStage`       | `list[LawDocument]`             | `ChunkSet`                  |
-| index    | `Indexer`          | `ChunkSet`                      | `IndexStats`                |
-| rewrite  | `QueryRewriter`    | `Query`                         | `RewrittenQuery`            |
-| retrieve | `HybridRetriever`  | `Query`                         | `RetrievalResult`           |
-| generate | `AnswerGenerator`  | `Question` + `RetrievalResult`  | `Answer`                    |
-
-命令行用法（只管知识库本身；**问答统一走 `python -m traffic_law_qa "问题"`** ——
-那条路带一致性检查与自动重建，这里的子命令都只管建库和查状态）：
-
-    python -m traffic_law_qa.pipeline build  [--force] [--no-vector]    # 整条：parse → chunk → index
-    python -m traffic_law_qa.pipeline status | layers                   # 看库内规模 / 看上面那张表
-    python -m traffic_law_qa.pipeline docx  [docx 路径 ...]             # 单步：docx → 段落（不给路径跑全部）
-    python -m traffic_law_qa.pipeline parse [--force] [--only 法id]     # 单步：段落 → 条
-    python -m traffic_law_qa.pipeline chunk [--show 条号]               # 单步：条文 → 父子块
-    python -m traffic_law_qa.pipeline index [--no-vector] [--query 词]  # 单步：块 → Milvus 集合
-
-四个单步子命令就是建库四步（上表里的 read/parse/chunk/index），给「只重跑其中一步」用；
-`build` 是它们串起来，另加每层的计时报告。子命令一个都不给时打印用法并退出 2 ——
-不再默认整库重建（那个默认值会让手滑敲下的 `pipeline` 直接重灌集合）。
-"""
-
 from __future__ import annotations
 
 import argparse
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from . import config
 from .contracts import (
@@ -44,19 +16,17 @@ from .contracts import (
     StageReport,
 )
 from .kb.chunker import ChunkStage
-from .kb.docx_reader import DocxReader
 from .kb.indexer import Indexer
-from .kb.law_parser import LawLibrary, LawParser, ParseStage
+from .kb.law_parser import LawLibrary, LawParser, ParseStage, reader_for
 from .kb.milvus_store import MilvusError, wait_until_ready
 from .qa.generator import AnswerGenerator
 from .qa.rag import LegalRAG
 
 
 class RagPipeline:
-    """交通法规 RAG 管道：把七个层串起来，并负责每层的计时与报告。"""
 
     LAYERS: tuple[tuple[str, str, str, str], ...] = (
-        ("read     ", "DocxReader", "docx 路径 (Path)", "list[Paragraph]"),
+        ("read     ", "Docx/TextReader", "源文件 (Path)", "list[Paragraph]"),
         ("parse    ", "ParseStage", "docx 目录", "list[LawDocument]"),
         ("chunk    ", "ChunkStage", "list[LawDocument]", "ChunkSet"),
         ("index    ", "Indexer", "ChunkSet", "IndexStats"),
@@ -68,7 +38,7 @@ class RagPipeline:
     def __init__(
         self,
         *,
-        reader: DocxReader | None = None,
+        readers: dict[str, Any] | None = None,
         parser: LawParser | None = None,
         library: LawLibrary | None = None,
         parse_stage: ParseStage | None = None,
@@ -77,11 +47,10 @@ class RagPipeline:
         generator: AnswerGenerator | None = None,
         verbose: bool = True,
     ) -> None:
-        self.reader = reader or DocxReader()
         self.parser = parser or LawParser()
         self.library = library or LawLibrary()
         self.parse_stage = parse_stage or ParseStage(
-            reader=self.reader, parser=self.parser, library=self.library, verbose=verbose
+            readers=readers, parser=self.parser, library=self.library, verbose=verbose
         )
         self.chunk_stage = chunk_stage or ChunkStage(library=self.library, verbose=verbose)
         self.indexer = indexer or Indexer(verbose=verbose)
@@ -91,39 +60,28 @@ class RagPipeline:
         self._rag_with_vector: bool | None = None
         self._index_stats: IndexStats | None = None
 
-    def read(self, docx_path) -> list[Paragraph]:
-        """层 1：读单个 docx。"""
-        return self.reader.read(docx_path)
+    def read(self, source_path) -> list[Paragraph]:
+        return reader_for(source_path).read(source_path)
 
     def parse(self, *, force: bool = False, only: str | None = None) -> list[LawDocument]:
-        """层 2：docx 目录 → 结构层产物。"""
         return self.parse_stage.run(force=force, only=only)
 
     def chunk(self, laws: list[LawDocument] | None = None) -> ChunkSet:
-        """层 3：结构层 → 父子块。"""
         return self.chunk_stage.run(laws)
 
     def index(self, chunk_set: ChunkSet, *, with_vector: bool = True) -> IndexStats:
-        """层 4：父子块 → BM25 + 向量索引。"""
         self._index_stats = self.indexer.build(chunk_set, with_vector=with_vector)
         self._rag = None
         self._rag_with_vector = None
         return self._index_stats
 
     def rag_tool(self, *, with_vector: bool = True) -> LegalRAG:
-        """层 5+6 的门面（懒加载并缓存；向量开关变化时自动重建）。
-
-        `generator=self.generator` 必须显式传：`LegalRAG.load()` 自己会 new 一个
-        `AnswerGenerator`，不传就等于把管道持有的那一个（含测试注入的替身、
-        含 `status()` 打印的模型名）静默丢掉。
-        """
         if self._rag is None or self._rag_with_vector != with_vector:
             self._rag = LegalRAG.load(with_vector=with_vector, generator=self.generator)
             self._rag_with_vector = with_vector
         return self._rag
 
     def build(self, *, force: bool = False, with_vector: bool = True) -> PipelineReport:
-        """跑完 read → parse → chunk → index（read 体现在 parse 阶段内部）。"""
         stages: list[StageReport] = []
 
         stage_started = time.perf_counter()
@@ -132,7 +90,7 @@ class RagPipeline:
         stages.append(
             StageReport(
                 name="parse",
-                input_desc=f"{len(list(self.parse_stage.docx_dir.glob('*.docx')))} 个 docx",
+                input_desc=f"{len(config.source_files(self.parse_stage.source_dir))} 个源文件",
                 output_desc=f"{len(laws)} 部 / {sum(law.article_count for law in laws)} 条",
                 ok=True,
                 elapsed_ms=(time.perf_counter() - stage_started) * 1000,
@@ -211,19 +169,13 @@ class RagPipeline:
         milvus = config.milvus_config()
         try:
             lines.append(f"Milvus：{self.indexer.connect()} @ {milvus.uri}")
-        except Exception as exc:  # noqa: BLE001 - 状态查询不该因连不上就崩
+        except Exception as exc:  # noqa: BLE001
             lines.append(f"Milvus：连接失败（{milvus.uri}）—— {str(exc).splitlines()[0]}")
         lines.append(f"模型：LLM={self.generator.cfg.model} | Embedding={config.embed_config().model}")
         return "\n".join(lines)
 
 
 def _parser() -> argparse.ArgumentParser:
-    """七个子命令的解析器。
-
-    与门 / `agent` / `eval` 那几处不同，这里**不手写说明书**：七个子命令各有一套旗标，
-    手写的那份必然漂（少列一条旗标没人会发现），所以直接用 argparse 自带的帮助 ——
-    `-h` 打在子命令前看总览，打在子命令后看那一条自己的旗标。
-    """
     parser = argparse.ArgumentParser(
         prog="python -m traffic_law_qa.pipeline",
         description='建库与查状态（问答走 python -m traffic_law_qa "问题"）',
@@ -232,15 +184,19 @@ def _parser() -> argparse.ArgumentParser:
         dest="command", required=True, metavar="{build,status,layers,docx,parse,chunk,index}"
     )
 
-    build = subs.add_parser("build", help="整条建库：parse → chunk → index")
+    build = subs.add_parser(
+        "build",
+        help="整条建库：parse → chunk → index（手工把法规放进 docx/ 后跑这个；"
+        "HTTP 上传走 POST /documents + POST /reindex，不用手工跑）",
+    )
     build.add_argument("--force", action="store_true", help="无视 sha1 增量门控，全部重新解析")
     build.add_argument("--no-vector", action="store_true", help="只建 BM25 字段，不算向量")
 
     subs.add_parser("status", help="看库内规模、索引快照与 Milvus 连接")
     subs.add_parser("layers", help="看七层管道各自的输入输出")
 
-    docx = subs.add_parser("docx", help="单步：docx → 段落（不给路径就跑 DOCX_DIR 全部）")
-    docx.add_argument("paths", nargs="*", metavar="docx", help="要预览的 docx 路径")
+    docx = subs.add_parser("docx", help="单步：源文件 → 段落（不给路径就跑 SOURCE_DIR 全部）")
+    docx.add_argument("paths", nargs="*", metavar="源文件", help="要预览的源文件路径")
 
     parse = subs.add_parser("parse", help="单步：段落 → 法→章→节→条")
     parse.add_argument("--force", action="store_true", help="无视 sha1 门控，全部重解析")
@@ -256,12 +212,10 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _cmd_docx(paths: list[str]) -> int:
-    """`pipeline docx`：读 docx 并预览段落（原 `kb.docx_reader` 的入口）。"""
-    targets = [Path(a) for a in paths] if paths else sorted(config.DOCX_DIR.glob("*.docx"))
-    reader = DocxReader()
+    targets = [Path(a) for a in paths] if paths else config.source_files()
 
     for target in targets:
-        paragraphs = reader.read(target)
+        paragraphs = reader_for(target).read(target)
         chars = sum(len(p.text) for p in paragraphs)
         print(f"\n=== {target.name} | 段落 {len(paragraphs)} | 字符 {chars}")
         for para in paragraphs[:12]:
@@ -270,16 +224,11 @@ def _cmd_docx(paths: list[str]) -> int:
 
 
 def _cmd_parse(*, force: bool, only: str | None) -> int:
-    """`pipeline parse`：段落 → 条（原 `kb.law_parser` 的入口）。"""
     ParseStage().run(force=force, only=only)
     return 0
 
 
 def _cmd_chunk(show: str | None) -> int:
-    """`pipeline chunk`：条文 → 父子块（原 `kb.chunker` 的入口）。
-
-    `--show` 是**切完再筛**：切块本身就是产物，不是为看那一条才切。
-    """
     chunk_set = ChunkStage().run()
 
     if show:
@@ -291,11 +240,6 @@ def _cmd_chunk(show: str | None) -> int:
 
 
 def _cmd_index(*, with_vector: bool, query: str | None) -> int:
-    """`pipeline index`：块 → Milvus 集合（原 `kb.indexer` 的入口）。
-
-    两处与 `build` 不同，都是有意留着的：先 `wait_until_ready` 等 Milvus（单独重灌索引
-    多半发生在「容器刚起来」时），以及把 `MilvusError` 收成一行中文 + 退出码 1。
-    """
     chunk_set = ChunkStage(verbose=False).load()
     indexer = Indexer()
     print(f"[index] Milvus 版本 {wait_until_ready(indexer.store)}")

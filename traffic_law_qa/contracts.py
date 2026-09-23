@@ -1,25 +1,3 @@
-"""层间数据契约（整条管道的唯一真源）。
-
-每个阶段只认相邻两层的契约对象，不关心对方的实现：
-
-| 层       | 类                 | 输入                            | 输出                        |
-|----------|--------------------|---------------------------------|-----------------------------|
-| read     | `DocxReader`       | docx 路径 `Path`                | `list[Paragraph]`           |
-| parse    | `ParseStage`       | docx 目录                       | `list[LawDocument]`         |
-| chunk    | `ChunkStage`       | `list[LawDocument]`             | `ChunkSet`                  |
-| index    | `Indexer`          | `ChunkSet`                      | `IndexStats`                |
-| rewrite  | `QueryRewriter`    | `Query`                         | `RewrittenQuery`            |
-| retrieve | `HybridRetriever`  | `Query`                         | `RetrievalResult`           |
-| generate | `AnswerGenerator`  | `Question` + `RetrievalResult`  | `Answer`                    |
-
-（同一张表也由 `python -m traffic_law_qa.pipeline layers` 打印，改的时候两边一起改。
-表里记的是**管道真正跑的那个类**：`ParseStage` / `ChunkStage` 是建库步骤的磁盘包装，
-纯计算的 `LawParser` / `LawChunker` 在它们里面。）
-
-契约对象自己负责 JSON 读写（`to_dict` / `from_dict`），所以磁盘格式的变更
-只需要改这一个文件。
-"""
-
 from __future__ import annotations
 
 import json
@@ -29,9 +7,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+class QaError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class Paragraph:
-    """docx 里的一个段落（原样文本 + 段落样式名）。"""
 
     index: int
     text: str
@@ -40,7 +21,6 @@ class Paragraph:
 
 @dataclass(frozen=True)
 class Heading:
-    """章 / 节标题。"""
 
     no: str
     title: str
@@ -59,7 +39,6 @@ class Heading:
 
 @dataclass(frozen=True)
 class Article:
-    """一条法条：定位信息 + 原文 + 款 + 交叉引用。"""
 
     article_no: str
     article_index: int
@@ -105,7 +84,6 @@ class Article:
 
 @dataclass(frozen=True)
 class LawDocument:
-    """一部法规的完整结构：法 → 章 → 节 → 条。"""
 
     law_id: str
     law_name: str
@@ -166,7 +144,6 @@ class LawDocument:
 
 @dataclass(frozen=True)
 class ParentChunk:
-    """条级父块：检索命中子块后，回灌给 LLM 的就是它。"""
 
     parent_id: str
     law_id: str
@@ -204,7 +181,6 @@ class ParentChunk:
 
 @dataclass(frozen=True)
 class Chunk:
-    """款级子块：向量库与 BM25 的索引单元。"""
 
     chunk_id: str
     parent_id: str
@@ -255,7 +231,6 @@ class Chunk:
 
 @dataclass(frozen=True)
 class ChunkSet:
-    """一次切块的完整产物：父块 + 子块 + 统计。"""
 
     parents: tuple[ParentChunk, ...]
     chunks: tuple[Chunk, ...]
@@ -284,12 +259,6 @@ class ChunkSet:
 
 @dataclass(frozen=True)
 class IndexStats:
-    """建索引的结果摘要，落到 index/index_meta.json。
-
-    rows       集合总行数（= 子块数）
-    dense_rows 写了稠密向量的行数；0 表示纯 BM25 模式
-    sparse_rows 带 BM25 稀疏向量的行数（由 Milvus 的 BM25 函数服务端生成）
-    """
 
     collection: str
     uri: str
@@ -314,7 +283,6 @@ class IndexStats:
 
 @dataclass(frozen=True)
 class RewrittenQuery:
-    """检索前的查询改写结果（口语词对齐 + 法名线索）。"""
 
     original: str
     expanded: str
@@ -338,7 +306,6 @@ class RewrittenQuery:
 
 @dataclass(frozen=True)
 class Query:
-    """检索请求。"""
 
     text: str
     top_k: int = 6
@@ -363,7 +330,6 @@ class Query:
 
 @dataclass(frozen=True)
 class RetrievedArticle:
-    """一条被召回的父块（法条）+ 融合分数 + 各通道排名。"""
 
     article: ParentChunk
     score: float
@@ -394,7 +360,6 @@ class RetrievedArticle:
 
 @dataclass(frozen=True)
 class RetrievalResult:
-    """检索结果集 —— 这是 RAG 工具的标准输出。"""
 
     query: str
     articles: tuple[RetrievedArticle, ...]
@@ -411,7 +376,6 @@ class RetrievalResult:
         return [a.citation for a in self.articles]
 
     def render(self) -> str:
-        """人读层：每条命中的融合分、两路排名与原文摘要。"""
         lines = [
             f"查询：{self.query}",
             f"通道：向量={'开' if self.used_vector else '关'} BM25={'开' if self.used_bm25 else '关'} "
@@ -447,7 +411,6 @@ class RetrievalResult:
 
 @dataclass(frozen=True)
 class Evidence:
-    """喂给 LLM 的一条证据（= 一条法条）。"""
 
     label: str
     citation: str
@@ -461,7 +424,6 @@ class Evidence:
 
 @dataclass(frozen=True)
 class Question:
-    """生成请求：问题 + 可选的多轮上下文。"""
 
     text: str
     history: tuple[tuple[str, str], ...] = ()
@@ -470,21 +432,6 @@ class Question:
 
 @dataclass(frozen=True)
 class Review:
-    """末端复核的结果：答案里每个 [依据N] 是否被它引的那条原文支撑。
-
-    **分数由代码算，不由模型给** —— 模型只逐条回 `supported` 布尔值，这里把
-    `supported / total` 聚合出来。让模型直接吐一个 0~1 的数，既没法复现也没法解释；
-    逐条判据则每一条都能拿原文去对。
-
-    `total` 是答案**引用到的编号个数**（不是证据条数），**越界编号也计入分母、且永不支撑**：
-    引了一条不存在的依据，与引了一条对不上的依据，是同一种错。
-
-    `passed` 是给下游的唯一判据（`score < threshold`，**严格小于**）。规则写在这里而不是
-    让每个调用方自己比，是因为「严格小于」抄错一次就静默多拦或少拦。`score is None`
-    （没打成分）时一律 True：复核是闸不是依赖，自己坏掉不许改变答案能否输出。
-
-    `original_text` 留降级前的原文 —— 降级不是毁证据，人要复审的正是那一段。
-    """
 
     score: float | None
     threshold: float
@@ -509,8 +456,64 @@ class Review:
 
 
 @dataclass(frozen=True)
+class WebFinding:
+
+    label: str
+    title: str
+    url: str
+    snippet: str
+    site: str = ""
+    published: str = ""
+
+    def render(self) -> str:
+        head = f"{self.label} {self.title}"
+        if self.site:
+            head += f"（{self.site}）"
+        if self.published:
+            head += f" {self.published}"
+        return f"{head}\n{self.snippet}\n{self.url}"
+
+    def to_dict(self) -> dict:
+        return {
+            "label": self.label,
+            "title": self.title,
+            "url": self.url,
+            "snippet": self.snippet,
+            "site": self.site,
+            "published": self.published,
+        }
+
+
+@dataclass(frozen=True)
+class MaterialPassage:
+
+    label: str
+    doc_id: str
+    display_name: str
+    index: int
+    text: str
+    score: float = 0.0
+
+    @property
+    def citation(self) -> str:
+        return f"{self.display_name} 第 {self.index} 段"
+
+    def render(self) -> str:
+        return f"{self.label} {self.citation}\n{self.text}"
+
+    def to_dict(self) -> dict:
+        return {
+            "label": self.label,
+            "doc_id": self.doc_id,
+            "display_name": self.display_name,
+            "index": self.index,
+            "text": self.text,
+            "score": round(self.score, 6),
+        }
+
+
+@dataclass(frozen=True)
 class Answer:
-    """管道的最终输出。"""
 
     question: str
     text: str
@@ -523,6 +526,18 @@ class Answer:
     review: Review | None = None
     """末端复核的结果；`None` = 没跑复核（阈值关掉、或线性管道这条路根本没有复核）。"""
 
+    timeliness: tuple[WebFinding, ...] = ()
+    """联网检索到的时效性信息，标 `[时效N]`。`()` = 本次没走网搜。
+
+    **不进 `[依据N]` 那条复核判据** —— `review.CITE_RE` 只认「依据」，这两块天然不拉低分母。
+    """
+
+    materials: tuple[MaterialPassage, ...] = ()
+    """本次会话上传材料的片段，标 `[材料N]`。`()` = 没有上传件。
+
+    未入知识库，所以与时效提示同样不进复核判据；差别只在产品口径：入库了才进依据链。
+    """
+
     def to_dict(self) -> dict:
         return {
             "question": self.question,
@@ -534,6 +549,8 @@ class Answer:
             "citations": [e.citation for e in self.evidences],
             "retrieval": None if self.retrieval is None else self.retrieval.to_dict(),
             "review": None if self.review is None else self.review.to_dict(),
+            "timeliness": [w.to_dict() for w in self.timeliness],
+            "materials": [m.to_dict() for m in self.materials],
         }
 
     def render(self, *, show_citations: bool = True) -> str:
@@ -544,6 +561,19 @@ class Answer:
             for e in self.evidences:
                 snippet = e.text.replace("\n", " ")
                 parts.append(f"  {e.label} {e.citation} — {snippet[:60]}…")
+        if self.timeliness:
+            parts.append("")
+            parts.append("时效提示（联网检索，非本库法条）：")
+            for w in self.timeliness:
+                snippet = w.snippet.replace("\n", " ")
+                parts.append(f"  {w.label} {w.title} — {snippet[:60]}…")
+                parts.append(f"      {w.url}")
+        if self.materials:
+            parts.append("")
+            parts.append("本次会话材料（未入知识库，仅供参照）：")
+            for m in self.materials:
+                snippet = m.text.replace("\n", " ")
+                parts.append(f"  {m.label} {m.citation} — {snippet[:60]}…")
         if self.notes:
             parts.append("")
             parts += [f"注：{n}" for n in self.notes]
@@ -552,7 +582,6 @@ class Answer:
 
 @dataclass(frozen=True)
 class StageReport:
-    """单个阶段的执行结果。"""
 
     name: str
     input_desc: str
@@ -565,7 +594,6 @@ class StageReport:
 
 @dataclass(frozen=True)
 class PipelineReport:
-    """整条管道的执行结果。"""
 
     stages: tuple[StageReport, ...]
     law_count: int
@@ -594,16 +622,6 @@ class PipelineReport:
 
 @dataclass(frozen=True)
 class CorpusStats:
-    """已装配语料的规模与通道状态（`LegalRAG.stats()` 的产物）。
-
-    这是上层唯一被允许知道的「检索器内部情况」—— 它只是几个数，
-    不含任何 Milvus 句柄，于是门面之外不需要认识存储层就能自述。
-
-    `dense` 三态：True / False 是**探到过**的真实状态，None 是**探不到**
-    （Milvus 连不上）。写成 `bool | None` 而不是一句中文，是因为
-    「未知（Milvus 未连接）」是**渲染**、不是状态 —— 把渲染塞进数据层，
-    每个消费者就得去比中文字符串。
-    """
 
     articles: int
     chunks: int
@@ -630,6 +648,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 __all__ = [
+    "QaError",
     "Paragraph",
     "Heading",
     "Article",

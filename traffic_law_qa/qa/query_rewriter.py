@@ -1,18 +1,3 @@
-"""查询改写层：Query → RewrittenQuery（口语词对齐 + 法名线索）。
-
-    QueryRewriter.rewrite : Query → RewrittenQuery
-
-为什么需要这一层（实测踩到的两个坑）：
-
-1. **口语词命不中法条用语**。用户问"醉驾怎么处罚"，法条里写的是"醉酒驾驶"。
-   BM25 只能靠"处罚"这种在整个处罚条例里满地都是的词硬凑，
-   结果召回的 Top-1 是"不按交通信号灯通行"——完全跑偏。
-2. **跨法规选址错误**。问深圳的事，却召回了国家法律的一般性条款。
-   查询里出现"深圳""智能网联汽车"这类法名片段时，对应法规应当加权。
-
-这两个修正都很便宜（纯字符串处理，无需模型），但对法规问答的收益极大。
-"""
-
 from __future__ import annotations
 
 from difflib import SequenceMatcher
@@ -92,11 +77,6 @@ MIN_HINT_LENGTH = 2
 
 
 class QueryRewriter:
-    """查询改写器：把口语问题变成能被法条命中的检索词。
-
-    Input : Query
-    Output: RewrittenQuery
-    """
 
     layer = "rewrite"
     input_desc = "Query"
@@ -140,11 +120,6 @@ class QueryRewriter:
 
     @staticmethod
     def find_law_hints(text: str, law_names: tuple[str, ...]) -> list[str]:
-        """取查询与各法名的最长公共片段，作为"问题属于哪部法规"的线索。
-
-        只取最长的那一段，且过滤掉通用词 —— 否则"…怎么处罚"会因为"处罚"
-        二字把所有处罚类条例都算成线索，反而放大噪声。
-        """
         hints: list[str] = []
         for name in law_names:
             matcher = SequenceMatcher(None, text, name, autojunk=False)

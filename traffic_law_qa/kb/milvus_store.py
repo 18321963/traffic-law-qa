@@ -1,21 +1,3 @@
-"""Milvus 集合：稠密向量 + BM25 稀疏向量（服务端 Function 自动生成）+ 混合检索。
-
-    MilvusStore.recreate  : dim → 建集合（schema + BM25 函数 + 双索引）
-    MilvusStore.insert    : list[(Chunk, dense_vector)] → 写入行数
-    MilvusStore.hybrid_search : (稠密向量, 查询原文) → list[(chunk_id, score)]
-
-为什么换 Milvus（替掉自研 BM25 + Chroma）：
-1. **BM25 稀疏向量由服务端生成**：文本字段声明 `enable_analyzer=True` + 一个
-   `FunctionType.BM25` 函数，插入时只给原文，Milvus 自己算稀疏向量；
-   查询时也只给原文。我们那套「自己分词 + 维护 df/postings + 落盘 bm25.json」整段删掉。
-2. **融合也在服务端**：`hybrid_search` + `RRFRanker(k)` 就是我们要的 RRF，
-   不用再手工把两个通道的排名拼起来。
-3. **过滤是原生能力**：`law_id in [...]` 直接下推，不用像 Chroma 那样绕 `where` 语法。
-
-中文化依赖 Milvus 内置的 jieba 分词器（`analyzer_params={"tokenizer": "jieba"}`），
-所以项目里也不再需要 jieba 这个 pip 依赖。
-"""
-
 from __future__ import annotations
 
 import json
@@ -49,14 +31,10 @@ OUTPUT_FIELDS = (
 
 
 class MilvusError(RuntimeError):
-    """Milvus 连接/操作失败，消息里直接给出修法。"""
+    pass
 
 
 def row_of(chunk: Chunk, vector: list[float] | None) -> dict[str, Any]:
-    """把一个子块变成 Milvus 的一行。
-
-    注意：不需要提供稀疏向量 —— BM25 函数会按 text 字段自动生成。
-    """
     row: dict[str, Any] = {
         F_CHUNK_ID: chunk.chunk_id,
         F_TEXT: chunk.embed_text,
@@ -78,7 +56,6 @@ def row_of(chunk: Chunk, vector: list[float] | None) -> dict[str, Any]:
 
 
 class MilvusStore:
-    """Milvus 集合的读写门面（建集合 / 插入 / 混合检索）。"""
 
     input_desc = "list[(Chunk, vector)] | (稠密向量, 查询文本)"
     output_desc = "写入行数 | list[(chunk_id, score)]"
@@ -110,11 +87,10 @@ class MilvusStore:
 
     @property
     def client(self):
-        """懒加载 Milvus 客户端。"""
         if self._client is None:
             try:
                 from pymilvus import MilvusClient
-            except ImportError as exc:  # pragma: no cover
+            except ImportError as exc:
                 raise MilvusError("未安装 pymilvus，请先执行 pip install -e .") from exc
 
             try:
@@ -127,7 +103,6 @@ class MilvusStore:
         return self._client
 
     def ping(self) -> str:
-        """探活：返回版本号，连不上时抛 MilvusError。"""
         try:
             version = self.client.get_server_version()
         except MilvusError:
@@ -141,7 +116,7 @@ class MilvusStore:
     def has_collection(self) -> bool:
         try:
             return bool(self.client.has_collection(self.collection))
-        except Exception:  # noqa: BLE001 - 连不上时按"没有"处理
+        except Exception:  # noqa: BLE001
             return False
 
     def count(self) -> int:
@@ -155,7 +130,6 @@ class MilvusStore:
             self.client.drop_collection(self.collection)
 
     def recreate(self, *, dim: int | None = None) -> dict:
-        """重建集合。dim 为 None 时不建稠密向量字段（纯 BM25 模式）。"""
         from pymilvus import DataType, Function, FunctionType
 
         client = self.client
@@ -209,16 +183,12 @@ class MilvusStore:
         client.create_collection(collection_name=self.collection, schema=schema, index_params=index_params)
         try:
             client.load_collection(self.collection)
-        except Exception as exc:  # noqa: BLE001 - 自动 load 的版本会忽略
+        except Exception as exc:  # noqa: BLE001
             if self.verbose:
                 print(f"[milvus] load_collection 跳过：{exc}")
         return self.describe()
 
     def describe(self) -> dict:
-        """集合结构摘要，写入 index/index_meta.json 便于排查。
-
-        describe_collection 返回的字段里混着 protobuf 容器对象，必须先摘干净才能落 JSON。
-        """
         if not self.has_collection():
             return {}
         info = cast(dict[str, Any], self.client.describe_collection(self.collection))
@@ -286,10 +256,6 @@ class MilvusStore:
         filter_expr: str | None = None,
         rrf_k: int = 60,
     ) -> list[tuple[str, float]]:
-        """稠密 + BM25 稀疏双路召回，服务端 RRF 融合。
-
-        没有配置 embeddin 时自动只跑稀疏通道（dense_vector=None）。
-        """
         from pymilvus import AnnSearchRequest, RRFRanker
 
         requests = []
@@ -327,13 +293,11 @@ class MilvusStore:
 
     @staticmethod
     def _search_kwargs(filter_expr: str | None) -> dict[str, Any]:
-        """pymilvus 的 filter 形参声明为 str（不接受 None），所以按需传入。"""
         return {"filter": filter_expr} if filter_expr else {}
 
     def dense_search(
         self, vector: list[float], *, limit: int, filter_expr: str | None = None
     ) -> list[tuple[str, float]]:
-        """仅稠密通道（用于诊断/对照）。"""
         response = self.client.search(
             collection_name=self.collection,
             data=[vector],
@@ -346,7 +310,6 @@ class MilvusStore:
         return _parse_hits(response, limit)
 
     def sparse_search(self, query_text: str, *, limit: int, filter_expr: str | None = None) -> list[tuple[str, float]]:
-        """仅 BM25 通道（用于诊断/对照）。"""
         response = self.client.search(
             collection_name=self.collection,
             data=[query_text],
@@ -372,7 +335,6 @@ class MilvusStore:
 
     @staticmethod
     def law_filter_expr(law_ids: Iterable[str]) -> str | None:
-        """把 law_id 列表变成 Milvus 过滤表达式。"""
         values = [law_id for law_id in law_ids if law_id]
         if not values:
             return None
@@ -397,7 +359,6 @@ class MilvusStore:
 
 
 def _jsonable(value: Any) -> Any:
-    """把 protobuf 容器等不可序列化对象转成普通 Python 值。"""
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict):
@@ -408,12 +369,6 @@ def _jsonable(value: Any) -> Any:
 
 
 def _parse_hits(response: Any, limit: int) -> list[tuple[str, float]]:
-    """统一解析 search / hybrid_search 的返回结构。
-
-    坑：MilvusClient 返回的是 `SearchResult`（list 的子类），里面一层是 `HybridHits`，
-    元素是 dict；主键在 dict 里的键名是**我们定义的字段名**（chunk_id），不是 "id"。
-    照抄文档里 `hit["id"]` 的写法会静默拿到空结果。
-    """
     if not response:
         return []
     first = response[0] if isinstance(response, (list, tuple)) else response
@@ -433,7 +388,6 @@ def _parse_hits(response: Any, limit: int) -> list[tuple[str, float]]:
 
 
 def wait_until_ready(store: MilvusStore, *, timeout: float = 120.0, interval: float = 3.0) -> str:
-    """轮询等待 Milvus 就绪（compose 首启需要 30~90 秒）。"""
     deadline = time.time() + timeout
     last_error: Exception | None = None
     while time.time() < deadline:
