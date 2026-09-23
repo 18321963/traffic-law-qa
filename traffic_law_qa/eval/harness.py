@@ -1,4 +1,16 @@
-"""离线检索评测：data/eval_retrieval.json → hit@1/@3/@6 + MRR。
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+from .. import config
+from ..contracts import RetrievalResult
+from .corpus import BucketError, EvalCase, display_path, load_bucket
+
+USAGE = """离线检索评测：data/eval_retrieval.json → hit@1/@3/@6 + MRR。
 
     python -m traffic_law_qa.eval                    # 跑全部可用评测题（82 道）
     python -m traffic_law_qa.eval --limit 20         # 先跑 20 条看链路
@@ -32,18 +44,6 @@
 原先设过的**「域内外分开报」机制已拆除**：域外题清零后，`in_domain` 标记、
 `--in-domain` 开关、报告里的域外行全都失去了真实调用，留着就是一份没人执行的契约。
 """
-
-from __future__ import annotations
-
-import argparse
-import json
-import time
-from dataclasses import dataclass
-from pathlib import Path
-
-from .. import config
-from ..contracts import RetrievalResult
-from .corpus import BucketError, EvalCase, display_path, load_bucket
 
 __all__ = ["main", "evaluate", "evaluate_reference", "EvalReport", "ReferenceReport"]
 
@@ -94,7 +94,6 @@ class EvalReport:
         return f"  {label}：{metrics} ｜ MRR {self.mrr(rows):.3f}  （{len(rows)} 题）"
 
     def by_law(self) -> dict[str, tuple[int, int]]:
-        """法规 → （命中 top-3 的题数, 该法规总题数）。"""
         grouped: dict[str, list[bool]] = {}
         for item in self.results:
             for law in item.case.gold_laws:
@@ -123,11 +122,6 @@ class EvalReport:
 
     @property
     def vector_label(self) -> str:
-        """按实际检索用到的通道标注，而不是按命令行开关。
-
-        请求了向量不等于真走了向量：没配 EMBED_API_KEY、或集合是纯 BM25 建的，
-        检索层会降级成只用 BM25。这个标签是 A/B 结论的题头，必须说实话。
-        """
         used = sum(1 for row in self.results if row.used_vector)
         if used == 0:
             return "纯 BM25"
@@ -169,7 +163,6 @@ def evaluate(
     with_vector: bool = True,
     verbose: bool = True,
 ) -> EvalReport:
-    """逐题跑检索，统计 hit@k 与 MRR。"""
     from ..api import qa
 
     data_path = Path(data_path or config.EVAL_RETRIEVAL_PATH)
@@ -219,14 +212,6 @@ def evaluate(
 
 
 def _verdict(rule_hits: int, base_hits: int) -> str:
-    """规则臂 vs 基线 hit@1 的那一句结论 —— **算出来**，不许写死。
-
-    这行原本是一句常量：「没有命中率增益，这一臂比基线还少 3 题」。3 是拿
-    当时的基线 202 减出来的，后来向量模型从 text-embedding-v4 换成 bge-large，
-    基线掉到 192，规则臂反倒**多** 7 题 —— 结论整个反了过来，而那句常量还在说旧话，
-    并且就印在重新算出来的「199 / 192」正下方，自相矛盾。
-    数字与它的解释必须同源，否则换一次模型就会留下一句理直气壮的错话。
-    """
     delta = rule_hits - base_hits
     if delta > 0:
         return f"这一臂比基线 hit@1 **多** {delta} 题"
@@ -237,7 +222,6 @@ def _verdict(rule_hits: int, base_hits: int) -> str:
 
 @dataclass(frozen=True)
 class ReferenceCase:
-    """一条「题面点名了某条」的题：规则取条拿到了什么，基线检索又拿到了什么。"""
 
     question: str
     gold_citations: tuple[str, ...]
@@ -248,11 +232,6 @@ class ReferenceCase:
 
 @dataclass(frozen=True)
 class ReferenceReport:
-    """规则取条（意图识别 + get_article）在「题面含条号」那批题上的表现。
-
-    **这一臂完全离线**：它测的能力（正则抽条号 + 条号索引定位）只需要 `parents`，
-    不连 Milvus、不调 LLM。基线那一列才需要检索，没跑时如实标出来。
-    """
 
     results: tuple[ReferenceCase, ...]
     source: str
@@ -277,11 +256,9 @@ class ReferenceReport:
 
     @property
     def wrong(self) -> tuple[ReferenceCase, ...]:
-        """规则取条拿到了**不是** gold 的那一条 —— 这是唯一真正有害的一类。"""
         return tuple(r for r in self.results if r.located is not None and not r.located_is_gold)
 
     def baseline_hit_at(self, k: int) -> float:
-        """基线命中率。`baseline_rank is None` 就是**未命中** —— 分母是全部题，不是命中的那些。"""
         if not self.baseline_ran or not self.results:
             return 0.0
         return sum(
@@ -293,17 +270,14 @@ class ReferenceReport:
 
     @property
     def rule_only(self) -> tuple[ReferenceCase, ...]:
-        """规则答对了、而基线**第 1 名不是它**的题 —— 规则这条路真正赚到的部分。"""
         return tuple(r for r in self.results if r.located_is_gold and r.baseline_rank != 1)
 
     @property
     def baseline_only(self) -> tuple[ReferenceCase, ...]:
-        """规则回退、基线第 1 名就是 gold 的题 —— 规则交给基线反而更好的部分。"""
         return tuple(r for r in self.results if r.located is None and r.baseline_rank == 1)
 
     @property
     def combined_hits(self) -> int:
-        """合起来（规则触发就用规则，回退就用基线）在「第 1 名」上的上界。"""
         return len(self.correct) + len(self.baseline_only)
 
     def render(self) -> str:
@@ -388,17 +362,8 @@ def evaluate_reference(
     compare_baseline: bool = True,
     verbose: bool = True,
 ) -> ReferenceReport:
-    """跑「题面点名了某一条」那批题，看规则取条能不能唯一定位到它。
-
-    与 `evaluate()` 的分工：那个测**检索**（hit@k / MRR），这个测**定位**。
-    两者测不到同一件事 —— 评测集里含「第…条」的是 0 道，所以
-    检索指标在结构上永远衡量不到本轮新增的能力，这一臂才是它的探针。
-
-    `compare_baseline=True` 时额外跑一遍基线检索做对照；Milvus 不可用时
-    如实跳过基线那一列，**不**让整个评测失败（离线部分本来就跑得完）。
-    """
-    from ..agent.tools.articles import build_article_index, find_article
     from ..kb.chunker import ChunkStage
+    from ..tools.articles import build_article_index, find_article
 
     data_path = Path(data_path or config.EVAL_REFERENCE_PATH)
     if not data_path.exists():
@@ -435,7 +400,7 @@ def evaluate_reference(
                     (i for i, pid in enumerate(hits, start=1) if pid in item.gold_ids), None
                 )
             baseline_ran = True
-        except Exception as exc:  # noqa: BLE001 - Milvus 没起不该让离线部分也失败
+        except Exception as exc:  # noqa: BLE001
             print(f"[eval] 基线对照跳过（{type(exc).__name__}：{exc}）", flush=True)
 
     started = time.perf_counter()
@@ -464,16 +429,7 @@ def evaluate_reference(
     )
 
 
-USAGE = __doc__
-
-
 def _parser() -> argparse.ArgumentParser:
-    """只做校验的解析器（`--help` 由 main 开头那个分支打印 `USAGE`，所以 `add_help=False`）。
-
-    注意这里**没有** `or not args` 那条：不带参数就是跑全量 82 道，这是这个入口的
-    默认用法（`python -m traffic_law_qa.eval`），与其余几个「不给参数就打说明书」的
-    入口刻意不同。解析器只把「不认识的开关」和「取不到值的开关」变成错误。
-    """
     parser = argparse.ArgumentParser(prog="python -m traffic_law_qa.eval", add_help=False)
     parser.add_argument("--reference", action="store_true", help="规则取条臂：测定位，不是检索")
     parser.add_argument("--no-compare", action="store_true", help="连基线对照都不跑")
@@ -544,9 +500,5 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-# 入口是 `./__main__.py`（`python -m traffic_law_qa.eval`）—— 与 `agent/cli.py` 同一条规矩：
-# 只有门模块带 `__main__` 块，库模块不带。
-# 下面这个闸只为拦「按老习惯敲了 `-m traffic_law_qa.eval.harness`」：不给它的话模块级代码
-# 跑完就退 0，敲的人以为评测跑过了。
 if __name__ == "__main__":
-    raise SystemExit("已收口：请用 python -m traffic_law_qa.eval（清单见 README「所有入口」）")
+    raise SystemExit("已收口：请用 python -m traffic_law_qa.eval（清单见 README「入口」）")

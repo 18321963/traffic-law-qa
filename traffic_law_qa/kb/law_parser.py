@@ -1,14 +1,3 @@
-"""Layer 2 · parse：段落列表 → 结构化法条（法 → 章 → 节 → 条）。
-
-    LawParser.parse : list[Paragraph] → LawDocument        （纯计算，不碰磁盘）
-    LawLibrary      : parsed/*.json、text/*.md、manifest.json 的读写门面
-    ParseStage      : docx 目录 → list[LawDocument]        （带 sha1 增量门控）
-
-docx 是唯一真源，本模块只读不改；产物全部可重生成。
-清洗只做两件事：去掉零宽字符；去掉 PDF 转换残留的"CJK 之间单个 ASCII 空格"。
-全角空格（　）是条号分隔符，必须保留。
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -16,10 +5,23 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from .. import config
 from ..contracts import Article, Heading, LawDocument, Paragraph
 from .docx_reader import DocxReader
+from .text_reader import TextReader
+
+READER_BY_SUFFIX: dict[str, Any] = {".docx": DocxReader, ".md": TextReader, ".txt": TextReader}
+
+
+def reader_for(path: str | Path) -> Any:
+    try:
+        return READER_BY_SUFFIX[Path(path).suffix.lower()]()
+    except KeyError:
+        raise ValueError(
+            f"{Path(path).name} 的后缀不在可读范围内（{'、'.join(sorted(READER_BY_SUFFIX))}）"
+        ) from None
 
 CN_NUM = "零一二三四五六七八九十百千"
 CN_CLASS = f"[{CN_NUM}]"
@@ -47,12 +49,10 @@ LAW_ID_REGISTRY: dict[str, str] = {
 
 
 def clean_text(text: str) -> str:
-    """去零宽字符 + 去 CJK 之间的残留 ASCII 空格。"""
     return _MID_ASCII_SPACE.sub("", _ZERO_WIDTH.sub("", text)).strip()
 
 
 def cn_to_int(cn: str) -> int:
-    """中文数字 → int，支持"十""十一""二十""一百二十四"。"""
     if not cn:
         raise ValueError("空的中文数字")
     section = number = 0
@@ -74,7 +74,6 @@ def cn_to_int(cn: str) -> int:
 
 
 def _norm_title(raw: str) -> str:
-    """章/节标题去掉排版用的全角空格填充：「总　　则」→「总则」。"""
     return re.sub(r"\s+", "", raw)
 
 
@@ -87,11 +86,6 @@ def sha1_of(path: Path) -> str:
 
 
 class LawParser:
-    """解析器：把段落列表还原成"法 → 章 → 节 → 条"结构。
-
-    Input : list[Paragraph]
-    Output: LawDocument
-    """
 
     layer = "parse"
     input_desc = "list[Paragraph]"
@@ -108,7 +102,6 @@ class LawParser:
         law_name: str | None = None,
         version: str | None = None,
     ) -> LawDocument:
-        """解析一份法规的段落。source_file 只用于取默认法名/版本与溯源记录。"""
         paras = [Paragraph(p.index, clean_text(p.text), p.style) for p in paragraphs]
         paras = [p for p in paras if p.text]
         if not paras:
@@ -206,19 +199,13 @@ class LawParser:
             leftovers=tuple(leftovers),
         )
 
-    def parse_docx(self, path: str | Path, reader: DocxReader | None = None) -> LawDocument:
-        """便捷入口：直接吃 docx 路径。"""
+    def parse_file(self, path: str | Path, reader: Any | None = None) -> LawDocument:
         path = Path(path)
-        paragraphs = (reader or DocxReader()).read(path)
+        paragraphs = (reader or reader_for(path)).read(path)
         return self.parse(paragraphs, source_file=path.name)
 
     @staticmethod
     def _locate_body(paras: list[Paragraph]) -> tuple[int, list[str]]:
-        """定位正文起点，并返回目录条目。
-
-        目录块 = "目　　录" 之后连续的章/节标题行；
-        正文起点 = 正文第一个"第X条"向上回溯到的最近章标题（无目录时即第一个章标题）。
-        """
         toc_start = next((i for i, p in enumerate(paras) if RE_TOC_HEAD.match(p.text)), None)
 
         if toc_start is None:
@@ -246,7 +233,6 @@ class LawParser:
         return head, toc_lines
 
     def _guess_law_name(self, preamble: list[str], source_file: str) -> str:
-        """法名优先取文件名前缀（正文首行可能被拆成两段）。"""
         stem = RE_FILENAME_VERSION.sub("", Path(source_file).stem).strip()
         if stem:
             return stem
@@ -264,7 +250,6 @@ class LawParser:
 
 
 def render_markdown(law: LawDocument) -> str:
-    """人读层：保留章 / 节 / 条层级，便于与原文逐条比对。"""
     lines = [f"# {law.law_name}", "", f"版本：{law.version} ｜ 来源：{law.source_file}", ""]
     if law.preamble:
         lines += [f"> {line}" for line in law.preamble]
@@ -281,11 +266,6 @@ def render_markdown(law: LawDocument) -> str:
 
 
 class LawLibrary:
-    """结构层门面：parsed/*.json、text/*.md、manifest.json 的唯一读写入口。
-
-    Input : LawDocument 或 law_id
-    Output: 文件 / LawDocument
-    """
 
     input_desc = "LawDocument | law_id"
     output_desc = "parsed/*.json + text/*.md + manifest.json"
@@ -331,7 +311,7 @@ class LawLibrary:
         self.parsed_dir.mkdir(parents=True, exist_ok=True)
         manifest = {
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "docx_dir": str(config.DOCX_DIR),
+            "source_dir": str(config.SOURCE_DIR),
             "cross_check": False,
             "laws": entries,
         }
@@ -356,13 +336,6 @@ class LawLibrary:
 
 
 class ParseStage:
-    """Layer 2 的落盘封装：docx 目录 → 结构层产物。
-
-    Input : 法规知识库/docx/*.docx
-    Output: list[LawDocument]（同时写 parsed/*.json、text/*.md、manifest.json）
-
-    docx 的 sha1 未变则跳过解析（除非 force），实现增量重建。
-    """
 
     layer = "parse"
     input_desc = "docx 目录 (Path)"
@@ -371,27 +344,26 @@ class ParseStage:
     def __init__(
         self,
         *,
-        docx_dir: Path | None = None,
-        reader: DocxReader | None = None,
+        source_dir: Path | None = None,
+        readers: dict[str, Any] | None = None,
         parser: LawParser | None = None,
         library: LawLibrary | None = None,
         verbose: bool = True,
     ) -> None:
-        self.docx_dir = Path(docx_dir or config.DOCX_DIR)
-        self.reader = reader or DocxReader()
+        self.source_dir = Path(source_dir or config.SOURCE_DIR)
+        self.readers = readers or {suffix: READER_BY_SUFFIX[suffix]() for suffix in config.SOURCE_SUFFIXES}
         self.parser = parser or LawParser()
         self.library = library or LawLibrary()
         self.verbose = verbose
         self.last_skipped: list[str] = []
 
     def run(self, *, force: bool = False, only: str | None = None) -> list[LawDocument]:
-        """解析 docx 目录下的全部法规（或用 only 指定单个 law_id）。"""
         cached_entries = self.library.manifest_by_file()
         laws: list[LawDocument] = []
         entries: list[dict] = []
         self.last_skipped = []
 
-        for docx_path in sorted(self.docx_dir.glob("*.docx")):
+        for docx_path in config.source_files(self.source_dir):
             digest = sha1_of(docx_path)
             cached = cached_entries.get(docx_path.name)
 
@@ -407,7 +379,7 @@ class ParseStage:
                 laws.append(self.library.load(cached["law_id"]))
                 continue
 
-            law = self.parser.parse_docx(docx_path, self.reader)
+            law = self.parser.parse_file(docx_path, self.readers[docx_path.suffix.lower()])
             if only and law.law_id != only:
                 continue
 
@@ -432,7 +404,5 @@ class ParseStage:
         return laws
 
 
-# 命令行入口在 `../pipeline.py`（`python -m traffic_law_qa.pipeline parse`）；这一层是纯库，没有 `main`。
-# 下面这个闸只为拦「按老习惯敲了 `-m`」：不给它的话模块级代码跑完就退 0，敲的人以为活儿干完了。
 if __name__ == "__main__":
-    raise SystemExit("已收口：请用 python -m traffic_law_qa.pipeline parse（清单见 README「所有入口」）")
+    raise SystemExit("已收口：请用 python -m traffic_law_qa.pipeline parse（清单见 README「入口」）")

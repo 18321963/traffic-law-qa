@@ -1,13 +1,3 @@
-"""Layer 1 · read：docx 文件 → 段落列表。
-
-    Input : Path（.docx 文件）
-    Output: list[Paragraph]
-
-为什么直读 XML：本项目语料是原生 DOCX、纯段落、无扫描无表格，
-"第X条必须独占一段"是整条管道的根基，版面重排型解析器（docling 等）反而会破坏这个边界。
-解析用标准库 `xml.etree.ElementTree`，不引入 lxml/python-docx 等额外依赖。
-"""
-
 from __future__ import annotations
 
 import zipfile
@@ -21,21 +11,15 @@ DOCUMENT_XML = "word/document.xml"
 
 
 class DocxReader:
-    """DOCX 读取器：只负责把 docx 变成段落，不做任何业务清洗。"""
 
     layer = "read"
     input_desc = "docx 路径 (Path)"
     output_desc = "list[Paragraph]"
 
     def __init__(self, *, keep_empty: bool = False) -> None:
-        """
-        Args:
-            keep_empty: 是否保留空段落。默认丢弃，避免解析阶段产生噪声。
-        """
         self.keep_empty = keep_empty
 
     def read(self, path: str | Path) -> list[Paragraph]:
-        """读取 docx 的全部段落，按文档顺序返回。"""
         path = Path(path)
         root = ET.fromstring(self._read_document_xml(path))
         parent_map = {child: parent for parent in root.iter() for child in parent}
@@ -53,11 +37,9 @@ class DocxReader:
         return paragraphs
 
     def read_text(self, path: str | Path, *, sep: str = "\n") -> str:
-        """把 docx 拍平成一整段纯文本（人工比对原文用）。"""
         return sep.join(p.text for p in self.read(path))
 
     def read_many(self, paths: list[str | Path]) -> dict[str, list[Paragraph]]:
-        """批量读取，返回 {文件名: 段落列表}。"""
         return {Path(p).name: self.read(p) for p in paths}
 
     @staticmethod
@@ -84,7 +66,6 @@ def _has_paragraph_ancestor(node: ET.Element, parent_map: dict[ET.Element, ET.El
 
 
 def _paragraph_text(p: ET.Element) -> str:
-    """按文档顺序拼出段落文本，w:tab / w:br 还原为制表符与换行。"""
     parts: list[str] = []
     for node in p.iter():
         tag = _local(node.tag)
@@ -107,7 +88,5 @@ def _paragraph_style(p: ET.Element) -> str | None:
     return style.get(f"{{{W}}}val")
 
 
-# 命令行入口在 `../pipeline.py`（`python -m traffic_law_qa.pipeline docx`）；这一层是纯库，没有 `main`。
-# 下面这个闸只为拦「按老习惯敲了 `-m`」：不给它的话模块级代码跑完就退 0，敲的人以为活儿干完了。
 if __name__ == "__main__":
-    raise SystemExit("已收口：请用 python -m traffic_law_qa.pipeline docx（清单见 README「所有入口」）")
+    raise SystemExit("已收口：请用 python -m traffic_law_qa.pipeline docx（清单见 README「入口」）")

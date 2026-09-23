@@ -1,36 +1,37 @@
-"""循环本身的三个节点：规划轮、工具执行轮、收尾轮。
-
-循环**外**那两次调用在 `region.py`（入口判地区）与 `review.py`（末端复核）—— 它们只答一道
-与循环无关的判断题，各自拿一只便宜的模型、温度钉死 0、**失败即放行**，既不写 `messages`
-也不进 `usage`，契约与本模块不同，所以不在这里。
-
-**收尾轮复用既有的 `AnswerGenerator`，提示词一个字都不改** —— 它把 N 次检索合并回一个
-`RetrievalResult`，原样交给 `answer()`。所以「Agent 的答案」和「线性管道的答案」是同一段
-代码产出的，对照实验比的才真的是架构差异。
-"""
-
 from __future__ import annotations
 
 from dataclasses import replace
 from typing import Any
 
 from .. import config
-from ..contracts import ParentChunk, Question, RetrievalResult
+from ..contracts import MaterialPassage, ParentChunk, Question, RetrievalResult, WebFinding
 from ..obs import Tracer
 from ..qa.rag import LegalRAG
-from .llm import ToolCallingLLM
-from .prompts import AGENT_SYSTEM_PROMPT
-from .state import AgentState
-from .tools.arguments import parse_article_arguments, parse_tool_arguments, tool_message
-from .tools.articles import lookup_article, resolve_law_id
-from .tools.merge import merge_retrievals
-from .tools.render import render_tool_result
-from .tools.schemas import (
+from ..services.llm import ToolCallingLLM
+from ..tools.arguments import (
+    parse_article_arguments,
+    parse_material_arguments,
+    parse_tool_arguments,
+    parse_web_arguments,
+    tool_message,
+)
+from ..tools.articles import lookup_article, resolve_law_id
+from ..tools.documents import load_materials, search_materials
+from ..tools.merge import merge_retrievals
+from ..tools.render import render_tool_result
+from ..tools.schemas import (
     GET_ARTICLE_NAME,
     GET_ARTICLE_TOOL,
+    MATERIAL_TOP_K_DEFAULT,
     SEARCH_LAW_NAME,
     SEARCH_LAW_TOOL,
+    SEARCH_MATERIALS_NAME,
+    SEARCH_MATERIALS_TOOL,
+    WEB_SEARCH_NAME,
 )
+from ..tools.web_search import search_web
+from .prompts import AGENT_SYSTEM_PROMPT
+from .state import AgentState
 
 __all__ = [
     "TOOLS",
@@ -39,7 +40,7 @@ __all__ = [
     "make_finalize_node",
 ]
 
-TOOLS = [SEARCH_LAW_TOOL, GET_ARTICLE_TOOL]
+TOOLS = [SEARCH_LAW_TOOL, GET_ARTICLE_TOOL, SEARCH_MATERIALS_TOOL]
 
 _NO_FRESH_EVIDENCE = (
     "⚠ 本轮一条新证据都没取到（命中的条上一轮都已经给过你了）。同一个方向换词换不出新东西 ——"
@@ -52,30 +53,22 @@ _NO_EVIDENCE_STOP_NUDGE = (
     "（规则 2 的问法：一字不改地用用户的问题原文）。"
 )
 
+_NO_FRESH_MATERIAL = (
+    "⚠ 这些段上一轮已经给过你了，材料里没有别的相关内容。就此停下作答，或换个说法再试一次。\n"
+)
+
 
 def _sum_usage(first: dict, second: dict) -> dict:
-    """两次调用合成一行 —— `usage` 的行数被 `_trajectory_notes` 当作规划轮数来数。"""
     if not first or not second:
         return first or second or {}
     return {key: (first.get(key) or 0) + (second.get(key) or 0) for key in set(first) | set(second)}
 
 
 def _unearned_stop(reply: dict, state: AgentState) -> bool:
-    """这一次「停」有没有资格：没发工具调用，**且手上一条证据都没有**。
-
-    判「够了」要有证据可判。零证据又停，只有一个解释：模型把「缺什么」写成了正文，
-    没有把缺的东西写成那一轮的工具调用。有证据的停（查过一轮之后自己收手）是合法的，
-    不在此列 —— 那是这个循环唯一的停止信号。
-    """
     return not reply.get("tool_calls") and not state.get("search_log")
 
 
 def _retrieval_digest(result: RetrievalResult) -> dict:
-    """检索观察的输出：命中几条、走了哪条通道、多快、头三条是谁。
-
-    只放**判断用得上的**：命中条数与首选决定「这一轮有没有用」，通道与耗时解释
-    「为什么慢/为什么空」。全文不在这里 —— 它已经在节点 span 的 search_log 里了。
-    """
     return {
         "命中": len(result.articles),
         "向量": result.used_vector,
@@ -86,24 +79,6 @@ def _retrieval_digest(result: RetrievalResult) -> dict:
 
 
 def make_agent_node(llm: ToolCallingLLM, cfg: config.AgentConfig, laws: list[str]):
-    """规划轮。**这个节点同时管判断与检索**：它说「够了」的方式就是不调用工具。
-
-    读：question / history / messages / max_steps
-    写：{"messages": [助手消息], "steps": 1, "usage": [一行]}
-
-    `laws` 是**库内全部法规名**，写进提示词当「库的边界」。没有它，模型分不清「这一轮没
-    检出来」和「库里根本没有」，会把预算全烧在补不上的缺口上。名单纯从 `parents` 现取，
-    不写死一份：新增法规时不该有人记得来这里改。
-
-    **预算不在这个节点里判**：进得来就说明还有轮次（由 `_route_after_tools` 保证），
-    所以工具照给 —— 模型不必靠「工具被收走」来知道该停。
-
-    **零证据的「停」不成立，会重问一次。** 判「够了」得有证据可判；手上一条都没有时那一轮
-    助手消息却不带 `tool_calls`，只有一个解释 —— 模型把「缺什么」写成了正文，而没把缺的东西
-    写成那一轮的工具调用（2026-09-22 实测：4 次实跑里 2 次这样，那一轮零检索，6 条证据全是
-    收尾节点兜底捞的）。第一次停若手上没证据，就追加一句纠正再问一次，**上限一次**：
-    第二次仍不调工具就照旧收尾，走兜底检索那条路，不会在这里转圈。
-    """
 
     laws_block = "\n".join(f"- {name}" for name in laws)
     law_count = len(laws)
@@ -144,28 +119,6 @@ def make_tools_node(
     index: dict[tuple[str, int], ParentChunk],
     observer: Tracer | None = None,
 ):
-    """执行工具调用。
-
-    读：messages[-1].tool_calls / search_log / top_k / region_scope
-    写：{"messages": [每个 tool_call 一条 ToolMessage], "search_log": [新增行]}
-
-    检索的作用域有**两个来源，模型点名的优先**：模型给了 `law_name` 就用它解析出的那一部，
-    没给才落到入口判出的 `region_scope`（该地区条例 + 国家法，判不出时为空 = 全库）。
-    顺序不能反：模型点名是它在看到上一轮证据后的明确取舍，地区限定只是没人点名时的默认值。
-
-    **不变量：每个 tool_call 恰好产出一条 ToolMessage** —— 无论成功、参数非法、
-    工具名未知、还是工具抛异常。闭合发生在产生 tool_call 的那个节点里，
-    于是「assistant 的 tool_calls 没有对应的 tool 消息」这个会让端点直接 400 的
-    状态，在结构上就不可能出现，不需要任何事后修补。
-
-    `observer` 只用来给每次检索记一笔（观察类型 `retriever`），与检索结果无关；
-    不传就是空实现，逐位不变。
-
-    **一条新证据都没取到的那一轮，工具消息开头会加一句警告**（`_NO_FRESH_EVIDENCE`）。这是
-    「这轮白查了」唯一可信的信号：拿检索词的字面相似度去判重复实测分不开 —— 同一句话删掉一个
-    字的重复对是 0.983，而「罚多少 / 记多少分」这种**合法续查**是 0.927，中间没有安全的阈值。
-    只有「返回的条一条都不新」是硬事实，而且它不拦检索、不丢证据，只是把话说破。
-    """
 
     observer = observer or Tracer()
     parents = rag.parents
@@ -181,10 +134,22 @@ def make_tools_node(
 
         out_messages: list[dict] = []
         out_logs: list[dict] = []
+        out_web: list[WebFinding] = []
+        out_materials: list[MaterialPassage] = []
+        seen_materials = {m.label for m in state.get("materials") or ()}
+        loaded: list[MaterialPassage] | None = None
 
         def position() -> int:
-            """工具结果里的序号，跨轮连续。"""
             return len(state.get("search_log") or ()) + len(out_logs) + 1
+
+        def web_position() -> int:
+            return len(state.get("external") or ()) + len(out_web) + 1
+
+        def materials() -> list[MaterialPassage]:
+            nonlocal loaded
+            if loaded is None:
+                loaded = list(load_materials(state.get("material_ids") or ()))
+            return loaded
 
         def run_search(arguments: str) -> tuple[RetrievalResult | None, str]:
             try:
@@ -219,7 +184,7 @@ def make_tools_node(
                     result = rag.search(query, top_k=top_k, **kwargs)
                     match_text = rag.expand(query)
                     span.update(output=_retrieval_digest(result))
-            except Exception as exc:  # noqa: BLE001 - 工具失败不该打断循环
+            except Exception as exc:  # noqa: BLE001
                 return None, f"检索失败：{exc}。可以换一组关键词再试，或用更通用的说法。"
 
             text = render_tool_result(
@@ -259,7 +224,57 @@ def make_tools_node(
                 match_text="",
             )
 
-        handlers = {SEARCH_LAW_NAME: run_search, GET_ARTICLE_NAME: run_lookup}
+        def run_web(arguments: str) -> tuple[RetrievalResult | None, str]:
+            try:
+                query, count = parse_web_arguments(
+                    arguments, default_count=config.bocha_config().count
+                )
+            except ValueError as exc:
+                return None, f"参数不合法：{exc}。请修正后重试。"
+
+            with observer.observation(
+                "联网检索",
+                "retriever",
+                input={"query": query, "count": count},
+            ) as span:
+                findings, text = search_web(query, start=web_position(), count=count)
+                span.update(output={"命中": len(findings), "头三条": [w.title for w in findings[:3]]})
+
+            out_web.extend(findings)
+            return None, text
+
+        def run_materials(arguments: str) -> tuple[RetrievalResult | None, str]:
+            try:
+                query, top_k = parse_material_arguments(
+                    arguments, default_top_k=MATERIAL_TOP_K_DEFAULT
+                )
+            except ValueError as exc:
+                return None, f"参数不合法：{exc}。请修正后重试。"
+
+            with observer.observation(
+                "材料检索", "retriever", input={"query": query, "top_k": top_k}
+            ) as span:
+                hits, text = search_materials(query, materials(), top_k=top_k)
+                span.update(
+                    output={
+                        "命中": len(hits),
+                        "材料份数": len({hit.doc_id for hit in hits}),
+                        "段": [hit.citation for hit in hits[:3]],
+                    }
+                )
+            fresh = [hit for hit in hits if hit.label not in seen_materials]
+            if hits and not fresh:
+                text = _NO_FRESH_MATERIAL + text
+            out_materials.extend(fresh)
+            seen_materials.update(hit.label for hit in fresh)
+            return None, text
+
+        handlers = {
+            SEARCH_LAW_NAME: run_search,
+            GET_ARTICLE_NAME: run_lookup,
+            WEB_SEARCH_NAME: run_web,
+            SEARCH_MATERIALS_NAME: run_materials,
+        }
 
         for call in pending:
             call_id = call.get("id", "")
@@ -285,22 +300,17 @@ def make_tools_node(
             out_logs.append(row)
             seen |= {article["parent_id"] for article in row["articles"]}
 
-        return {"messages": out_messages, "search_log": out_logs}
+        return {
+            "messages": out_messages,
+            "search_log": out_logs,
+            "external": out_web,
+            "materials": out_materials,
+        }
 
     return tools_node
 
 
 def _trajectory_notes(state: AgentState, merged: RetrievalResult, cfg: config.AgentConfig) -> list[str]:
-    """把循环本身的成本写进 Answer.notes —— 不摆出来，就没法解释「凭什么是 3 倍」。
-
-    **两处计数刻意来自两个不同的源**（`usage` / `tool_call` 名字）：`search_log` 的行数
-    不是检索次数（`get_article` 同形状但零检索），而 `steps` 与 `usage` 的行数今天虽然
-    相等，口径却不是一回事 —— 一个是路由器累加的预算，一个是调用处写下的账单。
-
-    收尾成因只写一种：**预算用尽被强制作答**。判据是「最后一条消息不是助手消息」——
-    助手消息且没有 `tool_calls` 就是模型自己收的手（它说了「够了」），而预算尽那条路上
-    最后一条一定是 `tools` 产出的 tool 消息。
-    """
     calls = [
         (call.get("function") or {}).get("name") or ""
         for message in state.get("messages") or ()
@@ -310,12 +320,18 @@ def _trajectory_notes(state: AgentState, merged: RetrievalResult, cfg: config.Ag
     plans = len(state.get("usage") or ())
     searches = calls.count(SEARCH_LAW_NAME)
     lookups = calls.count(GET_ARTICLE_NAME)
+    webs = calls.count(WEB_SEARCH_NAME)
+    materials = calls.count(SEARCH_MATERIALS_NAME)
     steps = state.get("steps", 0)
     max_steps = state.get("max_steps", cfg.max_steps)
 
     parts = [f"{plans} 轮 LLM 规划", f"{searches} 次检索"]
     if lookups:
         parts.append(f"{lookups} 次精确取条")
+    if webs:
+        parts.append(f"{webs} 次联网检索（{len(state.get('external') or ())} 条时效提示）")
+    if materials:
+        parts.append(f"{materials} 次材料检索（{len(state.get('materials') or ())} 段）")
     parts.append(f"证据 {len(merged.articles)} 条")
     notes = ["Agent：" + " / ".join(parts)]
 
@@ -334,22 +350,6 @@ def make_finalize_node(
     cfg: config.AgentConfig,
     observer: Tracer | None = None,
 ):
-    """收尾：把累积的证据合并回一个 RetrievalResult，交给既有生成器。
-
-    读：question / history / messages / search_log / steps / max_steps / usage / top_k
-    写：{"answer": Answer, "search_log": [兜底检索那一行，否则 []]}
-
-    **这里不喂工具历史、也不 bind_tools** —— 从零重建一次「问题 + 依据」的提示词。
-    这样既绕开了可能残留的悬空 tool_calls，又让提示词与线性管道逐字节相同。
-
-    **不接 `top_k` 参数**：那曾是 runner 的条数，只在 `state` 缺字段时兜底，
-    而 `AgentRunner.invoke()` 必然写 `state["top_k"]` —— 它一次都没生效过，
-    却让同一个函数里坐着两个 `top_k`（收尾读闭包、工具轮读 state），
-    调用方传进来的 `Question` 自带 `top_k` 时两者就分叉。现在兜底直接读 config。
-
-    `observer` 同上：只给那条**兜底检索**记一笔。它不进工具轮，是这张图里唯一一次
-    「没人要求、自己做的检索」，看 trace 时正要知道它花了多久、命中了什么。
-    """
 
     observer = observer or Tracer()
 
@@ -384,7 +384,12 @@ def make_finalize_node(
             history=tuple(tuple(pair) for pair in state.get("history") or ()),
             top_k=active_top_k,
         )
-        answer = rag.answer(question, merged)
+        answer = rag.answer(
+            question,
+            merged,
+            timeliness=tuple(state.get("external") or ()),
+            materials=tuple(state.get("materials") or ()),
+        )
         return {"answer": replace(answer, notes=answer.notes + tuple(notes)), "search_log": extra}
 
     return finalize_node

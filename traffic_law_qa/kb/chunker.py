@@ -1,23 +1,3 @@
-"""Layer 3 · chunk：LawDocument → ChunkSet（条级父块 + 款级子块）。
-
-    LawChunker.chunk : LawDocument → ChunkSet          （纯计算，不碰磁盘）
-    ChunkStage       : list[LawDocument] → ChunkSet    （并写 chunks/*.jsonl）
-
-为什么要父子块：
-- 检索要细粒度（命中"第一百二十四条第二款"这种具体表述），
-  但生成要完整上下文（只给一款会让 LLM 丢掉条内主体）。
-- 所以子块（款）进索引，命中后回灌父块（整条）给 LLM。
-
-切块规则（决定问答效果）：
-1. 以条为父块；款为子块。
-2. 列举项（「（一）…」）无条件并入前一款 —— 这类项脱离引出句后既搜不到也读不懂，
-   处理前占子块总数的 30%（6 部法语料 352/1164；4 部法时期是 248/867）。
-3. 短于 min_part_chars 的款同样并入前一款。
-4. 长于 max_part_chars 的款按「。；」切分，父块不变。
-5. 子块 text 存原文，embed_text 额外拼上「法名 + 章 + 条号」前缀，
-   缓解"多部法规讲同一件事"（如道交法与深圳处罚条例）时的张冠李戴。
-"""
-
 from __future__ import annotations
 
 import re
@@ -38,11 +18,6 @@ RE_LIST_MARKER = re.compile(
 
 
 class LawChunker:
-    """切块器：把结构化法条切成父子块。
-
-    Input : LawDocument
-    Output: ChunkSet
-    """
 
     layer = "chunk"
     input_desc = "LawDocument"
@@ -60,7 +35,6 @@ class LawChunker:
         self.with_chapter_prefix = with_chapter_prefix
 
     def chunk(self, law: LawDocument) -> ChunkSet:
-        """切一部法规。"""
         parents: list[ParentChunk] = []
         chunks: list[Chunk] = []
 
@@ -116,7 +90,6 @@ class LawChunker:
         )
 
     def chunk_all(self, laws: list[LawDocument]) -> ChunkSet:
-        """切多部法规并合并成一个 ChunkSet。"""
         parents: list[ParentChunk] = []
         chunks: list[Chunk] = []
         for law in laws:
@@ -137,11 +110,9 @@ class LawChunker:
 
     @staticmethod
     def parent_id_of(law: LawDocument, article_index: int) -> str:
-        """父块 id：law_id@版本#条序号 —— 含版本，避免新旧版本串号。"""
         return f"{law.law_id}@{law.version}#a{article_index:03d}"
 
     def embed_text_of(self, law: LawDocument, article, part: str, part_index: int) -> str:
-        """向量化用文本 = 《法名》章 条号：正文（第一条去掉重复的条号前缀）。"""
         body = RE_ARTICLE_PREFIX.sub("", part) if part_index == 0 else part
         head = f"《{law.law_name}》"
         if self.with_chapter_prefix and article.chapter:
@@ -149,7 +120,6 @@ class LawChunker:
         return f"{head}{article.article_no}：{body}"
 
     def split_parts(self, paragraphs: tuple[str, ...]) -> list[str]:
-        """款级切分：合并列举项 → 合并过短款 → 切分过长款。"""
         merged: list[str] = []
         for para in paragraphs:
             para = para.strip()
@@ -167,7 +137,6 @@ class LawChunker:
         return parts or [""]
 
     def _split_long(self, text: str) -> list[str]:
-        """超长款按句末标点切分，保持在 max_part_chars 以内。"""
         if len(text) <= self.max_part_chars:
             return [text]
 
@@ -187,11 +156,6 @@ class LawChunker:
 
 
 class ChunkStage:
-    """Layer 3 的落盘封装：结构层 → 检索层产物。
-
-    Input : list[LawDocument]（缺省时自动从 parsed/ 读取）
-    Output: ChunkSet（同时写 chunks/chunks.jsonl、chunks/parents.jsonl）
-    """
 
     layer = "chunk"
     input_desc = "list[LawDocument]"
@@ -228,7 +192,5 @@ class ChunkStage:
         return ChunkSet.read(self.chunks_path, self.parents_path)
 
 
-# 命令行入口在 `../pipeline.py`（`python -m traffic_law_qa.pipeline chunk`）；这一层是纯库，没有 `main`。
-# 下面这个闸只为拦「按老习惯敲了 `-m`」：不给它的话模块级代码跑完就退 0，敲的人以为活儿干完了。
 if __name__ == "__main__":
-    raise SystemExit("已收口：请用 python -m traffic_law_qa.pipeline chunk（清单见 README「所有入口」）")
+    raise SystemExit("已收口：请用 python -m traffic_law_qa.pipeline chunk（清单见 README「入口」）")

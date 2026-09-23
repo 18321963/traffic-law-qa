@@ -1,18 +1,17 @@
-"""Layer 6 · generate：Question + RetrievalResult → Answer（强制引用溯源）。
-
-    AnswerGenerator.generate : Question + RetrievalResult → Answer
-
-纯 RAG 的成败在这里：模型只能看检索到的法条，且必须逐条标注 [依据N]。
-检索为空时直接拒答（不调用 LLM），避免幻觉。
-"""
-
 from __future__ import annotations
 
 import time
 from typing import Any
 
 from .. import config
-from ..contracts import Answer, Evidence, Question, RetrievalResult
+from ..contracts import (
+    Answer,
+    Evidence,
+    MaterialPassage,
+    Question,
+    RetrievalResult,
+    WebFinding,
+)
 
 SYSTEM_PROMPT = """你是面向驾驶员、驾校学员与交管客服场景的交通法规问答助手。
 
@@ -25,14 +24,26 @@ SYSTEM_PROMPT = """你是面向驾驶员、驾校学员与交管客服场景的�
 4. 涉及深圳经济特区法规时，必须说明其适用范围仅限深圳经济特区。
 5. 引用法条要写全「法规名称 + 条号」，例如《中华人民共和国道路交通安全法》第九十一条。
 6. 先给结论，再给依据与说明；输出简洁的 Markdown，不要复述整条法条原文。
-7. 依据里没提到的事（例如具体金额、记分、后续流程）一律不补充。"""
+7. 依据里没提到的事（例如具体金额、记分、后续流程）一律不补充。
+8. 「时效提示」与「本次会话材料」两块**不属于依据**：引用它们时只能标 [时效N] / [材料N]，
+   **绝不允许标成 [依据N]** —— 依据编号对不上会让整篇答案被判为无依据而作废。"""
 
 USER_TEMPLATE = """问题：{question}
 
 依据（共 {count} 条）：
 {evidences}
-
+{external}
 请依据上述条文回答问题，并在每条结论后标注 [依据N]。"""
+
+TIMELINESS_HEADER = "时效提示（联网检索，非本库法条 —— 引用时标 [时效N]，不要标 [依据N]）："
+MATERIAL_HEADER = "本次会话材料（未入知识库，仅供参照 —— 引用时标 [材料N]，不要标 [依据N]）："
+"""库里没收录的东西（网搜、本次上传）放这两块，与「依据」块并列但**不算依据**。
+
+`{external}` 在 `USER_TEMPLATE` 里独占一行，由 `_external_block` 拼装：为空串时那一行塌成
+原有的空行，提示词与加这两块之前**逐字节相同**；非空时前后各补一个换行，与依据块分开。
+
+标题自身就写死「不要标 [依据N]」这条 —— 复核闸 `review.CITE_RE` 只认 `[依据N]`，模型一旦
+把网搜内容标成依据编号，编号对不上就会被 `over` 判不支撑、整篇降级。"""
 
 _STREAM_OPTIONS = {"include_usage": True}
 """流式请求要 usage 块。理由见 `_stream_llm` —— 不加就是静默少一个字段。"""
@@ -47,25 +58,25 @@ REVIEW_DOWNGRADE_ANSWER = (
 )
 """复核不通过时的替换文案，与上面两句同属「不直接给结论」的文案族。
 
-**放在这里而不是 `agent/review.py`**：这一族一共四句（检索为空 / 未配置模型 / 模型说依据不足 /
+**放在这里而不是 `agents/review.py`**：这一族一共四句（检索为空 / 未配置模型 / 模型说依据不足 /
 复核不通过），改口径时要能一次看见全部。生产者（agent 的复核节点）在别处，但它写出来的
 是给人看的话，话归这里管。数字与候选法条清单由 `review.downgrade_text` 拼在后面。"""
 
 
+def _external_block(
+    timeliness: tuple[WebFinding, ...], materials: tuple[MaterialPassage, ...]
+) -> str:
+    blocks: list[str] = []
+    if timeliness:
+        blocks.append(TIMELINESS_HEADER + "\n" + "\n\n".join(w.render() for w in timeliness))
+    if materials:
+        blocks.append(MATERIAL_HEADER + "\n" + "\n\n".join(m.render() for m in materials))
+    if not blocks:
+        return ""
+    return "\n" + "\n\n".join(blocks) + "\n"
+
+
 class AnswerGenerator:
-    """答案生成器：把检索结果变成带引用的答案。
-
-    Input : Question + RetrievalResult
-    Output: Answer
-
-    `timeout` / `max_tokens` 是**兜底，不是调优**（与 `agent/llm.py` 同一套理由，那边记着
-    24901 字 / 223 秒那次实测）。两个数的依据是 `data/traces/` 里 541 次真实答案生成的用量：
-    非思考模型 p50 172、p95 442、最大 730（今天默认的 qwen-flash 是 135 次里最大 445），
-    所以 1024 留了余量。**换成思考型当生成模型时必须调高** —— 思维链算进 `completion_tokens`：
-    实测 `qwen3.8-max` 答 960 字用掉 5201 个，1024 会把它切在思维链中间。另注：`timeout` 拦的
-    是「迟迟不来字节」（httpx 的 read timeout 是两次收到字节之间的上限），一直吐、一直在复读的
-    那种只有 `max_tokens` 拦得住。
-    """
 
     layer = "generate"
     input_desc = "Question + RetrievalResult"
@@ -97,7 +108,6 @@ class AnswerGenerator:
         return "" if self.available else "未配置 LLM_API_KEY，无法生成答案（可用 search 查看检索结果）"
 
     def build_evidence(self, retrieval: RetrievalResult, top_n: int = 0) -> list[Evidence]:
-        """把召回的法条编成【依据N】。"""
         limit = top_n or self.show_top or len(retrieval.articles)
         evidences: list[Evidence] = []
         for index, hit in enumerate(retrieval.articles[:limit], start=1):
@@ -112,11 +122,29 @@ class AnswerGenerator:
             )
         return evidences
 
-    def build_prompt(self, question: Question, evidences: list[Evidence]) -> str:
+    def build_prompt(
+        self,
+        question: Question,
+        evidences: list[Evidence],
+        timeliness: tuple[WebFinding, ...] = (),
+        materials: tuple[MaterialPassage, ...] = (),
+    ) -> str:
         blocks = "\n\n".join(e.render() for e in evidences)
-        return USER_TEMPLATE.format(question=question.text, count=len(evidences), evidences=blocks)
+        return USER_TEMPLATE.format(
+            question=question.text,
+            count=len(evidences),
+            evidences=blocks,
+            external=_external_block(timeliness, materials),
+        )
 
-    def generate(self, question: Question, retrieval: RetrievalResult) -> Answer:
+    def generate(
+        self,
+        question: Question,
+        retrieval: RetrievalResult,
+        *,
+        timeliness: tuple[WebFinding, ...] = (),
+        materials: tuple[MaterialPassage, ...] = (),
+    ) -> Answer:
         evidences = self.build_evidence(retrieval)
         started = time.perf_counter()
         notes = list(retrieval.notes)
@@ -130,6 +158,8 @@ class AnswerGenerator:
                 elapsed_ms=(time.perf_counter() - started) * 1000,
                 retrieval=retrieval,
                 notes=tuple(notes + ["检索结果为空，未调用 LLM"]),
+                timeliness=timeliness,
+                materials=materials,
             )
 
         if not self.available:
@@ -141,9 +171,13 @@ class AnswerGenerator:
                 elapsed_ms=(time.perf_counter() - started) * 1000,
                 retrieval=retrieval,
                 notes=tuple(notes + [self.unavailable_reason]),
+                timeliness=timeliness,
+                materials=materials,
             )
 
-        content, usage = self._call_llm(question, evidences)
+        content, usage = self._call_llm(
+            question, evidences, timeliness=timeliness, materials=materials
+        )
         return Answer(
             question=question.text,
             text=content,
@@ -153,17 +187,11 @@ class AnswerGenerator:
             usage=usage,
             retrieval=retrieval,
             notes=tuple(notes),
+            timeliness=timeliness,
+            materials=materials,
         )
 
     def stream(self, question: Question, retrieval: RetrievalResult):
-        """流式生成：依次产出 `("delta", 文本片段)` 与末尾的 `("usage", dict)`。
-
-        供 SSE 使用。**提示词与 `generate()` 完全共用** —— 两条路径若各写一份
-        messages 构造，流式与非流式迟早会给出不一样的答案，而这种偏差极难发现。
-
-        不做重试：已经吐出去的 token 收不回来。首字节之前的失败会抛出去由调用方
-        （HTTP 层）翻译成错误事件，已经开始输出后的失败则让异常终止这次流。
-        """
         evidences = self.build_evidence(retrieval)
 
         if retrieval.is_empty or not self.available:
@@ -185,14 +213,6 @@ class AnswerGenerator:
                 }
 
     def _stream_llm(self, question: Question, evidences: list[Evidence]):
-        """同 `_call_llm` 的两个上限，外加**要求末尾回一个 usage 块**。
-
-        `stream_options={"include_usage": True}` 不是可选项：不加的话流式这条路上一个 token 数
-        都拿不到（非流式的 `response.usage` 照常有），SSE 的 `done` 事件里 `usage` 恒为空 ——
-        2026-09-22 实测确认。支持它的端点会在末尾补一个 `choices` 为空、只带 `usage` 的块，
-        `stream()` 的循环本来就是照这个形状写的（先看 `chunk.choices` 再取 delta）。
-        **不支持的端点会直接 400**，这是有意的：宁可响着坏，也不要静默少一个字段。
-        """
         from openai import OpenAI
 
         if self._client is None:
@@ -212,10 +232,17 @@ class AnswerGenerator:
                 stream=True,
                 stream_options=_STREAM_OPTIONS,
             )
-        except Exception as exc:  # noqa: BLE001 - 首字节前失败，翻译成一句可读的话
+        except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"调用 {self.cfg.model} 失败：{exc}") from exc
 
-    def _call_llm(self, question: Question, evidences: list[Evidence]) -> tuple[str, dict]:
+    def _call_llm(
+        self,
+        question: Question,
+        evidences: list[Evidence],
+        *,
+        timeliness: tuple[WebFinding, ...] = (),
+        materials: tuple[MaterialPassage, ...] = (),
+    ) -> tuple[str, dict]:
         from openai import OpenAI
 
         if self._client is None:
@@ -223,7 +250,12 @@ class AnswerGenerator:
 
         messages: list[Any] = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend({"role": role, "content": content} for role, content in question.history)
-        messages.append({"role": "user", "content": self.build_prompt(question, evidences)})
+        messages.append(
+            {
+                "role": "user",
+                "content": self.build_prompt(question, evidences, timeliness, materials),
+            }
+        )
 
         last_error: Exception | None = None
         for attempt in range(1, self.retries + 1):
@@ -243,7 +275,7 @@ class AnswerGenerator:
                         "total_tokens": response.usage.total_tokens,
                     }
                 return (response.choices[0].message.content or "").strip(), usage
-            except Exception as exc:  # noqa: BLE001 - 统一重试
+            except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 if attempt < self.retries:
                     time.sleep(1.5 * attempt)

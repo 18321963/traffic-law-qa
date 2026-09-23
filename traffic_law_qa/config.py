@@ -1,8 +1,3 @@
-"""集中式配置：目录布局、模型端点、检索参数。
-
-所有可变项都从环境变量读取（写在项目根目录的 .env 里），代码中不出现任何密钥。
-"""
-
 from __future__ import annotations
 
 import os
@@ -14,10 +9,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 try:
     from dotenv import load_dotenv as _load_dotenv
-except ImportError:  # pragma: no cover
+except ImportError:
 
     def _load_dotenv(*args: Any, **kwargs: Any) -> bool:
-        """python-dotenv 缺失时的空实现，直接读进程环境变量。"""
         del args, kwargs
         return False
 
@@ -26,7 +20,7 @@ load_dotenv = _load_dotenv
 load_dotenv(ROOT / ".env", override=False)
 
 KB_DIR = ROOT / "法规知识库"
-DOCX_DIR = KB_DIR / "docx"
+SOURCE_DIR = KB_DIR / "docx"
 TEXT_DIR = KB_DIR / "text"
 PARSED_DIR = KB_DIR / "parsed"
 CHUNK_DIR = KB_DIR / "chunks"
@@ -39,6 +33,13 @@ PARENTS_PATH = CHUNK_DIR / "parents.jsonl"
 INDEX_META_PATH = INDEX_DIR / "index_meta.json"
 
 DATA_DIR = ROOT / "data"
+UPLOAD_DIR = DATA_DIR / "uploads"
+DB_PATH = DATA_DIR / "documents.db"
+
+
+def upload_dir(doc_id: str) -> Path:
+    return UPLOAD_DIR / doc_id
+
 EVAL_CORPUS_PATH = DATA_DIR / "eval_corpus.json"
 
 EVAL_RETRIEVAL_PATH = DATA_DIR / "eval_retrieval.json"
@@ -46,11 +47,18 @@ EVAL_REFERENCE_PATH = DATA_DIR / "eval_reference.json"
 EVAL_NOGOLD_PATH = DATA_DIR / "eval_nogold.json"
 EVAL_MULTIHOP_PATH = DATA_DIR / "eval_multihop.json"
 
-ALL_DIRS = (DOCX_DIR, TEXT_DIR, PARSED_DIR, CHUNK_DIR, INDEX_DIR)
+ALL_DIRS = (SOURCE_DIR, TEXT_DIR, PARSED_DIR, CHUNK_DIR, INDEX_DIR)
+
+SOURCE_SUFFIXES = (".docx", ".md", ".txt")
+
+
+def source_files(base: Path | None = None) -> list[Path]:
+    root = base or SOURCE_DIR
+    found = [p for suffix in SOURCE_SUFFIXES for p in root.glob(f"*{suffix}")]
+    return sorted(found)
 
 
 def ensure_dirs() -> None:
-    """确保管道各阶段输出目录存在。"""
     for d in ALL_DIRS:
         d.mkdir(parents=True, exist_ok=True)
 
@@ -112,22 +120,6 @@ def llm_config() -> LLMConfig:
 
 
 def region_llm_config() -> LLMConfig:
-    """入口地区裁决的模型；**未配置时逐字段回退到 `llm_config()`**。
-
-    为什么值得单独一个模型：地区裁决是全循环唯一一处「判断题 + 严格 JSON 输出」，
-    要的是判得准且便宜；规划轮要的是会调工具、也会自己判断什么时候停，两者不是一回事。
-
-    回退是**逐字段**的，不是「有一个没配就整体回退」：只想换模型名时写
-    `AGENT_REGION_MODEL` 一项即可，不必把 key 和 base_url 再抄一遍。
-    三项都不写 = 与单模型时逐位相同。
-
-    ⚠️ 但**模型名不跨家**：`glm-4.7-flash` 只能配智谱的 base_url。只写了模型名而
-    base_url 还是百炼的话，端点会回 400 —— 这个失败是响的（`ToolCallingLLM.chat`
-    重试后抛 `RuntimeError`），不会静默劣化。
-
-    这三个键 2026-09 之前叫 `AGENT_REFLECT_*`（当时的服务对象是审核节点，那个节点已并入
-    规划轮）。**旧名字不再被读取** —— 留着旧键的 `.env` 会静默回退到 `LLM_*`。
-    """
     base = llm_config()
     return LLMConfig(
         base_url=_env("AGENT_REGION_BASE_URL") or base.base_url,
@@ -138,16 +130,7 @@ def region_llm_config() -> LLMConfig:
 
 
 def review_llm_config() -> LLMConfig:
-    """末端复核的模型；**未配置时逐字段回退到 `region_llm_config()`**（再往下一层是 `llm_config()`）。
-
-    为什么默认就复用入口那只：复核与入口是同一类活（一段短 JSON 判断，要判得准且便宜），
-    而**它绝不能是主模型** —— 让生成答案的那只模型给自己的答案打分，等于自己判自己；
-    档位上也说得通：入口与复核都是「一次调用、一段 JSON」，主模型是「多轮工具调用」。
-
-    回退链 `review → region → llm` 与 `region → llm` 同形，三项仍是逐字段回退：
-    只想换复核模型时只写 `AGENT_REVIEW_MODEL` 一项。⚠️ 模型名同样不跨家（理由见上）。
-    """
-    base = region_llm_config()
+    base = llm_config()
     return LLMConfig(
         base_url=_env("AGENT_REVIEW_BASE_URL") or base.base_url,
         api_key=_env("AGENT_REVIEW_API_KEY") or base.api_key,
@@ -157,7 +140,6 @@ def review_llm_config() -> LLMConfig:
 
 
 def embed_config() -> EmbedConfig:
-    """向量模型配置；未单独配置时回退复用 LLM 端点。"""
     base_url = _env("EMBED_BASE_URL") or _env("LLM_BASE_URL", "https://api.deepseek.com/v1")
     api_key = _env("EMBED_API_KEY") or _env("LLM_API_KEY")
     dim_raw = _env("EMBED_DIM")
@@ -190,12 +172,6 @@ def retrieve_config() -> RetrieveConfig:
 
 @dataclass(frozen=True)
 class AgentConfig:
-    """Agent 循环的参数（阶段二）。
-
-    与 RetrieveConfig 的分工：这里只管**循环**（跑几轮、给模型看多少字），
-    检索本身的参数（top_k / candidates / rrf_k / booster）仍由 RetrieveConfig 说了算 ——
-    只有一份真源，Agent 不许悄悄换一套检索参数，否则和基线的对照就不是同一个检索了。
-    """
 
     max_steps: int = 3
     max_evidence: int = 0
@@ -225,12 +201,32 @@ def agent_config() -> AgentConfig:
 
 
 @dataclass(frozen=True)
-class LangfuseConfig:
-    """Langfuse 云端追踪的凭据（可选；配了就开，agent / 评测 / 脚本都读它）。
+class BochaConfig:
 
-    两个 key 缺一即 `ready=False`，此时一个客户端都不建、一个字节都不外发 ——
-    与没有这个功能时逐位相同。**host 不是秘密，两个 key 是**：任何打印只许出现 host。
-    """
+    api_key: str
+    base_url: str = "https://api.bochaai.com/v1"
+    count: int = 5
+    freshness: str = "noLimit"
+    timeout: float = 15.0
+    summary: bool = True
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.api_key)
+
+
+def bocha_config() -> BochaConfig:
+    return BochaConfig(
+        api_key=_env("BOCHA_API_KEY"),
+        base_url=_env("BOCHA_BASE_URL", "https://api.bochaai.com/v1"),
+        count=_env_int("BOCHA_COUNT", 5),
+        freshness=_env("BOCHA_FRESHNESS", "noLimit"),
+        timeout=_env_float("BOCHA_TIMEOUT", 15.0),
+    )
+
+
+@dataclass(frozen=True)
+class LangfuseConfig:
 
     public_key: str
     secret_key: str
@@ -260,11 +256,6 @@ class MilvusConfig:
 
 
 def milvus_config() -> MilvusConfig:
-    """Milvus 连接与索引参数。
-
-    中文化依赖内置 jieba 分词器；把 MILVUS_ANALYZER 置空则回退 standard 分析器
-    （中文会退化成单字，不推荐）。
-    """
     tokenizer = _env("MILVUS_ANALYZER", "jieba")
     return MilvusConfig(
         uri=_env("MILVUS_URI", "http://localhost:19530"),

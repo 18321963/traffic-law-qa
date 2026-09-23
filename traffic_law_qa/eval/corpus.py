@@ -1,4 +1,16 @@
-"""题集文件的唯一生成者与读者：一份源语料 → 三份桶文件。
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+from .. import config
+from ..contracts import ParentChunk
+
+USAGE = """题集文件的唯一生成者与读者：一份源语料 → 三份桶文件。
 
     python -m traffic_law_qa.eval.corpus build    # 从源语料重建三份桶文件
     python -m traffic_law_qa.eval.corpus check    # 只读：内存里重算一遍，逐字节比对
@@ -38,18 +50,6 @@
 要测的东西）。两类合起来 304 条，2026-09 一次性删净。
 """
 
-from __future__ import annotations
-
-import argparse
-import json
-import re
-import sys
-from dataclasses import dataclass
-from pathlib import Path
-
-from .. import config
-from ..contracts import ParentChunk
-
 __all__ = [
     "RE_LAW",
     "RE_ARTICLE",
@@ -82,12 +82,11 @@ NO_CITATION = "答案里没引本库条号"
 
 
 class BucketError(ValueError):
-    """桶文件坏了，或者拿源语料当桶文件读。"""
+    pass
 
 
 @dataclass(frozen=True)
 class EvalCase:
-    """一条评测题：问题 + 期望命中的法条（parent_id）。"""
 
     question: str
     gold_ids: tuple[str, ...]
@@ -96,7 +95,6 @@ class EvalCase:
 
 
 def display_path(path: Path) -> str:
-    """能缩到仓库内就缩（`data/eval_retrieval.json`），否则原样给全路径。"""
     try:
         return path.resolve().relative_to(config.ROOT.resolve()).as_posix()
     except ValueError:
@@ -104,18 +102,12 @@ def display_path(path: Path) -> str:
 
 
 def _normalize_law(name: str) -> str:
-    """去掉「中华人民共和国」前缀，让简称和全称能对上。
-
-    不这么做的话，「道路交通安全法」会同时是「…道路交通安全法」和
-    「…道路交通安全法实施条例」的子串，简称会被解析到错的那一部。
-    """
     name = name.strip()
     prefix = "中华人民共和国"
     return name[len(prefix):] if name.startswith(prefix) and len(name) > len(prefix) else name
 
 
 class LawResolver:
-    """把答案里写的《法名》对到本库的法规上。"""
 
     def __init__(self, law_names: list[str]) -> None:
         self.by_norm = {_normalize_law(name): name for name in law_names}
@@ -129,7 +121,6 @@ class LawResolver:
 
 
 def _cited_articles(text: str, resolver: LawResolver) -> list[tuple[str, str]]:
-    """答案里（法名, 条号）的配对：条号归属于它前面最近的那个《法名》。"""
     laws = [(m.start(), m.group(1)) for m in RE_LAW.finditer(text)]
     if not laws:
         return []
@@ -146,26 +137,18 @@ def _cited_articles(text: str, resolver: LawResolver) -> list[tuple[str, str]]:
 
 
 def _library():
-    """切块产物 → `multihop.Library`（本条路径唯一的库视图）。
-
-    **这一句只能在函数内 import**：`multihop` 在模块级就 `from .corpus import
-    RE_ARTICLE, RE_LAW`，两边都提到模块级就是双向循环 —— 先 import 哪一边都炸在
-    「半初始化的模块」上，两个方向都实测过。`load_bucket` 里那句 `HopError` 同理。
-    """
     from .multihop import Library
 
     return Library.load()
 
 
 def _law_maps(library) -> tuple[LawResolver, dict[tuple[str, str], ParentChunk]]:
-    """`(法名, 条号)` 的两张表：解析答案里写的法名、换回条文本身。"""
     parents = list(library.parents.values())
     resolver = LawResolver(sorted({p.law_name for p in parents}))
     return resolver, {(p.law_name, p.article_no): p for p in parents}
 
 
 def _group(raw: list, resolver: LawResolver, known: set[tuple[str, str]]) -> dict[str, list[list]]:
-    """题面 → 每个变体引到的本库条号（顺序按它在语料里第一次出现）。"""
     groups: dict[str, list[list[tuple[str, str]]]] = {}
     for item in raw:
         question = (item.get("instruction") or "").strip()
@@ -181,7 +164,6 @@ def _group(raw: list, resolver: LawResolver, known: set[tuple[str, str]]) -> dic
 
 
 def _classify(variants: list[list[tuple[str, str]]]) -> tuple[list[tuple[str, str]], str]:
-    """一个题面的全部变体 → （gold 条号, 无 gold 时的成因）。"""
     with_gold = [pairs for pairs in variants if pairs]
     if not with_gold:
         return [], NO_CITATION
@@ -193,7 +175,6 @@ def _classify(variants: list[list[tuple[str, str]]]) -> tuple[list[tuple[str, st
 
 
 def build_buckets(source_path: Path | None = None) -> dict[str, list[dict]]:
-    """源语料 → 三份桶的内容。纯计算，不落盘（`check` 靠这一点重算比对）。"""
     library = _library()
     resolver, parent_of = _law_maps(library)
     raw = json.loads(Path(source_path or config.EVAL_CORPUS_PATH).read_text(encoding="utf-8"))
@@ -213,16 +194,10 @@ def build_buckets(source_path: Path | None = None) -> dict[str, list[dict]]:
 
 
 def _dumps(payload: list[dict]) -> str:
-    """桶文件的序列化。build 与 check 共用这一个函数，逐字节比才可能成立。
-
-    不带时间戳：同一份源语料必须产出同一串字节，否则 git 里天天在改、
-    `check` 也永远是红的。
-    """
     return json.dumps(payload, ensure_ascii=False, indent=1)
 
 
 def _drift(path: Path, fresh: list[dict]) -> str:
-    """不一致的第一处是什么 —— 只说「对不上」等于没说。"""
     if not path.exists():
         return f"{display_path(path)} 不存在"
     have = json.loads(path.read_text(encoding="utf-8"))
@@ -239,7 +214,6 @@ def _drift(path: Path, fresh: list[dict]) -> str:
 
 
 def check_buckets(source_path: Path | None = None) -> list[str]:
-    """重算一遍与磁盘上的桶文件逐字节比对，返回不一致的描述（空 = 一致）。"""
     fresh = build_buckets(source_path)
     drift = []
     for name, path in BUCKET_PATHS.items():
@@ -250,14 +224,6 @@ def check_buckets(source_path: Path | None = None) -> list[str]:
 
 
 def load_bucket(path: Path | None = None) -> list[EvalCase]:
-    """桶文件 → 评测题。
-
-    `gold` 里的 `law_id#条号` 在这里换回条文与 `parent_id` —— 指标比的是
-    parent_id，而文件里存的是条号（见模块文档：条号才跟着法规走）。
-    解析不到就是题集坏了，`Library.resolve` 直接抛，不静默降级成「无 gold」。
-
-    下面那句 import 也只能在函数内（循环 import，理由见 `_library`）。
-    """
     from .multihop import HopError
 
     path = Path(path or config.EVAL_RETRIEVAL_PATH)
@@ -292,12 +258,7 @@ def load_bucket(path: Path | None = None) -> list[EvalCase]:
     return cases
 
 
-USAGE = __doc__
-
-
 def _parser() -> argparse.ArgumentParser:
-    """只做校验的解析器（`--help` 与「不带参数」由 `main` 开头那个分支打印 `USAGE`，
-    所以 `add_help=False`）。本模块没有默认动作 —— build 会写文件，必须点名要它。"""
     parser = argparse.ArgumentParser(prog="python -m traffic_law_qa.eval.corpus", add_help=False)
     parser.add_argument("command", choices=("build", "check"), help="build 重建三份桶文件 / check 只读比对")
     parser.add_argument("--data", default=None, help="换一份源语料（默认 data/eval_corpus.json）")

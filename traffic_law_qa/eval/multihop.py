@@ -1,4 +1,21 @@
-"""跨法规多跳题集：从条文反向造题 + 机械护栏。
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from .. import config
+from ..agents.trace import render_trace
+from ..contracts import ParentChunk
+from ..services.llm import ToolCallingLLM
+from ..tools.articles import build_article_index, parse_article_no, resolve_law_id
+from .corpus import RE_ARTICLE, RE_LAW
+
+USAGE = """跨法规多跳题集：从条文反向造题 + 机械护栏。
 
 **为什么需要它。** 现有两臂（默认 `hit@k`、`--reference` 规则取条）的 gold 要么是单条、
 要么是同法内几条 —— 没有任何一题要求**跨部法规**。「一个问题的答案横跨两部法」这件事，
@@ -34,23 +51,6 @@
 `data/traces/` 被 gitignore —— 轨迹是跑出来的，不是手工维护的，且随时能重跑。
 """
 
-from __future__ import annotations
-
-import argparse
-import json
-import re
-from collections.abc import Sequence
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
-
-from .. import config
-from ..agent.llm import ToolCallingLLM
-from ..agent.tools.articles import build_article_index, parse_article_no, resolve_law_id
-from ..agent.trace import render_trace
-from ..contracts import ParentChunk
-from .corpus import RE_ARTICLE, RE_LAW
-
 __all__ = [
     "HopError",
     "HopCase",
@@ -71,12 +71,10 @@ GEN_ATTEMPTS = 3
 
 
 class HopError(ValueError):
-    """护栏不通过，或题集文件本身有问题。"""
+    pass
 
 
 def _save(path: Path, payload: Any) -> None:
-    """落盘。建父目录是因为 `data/traces/` 被 gitignore 了 —— 新克隆里它不存在，
-    直接 write_text 会 FileNotFoundError。"""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
 
@@ -86,7 +84,6 @@ def format_key(law_id: str, article_no: str) -> str:
 
 
 def parse_key(raw: str) -> tuple[str, str]:
-    """`law_id#条号` → `(law_id, 条号)`。"""
     law_id, sep, article_no = (raw or "").partition(SEP)
     if not sep or not law_id.strip() or not article_no.strip():
         raise HopError(f"引用格式应为 `law_id{SEP}条号`，收到：{raw!r}")
@@ -95,10 +92,6 @@ def parse_key(raw: str) -> tuple[str, str]:
 
 @dataclass(frozen=True, eq=False)
 class Library:
-    """题集要用到的最小库视图：条文、`(law_id, 条号)` 索引、全部法名。
-
-    `eq=False`：字段里有 dict，生成出来的 `__hash__` 会在被调用时炸掉。
-    """
 
     parents: dict[str, ParentChunk]
     index: dict[tuple[str, int], ParentChunk]
@@ -115,14 +108,11 @@ class Library:
 
     @classmethod
     def load(cls) -> Library:
-        """读切块产物（`法规知识库/chunks/`）—— 全库唯一的条文来源，
-        `eval.corpus` 的桶文件也经这里换回条文。"""
         from ..kb.chunker import ChunkStage
 
         return cls.from_parents(list(ChunkStage(verbose=False).load().parents))
 
     def resolve(self, raw: str) -> ParentChunk:
-        """`law_id#条号` → 条文。解析不到就是题集坏了，直接抛。"""
         law_id, article_no = parse_key(raw)
         number = parse_article_no(article_no)
         if number is None:
@@ -137,16 +127,10 @@ RE_PREAMBLE = re.compile(r"制定(?:本|该)(?:条例|法|规定|办法)")
 
 
 def is_preamble(parent: ParentChunk) -> bool:
-    """是不是立法依据条 —— 不参与出题，也不许当目标条。"""
     return bool(RE_PREAMBLE.search(parent.text))
 
 
 def _law_aliases(library: Library) -> tuple[str, ...]:
-    """法名 + 去掉「中华人民共和国」的通用简称，长的在前。
-
-    简称这一条是必须的：试跑里模型写出过「不是说全国道交法里规定不系安全带才罚50吗」，
-    它没写书名号，`RE_LAW` 拦不住，但「道路交通安全法」这七个字原样在里面。
-    """
     aliases: set[str] = set()
     for name in library.law_names:
         aliases.add(name)
@@ -157,11 +141,6 @@ def _law_aliases(library: Library) -> tuple[str, ...]:
 
 
 def check_question(question: str, library: Library) -> None:
-    """G1：题面不得含条号、不得含《法名》或其简称。
-
-    只要带上一样，题面就把定位信息自己写出来了 —— 检索必然命中，指标就成了
-    在测「正则能不能匹配中文数字」。单跳那套题也是这样剔出来的。
-    """
     text = (question or "").strip()
     if not text:
         raise HopError("题面为空")
@@ -175,7 +154,6 @@ def check_question(question: str, library: Library) -> None:
 
 
 def build_case(raw: dict, library: Library) -> HopCase:
-    """一条原始记录 → `HopCase`，沿途跑 G1–G5。不过就抛 `HopError`。"""
     if not isinstance(raw, dict):
         raise HopError(f"记录应为对象，收到 {type(raw).__name__}")
 
@@ -212,7 +190,6 @@ def build_case(raw: dict, library: Library) -> HopCase:
 
 @dataclass(frozen=True)
 class HopCase:
-    """一道跨法规多跳题：问题 + 答案需要的全部条文。"""
 
     question: str
     gold_keys: tuple[tuple[str, str], ...]
@@ -236,17 +213,12 @@ class HopCase:
 
 
 def _normalize(question: str) -> str:
-    """去重用的归一化：只留中日韩文字与字母数字，其余（空白/标点）全丢。"""
     return re.sub(r"[^\w一-鿿]+", "", question)
 
 
 def load_cases(
     path: Path | None = None, *, library: Library | None = None
 ) -> tuple[list[HopCase], int]:
-    """读题集文件并跑全部护栏；返回（题目, 被去重丢掉几条）。
-
-    文件不存在或护栏不过都直接抛 —— 静默跳过坏记录会让「100 道」变成一句空话。
-    """
     path = Path(path or config.EVAL_MULTIHOP_PATH)
     if not path.exists():
         raise HopError(f"多跳题集不存在：{path}（先跑 --generate）")
@@ -274,7 +246,6 @@ def load_cases(
 
 
 def summarize(cases: list[HopCase], *, library: Library | None = None) -> str:
-    """题集体检：条数、法规分布、每道题的 gold 跨了几部法。"""
     lines = [f"多跳题集：{len(cases)} 题"]
     if not cases:
         return "\n".join(lines)
@@ -298,11 +269,6 @@ def summarize(cases: list[HopCase], *, library: Library | None = None) -> str:
 
 
 def overlap_diagnostic(cases: list[HopCase], library: Library) -> str:
-    """题面与 gold 原文的最长公共片段 —— 越长说明题面越像在**抄条文**而不是提问。
-
-    G1 拦得住条号和法名，拦不住「把条文内容改写进题面」。这个数就是那份残余重合的
-    可见化：中位数要是到了十几个字，说明题面在复述答案，题集就白造了。
-    """
 
     def longest_common(a: str, b: str) -> int:
         previous = [0] * (len(b) + 1)
@@ -336,17 +302,6 @@ RE_APPLY = re.compile(r"(适用|遵守)(本条例|本法)")
 
 
 def is_pure_scope(parent: ParentChunk) -> bool:
-    """纯适用范围条：「……适用本条例。」，去掉管辖句后一个字规则都不剩。
-
-    与 G5 的立法依据条是同一类毛病 —— 那种条不含规则，拿它当 gold 只是空转。
-    判据是**去掉含「适用/遵守本条例」的整句后还剩多少字**，不是「有没有这句话」：
-
-        《道路交通安全法》第二条   「……都应当遵守本法。」            → 剩 0 字  ← 是
-        《交强险条例》第二条       「……应当……投保交强险。……适用本条例。」→ 剩 71 字 ← 不是
-
-    这条反例必须留着：交强险条例第二条含「适用本条例」，但它的前半句是**投保义务**，
-    是全库被引用最多的 gold（21 次，全部正当）。只按关键字拦会把它们一次杀光。
-    """
     if not RE_APPLY.search(parent.text):
         return False
     rest = "".join(s for s in re.split(r"[。；]", parent.text) if s and not RE_APPLY.search(s))
@@ -354,18 +309,6 @@ def is_pure_scope(parent: ParentChunk) -> bool:
 
 
 def defect_diagnostic(cases: list[HopCase], library: Library) -> str:
-    """题集瑕疵 —— 两类**值得知道、但绝不拦截**的情况，合成一份报告。
-
-    它们都不能当护栏，因为都有正当反例，拦下去会误伤好题：
-
-    - **gold 引了深圳经济特区法规，题面却没交代「在深圳」。** 深圳两条条例的效力只及于
-      特区，同一个「罚三百」在别处未必是这个数。但库里相当一部分处罚**只有深圳条例写了**，
-      拒掉就等于把「新法能不能被检索到」这个要害问题一起拒掉。
-    - **gold 落在纯适用范围条上**（判据见 `is_pure_scope`）。这类条只有「谁受管辖」、
-      没有规则。但同为第二条，《交强险条例》第二条是投保义务条款，只按关键字拦会一次杀光。
-
-    所以只报数、只摆样，让人知道这 100 道里各有多少带这个前提。
-    """
     law_name = {p.law_id: p.law_name for p in library.parents.values()}
     sz_total = 0
     sz_samples: list[str] = []
@@ -398,11 +341,6 @@ def defect_diagnostic(cases: list[HopCase], library: Library) -> str:
 
 
 def baseline_diagnostic(cases: list[HopCase], *, top_k: int = 6, verbose: bool = True) -> dict:
-    """【只诊断，不筛选】看每条 gold 在基线 top-k 里的位置。
-
-    存在意义是让人**看见**题集难度：如果大多数 gold 本来就在 top-6 里，
-    那这份题集对 rag 就不算难，agent 赢了也说明不了什么。**不据此增删题目**。
-    """
     from ..api import qa
     from ..contracts import RetrievalResult
 
@@ -474,7 +412,6 @@ GEN_TEMPLATE = """下面是一部法规的条文原文。请写**一个**自然�
 
 
 def _extract_json(content: str) -> dict:
-    """从模型回复里抠出 JSON 对象。容忍 ```json 围栏与前后废话。"""
     text = (content or "").strip()
     fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
     if fence:
@@ -492,12 +429,6 @@ def _extract_json(content: str) -> dict:
 
 
 def cross_law_sites(library: Library) -> list[ParentChunk]:
-    """点名了库内**另一部**法规的条文 —— 天然的跨法种子。
-
-    实测全库只有 9 条（如深圳处罚条例「依照《道路交通安全法》的规定处十五日以下拘留」）。
-    它们是概括性转致、给不出条级 gold，但正因如此，拿它们当锚点最可能问出真跨法的问题。
-    只认**别的**法：某部法在正文里写自己的名字（序言里的标题、修正案说明）不算。
-    """
     sites: list[ParentChunk] = []
     for parent in library.parents.values():
         for match in RE_LAW.finditer(parent.text):
@@ -509,19 +440,6 @@ def cross_law_sites(library: Library) -> list[ParentChunk]:
 
 
 def _candidates(library: Library) -> list[ParentChunk]:
-    """出题锚点的顺序：跨法引用点优先，其余**按法规轮转**。
-
-    两个刻意的设计：
-
-    **立法依据条一律出局**（见 `is_preamble`）：跨法引用点里一大半正是
-    「根据《X》，制定本条例」这种序言条，不排除的话头几道题全落在它上面。
-
-    **其余按法规轮转交错，不按 (法规, 条号) 字典序。** 字典序会把道交法 124 条
-    整段排在前面，100 道题全落在同一部法上，「6 个法规之间多跳」就成了空话。
-    轮转后每部法都能持续供题。
-
-    排序固定是为了可复现：同样的库 + 同样的模型，跑出来的顺序应当一致。
-    """
     seeds = [p for p in cross_law_sites(library) if not is_preamble(p)]
     seed_ids = {p.parent_id for p in seeds}
 
@@ -551,12 +469,6 @@ def generate(
     seed: list[dict] | None = None,
     verbose: bool = True,
 ) -> list[dict]:
-    """从条文反向造题，直到攒够 `target` 道过了护栏的题。
-
-    `seed` 是已经有过的记录（续跑用）：先装进来，再往后补。**补的是没挖过的锚点** ——
-    同一个锚点出过的题已经进了 `seed`，再挖一遍只会得到换了说法的同 gold 同考点。
-    每接受一道就落一次盘，所以中途断了重跑时把 `out` 读回来当 `seed` 即可接着补。
-    """
     library = library or Library.load()
     llm = ToolCallingLLM()
     if not llm.available:
@@ -639,7 +551,6 @@ def generate(
 
 
 def _why_of(case: Any) -> str:
-    """多跳题带 `why`（这道题为什么算跨法），单跳题没有 —— 一份行格式要能吃两种 case。"""
     return getattr(case, "why", "")
 
 
@@ -651,16 +562,7 @@ def trace(
     top_k: int = 6,
     verbose: bool = True,
 ) -> list[dict]:
-    """把同一批题在 **rag** 与 **agent** 两侧的原始产物并排 dump 出来。
-
-    **这里刻意不算任何指标。** 先看两边到底产出了什么，再决定怎么比 ——
-    先定指标容易把真问题盖掉。两侧都要真调 LLM。
-
-    `cases` 不给就是多跳题集；单跳题集（`eval.singlehop`）复用同一份跑法 ——
-    两条臂怎么跑、行里放什么，只此一处实现，改一次两边同时生效。
-    case 只要求有 `question` / `gold_ids` / `gold_citations` 三个字段。
-    """
-    from ..agent.graph import AgentRunner
+    from ..agents.graph import AgentRunner
     from ..api import qa
     from ..contracts import Answer, RetrievalResult
 
@@ -711,10 +613,6 @@ def trace(
                     "searches": state.get("search_log") or [],
                     "usage": state.get("usage") or [],
                     "trace": render_trace(state),
-                    # 末端复核的结果（含**降级前**的原文，那时 `answer` 那一格是降级文案）。
-                    # 只加这一列、不动任何既有列：`full_budget_summary` 与 `singlehop.metrics`
-                    # 都只读自己那几列，所以这条路的指标不受影响 —— 但下次跑批会把分数分布
-                    # 一并留下，标定阈值时不用再改一次代码。
                     "review": (
                         None
                         if agent_answer is None or agent_answer.review is None
@@ -727,8 +625,6 @@ def trace(
         if out is not None:
             _save(out, rows)
 
-    # 收尾排空观测队列：上报是「配了就开」的，跑批不 flush 会丢最后几题。
-    # 空实现下这一行什么也不做（`obs.Tracer.flush`），所以不必判有没有开观测。
     runner.tracer.flush()
 
     if out is not None:
@@ -739,15 +635,6 @@ def trace(
 
 
 def full_budget_summary(rows: list[dict]) -> str:
-    """**各自全预算**：rag 走它的完整一次，agent 走它全部的检索轮次。
-
-    这是产品实际形态的对照 —— agent 本来就允许多轮，把它砍成一轮等于测一个不存在的系统。
-    但只报全预算数会误导：agent 会多查几轮，rag 只查一次，多打几枪本来就会多中。
-    （这个倍数**随题集与 AGENT_MAX_STEPS 走，不是常数** —— 100 题集上曾是 2.4 次，
-    63 题集上是 1.7 次。所以下面那句倍数不要写死，写成"agent 平均检索 N 次"的形态。）
-    所以同一份输出里**必须**带上同预算分解（双方都只看第一次检索），
-    否则「agent 更强」这个结论分不清是"第一次就查得更准"还是"单纯多查了几轮"。
-    """
     index: dict[str, str] = {}
     for row in rows:
         for hit in row["rag"]["retrieved"]:
@@ -809,18 +696,7 @@ def full_budget_summary(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-USAGE = __doc__
-
-
 def _parser() -> argparse.ArgumentParser:
-    """只做校验的解析器（`--help` 与「不带参数」由 main 开头那个分支打印 `USAGE`，
-    所以 `add_help=False`）。
-
-    模式是四个**平级的布尔开关**，不是子命令 —— 所以谁都没给时会落到末尾打印说明书，
-    这个形状与改动前一致。解析器只负责把「不认识的开关」和「取不到值的开关」变成错误：
-    `--target` 敲错一个字母静默退回 100 道，和 singlehop 那边 `--limit` 敲错退回全量
-    是同一类错误，只是贵在 LLM 那一步。
-    """
     parser = argparse.ArgumentParser(prog="python -m traffic_law_qa.eval.multihop", add_help=False)
     parser.add_argument("--check", action="store_true", help="复跑护栏，全离线")
     parser.add_argument("--generate", action="store_true", help="调 LLM 造题并落盘（花钱）")
