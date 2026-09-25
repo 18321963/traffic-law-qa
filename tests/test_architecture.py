@@ -205,3 +205,18 @@ def test_the_prompt_teaches_exactly_the_tools_the_model_gets() -> None:
 
     rendered = prompts.AGENT_SYSTEM_PROMPT % {"max_steps": 3, "law_count": 1, "laws": "- 示例法规"}
     assert "最多 3 轮" in rendered and "- 示例法规" in rendered, "提示词是 % 模板，改文本别引入裸 %"
+
+
+def test_every_offered_tool_has_something_to_run_it() -> None:
+    pytest.importorskip("langgraph", reason="agent extra 没装：只跑结构检查")
+    nodes = pytest.importorskip("traffic_law_qa.agents.nodes")
+    handlers = pytest.importorskip("traffic_law_qa.tools.handlers")
+
+    offered = {tool["function"]["name"] for tool in nodes.TOOLS}
+    missing = sorted(offered - set(handlers.HANDLERS))
+    assert not missing, (
+        "这些工具下发给模型了，却没有实现 —— 模型一调就拿到「未知工具」，"
+        "而且是运行期才炸、测试全绿：\n  " + repr(missing) + "\n"
+        "（反方向多出几个是允许的：web_search 就是刻意留着的接线位，"
+        "恢复网搜时不必再写一遍实现）"
+    )

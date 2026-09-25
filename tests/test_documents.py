@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -183,18 +184,16 @@ class _ScriptedLLM:
         return self._replies.pop(0), {"total_tokens": 7}
 
 
-def _call(call_id: str, name: str, **arguments) -> dict:
+def _tool_call(call_id: str, name: str, arguments: dict) -> dict:
     return {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-            {
-                "id": call_id,
-                "type": "function",
-                "function": {"name": name, "arguments": json.dumps(arguments)},
-            }
-        ],
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": json.dumps(arguments)},
     }
+
+
+def _call(call_id: str, name: str, **arguments) -> dict:
+    return {"role": "assistant", "content": "", "tool_calls": [_tool_call(call_id, name, arguments)]}
 
 
 class _FakeRAG:
@@ -247,7 +246,7 @@ def _write_material(text: str, doc_id: str = "d0", name: str = "车辆管理规�
     return doc_id
 
 
-def _runner(replies: list[dict], generator: AnswerGenerator):
+def _runner(replies: list[dict], generator: AnswerGenerator, *, cfg=None):
     llm = _ScriptedLLM(replies, model="stub-agent")
     runner = graph_mod.AgentRunner(
         _FakeRAG(generator),
@@ -258,6 +257,7 @@ def _runner(replies: list[dict], generator: AnswerGenerator):
             model="stub-review",
         ),
         tracer=Tracer(),
+        cfg=cfg,
     )
     return runner, llm
 
@@ -339,6 +339,41 @@ def test_repeat_material_search_does_not_duplicate_the_label(store, monkeypatch)
     assert "材料#3" in state["messages"][1]["content"]
     assert state["messages"][3]["content"].startswith("⚠ 这些段上一轮")
     assert "材料#3" in state["messages"][3]["content"]
+
+
+def test_a_budget_that_runs_out_still_reaches_an_answer(monkeypatch) -> None:
+    generator = AnswerGenerator(
+        config.LLMConfig(base_url="http://stub", api_key="stub", model="stub-gen")
+    )
+    _generator_citing_materials(monkeypatch, generator)
+    runner, llm = _runner(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    _tool_call("c1", "search_law", {"query": "饮酒驾驶怎么处罚"}),
+                    _tool_call("c2", "get_article", {"article_no": "第九十九条"}),
+                ],
+            }
+        ],
+        generator,
+        cfg=replace(config.agent_config(), max_steps=1),
+    )
+
+    state = runner.invoke("饮酒驾驶怎么处罚")
+    notes = "".join(state["answer"].notes)
+
+    assert state["steps"] == 1
+    assert "已达最大轮数 1，强制进入作答" in notes
+    assert "规划轮 token 合计 7" in notes
+
+    out = render_trace(state, color=True)
+    assert "→ search_law" in out and "→ 命中 1 条" in out
+    assert "未取到：库里没有任何一部法规有第 99 条。\033[0m" in out
+    assert "\033[33m[agent] 已达最大轮数 1，强制进入作答\033[0m" in out
+    assert "[agent] 规划轮 token 合计 7" in out
+    assert "[agent] Agent：" in out
 
 
 def test_ledger_keeps_the_sha1_and_the_original_name(client) -> None:
