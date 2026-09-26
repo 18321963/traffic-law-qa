@@ -26,6 +26,7 @@ PARSED_DIR = KB_DIR / "parsed"
 CHUNK_DIR = KB_DIR / "chunks"
 INDEX_DIR = KB_DIR / "index"
 PDF_DIR = KB_DIR / "pdf"
+MODELS_DIR = KB_DIR / "models"
 
 MANIFEST_PATH = PARSED_DIR / "manifest.json"
 CHUNKS_PATH = CHUNK_DIR / "chunks.jsonl"
@@ -47,7 +48,7 @@ EVAL_REFERENCE_PATH = DATA_DIR / "eval_reference.json"
 EVAL_NOGOLD_PATH = DATA_DIR / "eval_nogold.json"
 EVAL_MULTIHOP_PATH = DATA_DIR / "eval_multihop.json"
 
-ALL_DIRS = (SOURCE_DIR, TEXT_DIR, PARSED_DIR, CHUNK_DIR, INDEX_DIR)
+ALL_DIRS = (SOURCE_DIR, TEXT_DIR, PARSED_DIR, CHUNK_DIR, INDEX_DIR, MODELS_DIR)
 
 SOURCE_SUFFIXES = (".docx", ".md", ".txt")
 
@@ -84,6 +85,36 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    return _env(name, "1" if default else "0").lower() not in {"0", "false", "no", "off"}
+
+
+def _weights_ready(model: str) -> bool:
+    if not model:
+        return False
+    path = Path(model)
+    if path.is_dir():
+        return True
+    parts = path.parts
+    return len(parts) == 2 and not path.is_absolute()
+
+
+def resolve_device(want: str, cuda_available: bool) -> str:
+    want = (want or "auto").lower()
+    if want == "auto":
+        return "cuda" if cuda_available else "cpu"
+    if want.startswith("cuda") and not cuda_available:
+        return "cpu"
+    return want
+
+
+def wants_half(dtype: str, device: str) -> bool:
+    dtype = (dtype or "auto").lower()
+    if dtype == "auto":
+        return device == "cuda"
+    return dtype in {"float16", "half"}
+
+
 @dataclass(frozen=True)
 class LLMConfig:
     base_url: str
@@ -98,16 +129,34 @@ class LLMConfig:
 
 @dataclass(frozen=True)
 class EmbedConfig:
-    base_url: str
-    api_key: str
-    model: str
-    dim: int | None = None
+    model: str = str(MODELS_DIR / "bge-m3")
     batch: int = 10
-    query_prefix: str = ""
+    max_length: int = 512
+    device: str = "auto"
+    dtype: str = "auto"
 
     @property
     def ready(self) -> bool:
-        return bool(self.api_key)
+        return _weights_ready(self.model)
+
+
+@dataclass(frozen=True)
+class RerankConfig:
+    enabled: bool = True
+    model: str = str(MODELS_DIR / "bge-reranker-v2-m3")
+    top_n: int = 0
+    """重排窗口。`0` = 整池（融合后 ≤ candidates 篇），输出里每一篇的 score 才是同一个模型打的，能横向比。
+
+    设成 k 只重排前 k 篇、其余按融合序跟在后面：那些篇的 score 还是融合分，两种分混在一起别比大小。
+    """
+    batch: int = 8
+    max_length: int = 512
+    device: str = "auto"
+    dtype: str = "auto"
+
+    @property
+    def ready(self) -> bool:
+        return self.enabled and _weights_ready(self.model)
 
 
 def llm_config() -> LLMConfig:
@@ -140,16 +189,24 @@ def review_llm_config() -> LLMConfig:
 
 
 def embed_config() -> EmbedConfig:
-    base_url = _env("EMBED_BASE_URL") or _env("LLM_BASE_URL", "https://api.deepseek.com/v1")
-    api_key = _env("EMBED_API_KEY") or _env("LLM_API_KEY")
-    dim_raw = _env("EMBED_DIM")
     return EmbedConfig(
-        base_url=base_url,
-        api_key=api_key,
-        model=_env("EMBED_MODEL", "text-embedding-v4"),
-        dim=int(dim_raw) if dim_raw.isdigit() else None,
+        model=_env("EMBED_MODEL", str(MODELS_DIR / "bge-m3")),
         batch=_env_int("EMBED_BATCH", 10),
-        query_prefix=_env("EMBED_QUERY_PREFIX"),
+        max_length=_env_int("EMBED_MAX_LENGTH", 512),
+        device=_env("EMBED_DEVICE", "auto"),
+        dtype=_env("EMBED_DTYPE", "auto"),
+    )
+
+
+def rerank_config() -> RerankConfig:
+    return RerankConfig(
+        enabled=_env_bool("RAG_RERANK", True),
+        model=_env("RAG_RERANK_MODEL", str(MODELS_DIR / "bge-reranker-v2-m3")),
+        top_n=_env_int("RAG_RERANK_TOP_N", 0),
+        batch=_env_int("RAG_RERANK_BATCH", 8),
+        max_length=_env_int("RAG_RERANK_MAX_LENGTH", 512),
+        device=_env("RAG_RERANK_DEVICE", "auto"),
+        dtype=_env("RAG_RERANK_DTYPE", "auto"),
     )
 
 

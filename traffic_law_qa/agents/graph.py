@@ -3,12 +3,11 @@ from __future__ import annotations
 from typing import Literal, Sequence
 
 from .. import config
-from ..contracts import Answer, Question
-from ..obs import Tracer, traced
-from ..qa.rag import LegalRAG
-from ..ready import ensure_ready
-from ..services.llm import ToolCallingLLM
-from ..tools.articles import build_article_index
+from ..contracts.answer import Answer, Question
+from ..contracts.reports import channel_state
+from ..observability.tracer import Tracer, traced
+from ..ports import LLM, RagService
+from ..search.articles import build_article_index
 from .nodes import TOOLS, make_agent_node, make_finalize_node, make_tools_node
 from .region import REGION_UNKNOWN, make_region_node
 from .review import make_review_node
@@ -28,11 +27,11 @@ def _route_after_tools(state: AgentState) -> Literal["agent", "finalize"]:
 
 def build_graph(
     *,
-    rag: LegalRAG,
-    llm: ToolCallingLLM,
+    rag: RagService,
+    llm: LLM,
     cfg: config.AgentConfig,
-    region_llm: ToolCallingLLM | None = None,
-    review_llm: ToolCallingLLM | None = None,
+    region_llm: LLM | None = None,
+    review_llm: LLM | None = None,
     tracer: Tracer | None = None,
 ):
     from langgraph.graph import END, START, StateGraph
@@ -77,18 +76,20 @@ class AgentRunner:
 
     def __init__(
         self,
-        rag: LegalRAG,
+        rag: RagService,
         *,
-        llm: ToolCallingLLM | None = None,
-        region_llm: ToolCallingLLM | None = None,
-        review_llm: ToolCallingLLM | None = None,
+        llm: LLM | None = None,
+        region_llm: LLM | None = None,
+        review_llm: LLM | None = None,
         cfg: config.AgentConfig | None = None,
         tracer: Tracer | None = None,
     ) -> None:
+        from ..container import build_llm
+
         self.rag = rag
         self.cfg = cfg or config.agent_config()
         self.tracer = tracer or Tracer()
-        self.llm = llm or ToolCallingLLM(retries=self.cfg.retries, observer=self.tracer)
+        self.llm = llm or build_llm(retries=self.cfg.retries, observer=self.tracer)
         self.region_llm = region_llm or self.llm
         self.review_llm = review_llm or self.region_llm
         self._graph = None
@@ -98,30 +99,18 @@ class AgentRunner:
         return self.rag.top_k
 
     @classmethod
-    def load(
-        cls,
-        *,
-        with_vector: bool = True,
-        cfg: config.AgentConfig | None = None,
-        top_k: int | None = None,
-        tracer: Tracer | None = None,
-    ) -> "AgentRunner":
-        ensure_ready(with_vector=with_vector)
-        return cls.attach(
-            LegalRAG.load(with_vector=with_vector, top_k=top_k), cfg=cfg, tracer=tracer
-        )
-
-    @classmethod
     def attach(
         cls,
-        rag: LegalRAG,
+        rag: RagService,
         *,
         cfg: config.AgentConfig | None = None,
         tracer: Tracer | None = None,
     ) -> "AgentRunner":
+        from ..container import build_llm
+
         agent_cfg = cfg or config.agent_config()
         if tracer is None:
-            from .langfuse_tracer import from_env
+            from ..observability.langfuse import from_env
 
             tracer = from_env()
         observer = tracer or Tracer()
@@ -129,10 +118,10 @@ class AgentRunner:
             rag,
             cfg=agent_cfg,
             tracer=observer,
-            region_llm=ToolCallingLLM(
+            region_llm=build_llm(
                 config.region_llm_config(), retries=agent_cfg.retries, observer=observer
             ),
-            review_llm=ToolCallingLLM(
+            review_llm=build_llm(
                 config.review_llm_config(), retries=agent_cfg.retries, observer=observer
             ),
         )
@@ -188,24 +177,20 @@ class AgentRunner:
 
     def describe(self) -> str:
         stats = self.rag.stats()
-        if stats.dense is None:
-            vector_state = "未知（Milvus 未连接）"
-        else:
-            vector_state = "已启用" if stats.dense else "未启用（仅 BM25）"
         threshold = self.cfg.review_min_score
         review_state = (
             "复核已关闭"
             if threshold < 0
             else (
-                f"末端复核（1 次 {self.review_llm.cfg.model} 调用，"
+                f"末端复核（1 次 {self.review_llm.model_name} 调用，"
                 + (f"支撑 < {threshold:g} 降级转人工）" if threshold > 0 else "只打分不拦截）")
             )
         )
         return (
             f"Agent：{stats.articles} 条法条 / {stats.chunks} 个子块 | "
-            f"稠密通道 {vector_state} | 最多 {self.cfg.max_steps} 轮 | "
-            f"入口判地区（1 次 {self.region_llm.cfg.model} 调用，判不出则不限地区） | "
+            f"稠密通道 {channel_state(stats.dense)} | 最多 {self.cfg.max_steps} 轮 | "
+            f"入口判地区（1 次 {self.region_llm.model_name} 调用，判不出则不限地区） | "
             f"{review_state} | "
             f"工具 {len(TOOLS)} 个（{'、'.join(tool['function']['name'] for tool in TOOLS)}） | "
-            f"LLM {self.llm.cfg.model}"
+            f"LLM {self.llm.model_name}"
         )

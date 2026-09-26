@@ -5,10 +5,10 @@ import re
 from dataclasses import replace
 
 from .. import config
-from ..contracts import Evidence, Review
-from ..qa.generator import REVIEW_DOWNGRADE_ANSWER
-from ..services.llm import ToolCallingLLM
-from .prompts import REVIEW_SYSTEM_PROMPT
+from ..contracts.answer import Evidence, Review
+from ..generation.generator import REVIEW_DOWNGRADE_ANSWER
+from ..ports import LLM
+from ..prompts import REVIEW_SYSTEM_PROMPT
 from .state import AgentState
 
 __all__ = ["cited_labels", "downgrade_text", "parse_judgments", "make_review_node"]
@@ -94,7 +94,7 @@ def _build_payload(question: str, answer_text: str, listed: list[Evidence]) -> l
     ]
 
 
-def make_review_node(llm: ToolCallingLLM, cfg: config.AgentConfig):
+def make_review_node(llm: LLM, cfg: config.AgentConfig):
 
     def review_node(state: AgentState) -> dict:
         answer = state.get("answer")
@@ -194,7 +194,7 @@ def make_review_node(llm: ToolCallingLLM, cfg: config.AgentConfig):
             supported=len(supported),
             unsupported=tuple(f"依据{n}" for n in unsupported),
             original_text=answer.text,
-            model=llm.cfg.model,
+            model=llm.model_name,
             passed=passed,
         )
         return {

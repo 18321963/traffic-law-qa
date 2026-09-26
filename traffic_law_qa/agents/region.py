@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 
-from ..contracts import ParentChunk
-from ..services.llm import ToolCallingLLM
-from .prompts import REGION_SYSTEM_PROMPT
+from ..contracts.disk import ParentChunk
+from ..contracts.retrieval import REGION_UNKNOWN
+from ..ports import LLM
+from ..prompts import REGION_SYSTEM_PROMPT
 from .state import AgentState
 
 __all__ = [
@@ -13,8 +14,6 @@ __all__ = [
     "national_law_ids",
     "make_region_node",
 ]
-
-REGION_UNKNOWN = "?"
 
 _LOCAL_MARKERS = ("省", "市", "自治区", "经济特区")
 """法规名里带这些词 = 地方性法规。
@@ -62,7 +61,7 @@ def _parse_region(text: str) -> str:
 
 
 def make_region_node(
-    llm: ToolCallingLLM, parents: dict[str, ParentChunk], laws: list[str]
+    llm: LLM, parents: dict[str, ParentChunk], laws: list[str]
 ):
 
     prompt_head = REGION_SYSTEM_PROMPT % {
