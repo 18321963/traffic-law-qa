@@ -3,7 +3,8 @@ from __future__ import annotations
 import operator
 from typing import Annotated, TypedDict
 
-from ..contracts import Answer, MaterialPassage, WebFinding
+from ..contracts.answer import Answer
+from ..contracts.retrieval import MaterialPassage, WebFinding
 
 __all__ = ["AgentState"]
 

@@ -10,8 +10,16 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from .. import config
-from ..contracts import QaError
-from ..database.init_db import (
+from ..app.ingest import dry_run, promote, read_material, store_material
+from ..contracts.errors import QaError
+from ..contracts.reports import channel_label
+from ..infra.sqlite import (
+    MODE_LABELS,
+    MODE_PERMANENT,
+    MODE_SESSION,
+    STATUS_READY,
+    STATUS_REJECTED,
+    DocumentRow,
     delete_document,
     get_document,
     list_documents,
@@ -19,15 +27,7 @@ from ..database.init_db import (
     save_document,
     utc_now,
 )
-from ..database.models import (
-    MODE_LABELS,
-    MODE_PERMANENT,
-    MODE_SESSION,
-    STATUS_READY,
-    STATUS_REJECTED,
-    DocumentRow,
-)
-from ..services.ingest import dry_run, promote, read_paragraphs, store_material
+from .runtime import boot_runtime
 
 __all__ = ["router", "runtime_of"]
 
@@ -41,7 +41,7 @@ MODE_NOTE = {
 REJECTED_NOTE_PREFIX = "拒收"
 PERMANENT_DELETE_NOTE = (
     "永久入库的法规不能从这里删：删掉 {name} 后还要重建索引，"
-    "手工做 —— 移除 {dir} 下的该文件，再跑 python -m traffic_law_qa.pipeline build"
+    "手工做 —— 移除 {dir} 下的该文件，再跑 python -m traffic_law_qa.cli.build build"
 )
 UNKNOWN_MODE_NOTE = "mode 只能是 {modes}"
 MISSING_DOC_NOTE = "没有这个 doc_id：{doc_id}"
@@ -85,15 +85,8 @@ async def upload(
     doc_id = new_doc_id()
 
     if mode == MODE_SESSION:
-        try:
-            paragraphs = read_paragraphs(data, display_name)
-        except Exception as exc:  # noqa: BLE001
-            save_document(
-                _row(doc_id, display_name, mode, suffix, data, status=STATUS_REJECTED, note=str(exc))
-            )
-            return _rejected(doc_id, mode, display_name, f"读不出内容：{exc}")
-        if not paragraphs:
-            note = "文件里没有可解析的段落（是空的，或读取后一个字都没有）"
+        paragraphs, note = read_material(data, display_name)
+        if paragraphs is None:
             save_document(
                 _row(doc_id, display_name, mode, suffix, data, status=STATUS_REJECTED, note=note)
             )
@@ -226,8 +219,6 @@ def remove(request: Request, doc_id: str) -> dict:
 @router.post("/reindex")
 def reindex(request: Request) -> dict:
     runtime_of(request)
-    from ..main import boot_runtime
-
     started = time.perf_counter()
     try:
         rt = boot_runtime()
@@ -242,5 +233,5 @@ def reindex(request: Request) -> dict:
         "laws": rt.ready.laws,
         "articles": rt.ready.articles,
         "rows": rt.ready.rows,
-        "channels": "稠密+BM25" if rt.dense_live else "纯 BM25",
+        "channels": channel_label(rt.dense_live),
     }

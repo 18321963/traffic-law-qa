@@ -3,14 +3,16 @@ from __future__ import annotations
 from dataclasses import replace
 
 from .. import config
-from ..contracts import MaterialPassage, ParentChunk, Question, RetrievalResult, WebFinding
-from ..obs import Tracer
-from ..qa.rag import LegalRAG
-from ..services.llm import ToolCallingLLM
+from ..contracts.answer import Question
+from ..contracts.disk import ParentChunk
+from ..contracts.retrieval import MaterialPassage, RetrievalResult, WebFinding
+from ..observability.tracer import Tracer
+from ..ports import LLM, RagService
+from ..prompts import AGENT_SYSTEM_PROMPT
+from ..search.materials import load_materials
+from ..search.merge import merge_retrievals
 from ..tools.arguments import tool_message
-from ..tools.documents import load_materials
 from ..tools.handlers import HANDLERS, ToolCall, ToolEnv, retrieval_digest
-from ..tools.merge import merge_retrievals
 from ..tools.schemas import (
     GET_ARTICLE_NAME,
     GET_ARTICLE_TOOL,
@@ -20,7 +22,6 @@ from ..tools.schemas import (
     SEARCH_MATERIALS_TOOL,
     WEB_SEARCH_NAME,
 )
-from .prompts import AGENT_SYSTEM_PROMPT
 from .state import AgentState
 
 __all__ = [
@@ -49,7 +50,7 @@ def _unearned_stop(reply: dict, state: AgentState) -> bool:
     return not reply.get("tool_calls") and not state.get("search_log")
 
 
-def make_agent_node(llm: ToolCallingLLM, cfg: config.AgentConfig, laws: list[str]):
+def make_agent_node(llm: LLM, cfg: config.AgentConfig, laws: list[str]):
 
     laws_block = "\n".join(f"- {name}" for name in laws)
     law_count = len(laws)
@@ -85,7 +86,7 @@ def make_agent_node(llm: ToolCallingLLM, cfg: config.AgentConfig, laws: list[str
 
 
 def make_tools_node(
-    rag: LegalRAG,
+    rag: RagService,
     cfg: config.AgentConfig,
     index: dict[tuple[str, int], ParentChunk],
     observer: Tracer | None = None,
@@ -207,7 +208,7 @@ def _trajectory_notes(state: AgentState, merged: RetrievalResult, cfg: config.Ag
 
 
 def make_finalize_node(
-    rag: LegalRAG,
+    rag: RagService,
     cfg: config.AgentConfig,
     observer: Tracer | None = None,
 ):

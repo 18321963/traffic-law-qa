@@ -11,12 +11,14 @@ pytest.importorskip("httpx", reason="TestClient 要 httpx（dev extra）")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from traffic_law_qa import main as server  # noqa: E402
-from traffic_law_qa.agents import langfuse_tracer as lt  # noqa: E402
 from traffic_law_qa.agents.graph import AgentRunner  # noqa: E402
-from traffic_law_qa.contracts import Answer, RetrievalResult, Review  # noqa: E402
-from traffic_law_qa.obs import Tracer  # noqa: E402
-from traffic_law_qa.ready import ReadyState  # noqa: E402
+from traffic_law_qa.api import app as server  # noqa: E402
+from traffic_law_qa.api.runtime import Runtime  # noqa: E402
+from traffic_law_qa.app.readiness import ReadyState  # noqa: E402
+from traffic_law_qa.contracts.answer import Answer, Review  # noqa: E402
+from traffic_law_qa.contracts.retrieval import RetrievalResult  # noqa: E402
+from traffic_law_qa.observability import langfuse as lt  # noqa: E402
+from traffic_law_qa.observability.tracer import Tracer  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 HEAVY = ("langgraph", "pymilvus", "openai", "langfuse", "langchain_core")
@@ -57,7 +59,9 @@ class StubRag:
         self.searches: list[tuple[str, int | None]] = []
         self.answers = 0
 
-    def search(self, question: str, top_k: int | None = None) -> RetrievalResult:
+    def search(
+        self, question: str, top_k: int | None = None, *, channel_debug: bool = False
+    ) -> RetrievalResult:
         self.searches.append((question, top_k))
         return _retrieval(question)
 
@@ -82,7 +86,7 @@ def service(monkeypatch):
     monkeypatch.setattr(AgentRunner, "graph", fake_graph)
     monkeypatch.setattr(AgentRunner, "ask", fake_ask)
 
-    rt = server.Runtime(
+    rt = Runtime(
         ready=ReadyState(
             action="reuse",
             reason="",
@@ -176,7 +180,7 @@ def test_stream_rejects_mode_agent(service):
 def test_runtime_error_reaches_the_client_as_one_line(service):
     client, rt, _ = service
 
-    def boom(question, top_k=None):
+    def boom(question, top_k=None, *, channel_debug=False):
         raise RuntimeError("调用 stub-model 失败：连接超时")
 
     rt.rag.search = boom
@@ -194,9 +198,9 @@ def test_health_reports_agent_ready_without_assembling(service):
     assert client.get("/health").json()["agent_ready"] is False
 
 
-def test_importing_main_keeps_heavy_deps_out():
+def test_importing_the_api_app_keeps_heavy_deps_out():
     code = (
-        "import sys, traffic_law_qa.main;"
+        "import sys, traffic_law_qa.api.app;"
         f"print(','.join(sorted({{m.split('.')[0] for m in sys.modules}} & set({HEAVY!r}))))"
     )
     proc = subprocess.run(
@@ -208,4 +212,4 @@ def test_importing_main_keeps_heavy_deps_out():
         timeout=120,
     )
     assert proc.returncode == 0, proc.stderr[-500:]
-    assert proc.stdout.strip() == "", f"import traffic_law_qa.main 拉起了：{proc.stdout.strip()}"
+    assert proc.stdout.strip() == "", f"import traffic_law_qa.api.app 拉起了：{proc.stdout.strip()}"

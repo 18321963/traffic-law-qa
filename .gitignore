@@ -58,9 +58,13 @@ arch_graph.txt
 *.rar
 *.tar.gz
 
-# --- RAG 管道生成的检索产物（用 python -m traffic_law_qa.pipeline build 重建）---
+# --- RAG 管道生成的检索产物（用 python -m traffic_law_qa.cli.build build 重建）---
 法规知识库/chunks/
 法规知识库/index/
+
+# --- 本地推理模型的权重（bge-m3 / bge-reranker-v2-m3，各约 2.3GB）---
+# 是下载件不是源：MIT/Apache 许可，随时能从 HF 或 ModelScope 重新拉；进版本库只会把仓库撑成几 GB。
+法规知识库/models/
 
 # --- 评测跑出来的轨迹（几十到几百 K 的 JSON，随时能用 --trace 重跑）---
 data/traces/

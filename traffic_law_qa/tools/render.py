@@ -1,14 +1,21 @@
 from __future__ import annotations
 
-from ..contracts import ParentChunk, RetrievalResult
+from ..contracts.disk import ParentChunk
+from ..contracts.retrieval import RetrievalResult
+from ..textutil import bigrams
 
 CHAPEAU_CHARS = 40
 MIN_BODY_CHARS = 40
 
-_DROP_NOTES = ("法名线索：",)
+LOG_SEARCH = "检索#"
+LOG_WEB = "网搜#"
+LOG_MATERIAL = "材料#"
+
+_DROP_NOTES = ("法名线索：", "未重排：", "重排失败")
 """不进提示词的 note 前缀。
 
 `法名线索：X（命中法规的分数 ×1.5）` 讲的是检索层怎么调分，模型据此动不了任何事。
+`未重排：…` / `重排失败…` 同理：重排这一层没跑成，模型能做的是去查法条，不是去修检索。
 `口语对齐：A → B` 留着 —— 它说的是模型自己的问法被怎么理解，那是能据以改写的反馈。
 
 **只在渲染这层过滤，不动 retriever 的产出**：同一批 note 还要进 `Answer.notes`
@@ -18,11 +25,6 @@ _DROP_NOTES = ("法名线索：",)
 
 def _cite(article: ParentChunk) -> str:
     return f"《{article.law_name}》{article.article_no}"
-
-
-def _bigrams(text: str) -> set[str]:
-    cleaned = "".join(ch for ch in text if ch.strip())
-    return {cleaned[i : i + 2] for i in range(len(cleaned) - 1)} or {cleaned}
 
 
 def _chapeau(text: str, limit: int) -> str:
@@ -36,7 +38,7 @@ def _snippet(text: str, query: str, width: int) -> str:
     if len(text) <= width:
         return text
 
-    grams = _bigrams(query)
+    grams = bigrams(query)
     if not grams or not query.strip():
         return text[:width] + "…"
 
@@ -90,7 +92,10 @@ def render_tool_result(
     seen = seen or set()
     total = len(result.articles)
     fresh = sum(1 for a in result.articles if a.article.parent_id not in seen)
-    lines = [f"检索#{index}「{result.query}」｜命中 {total} 条（新增 {fresh} / 已知 {total - fresh}）"]
+    lines = [
+        f"{LOG_SEARCH}{index}「{result.query}」｜命中 {total} 条"
+        f"（新增 {fresh} / 已知 {total - fresh}）"
+    ]
     if not total:
         lines.append("没有命中的法条。请换一组更接近法条原文的关键词，或补上具体违法情形与地点后重试。")
     elif not fresh:

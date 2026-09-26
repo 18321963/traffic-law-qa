@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from .. import config
-from ..agents.trace import render_trace
-from ..contracts import ParentChunk
-from ..services.llm import ToolCallingLLM
-from ..tools.articles import build_article_index, parse_article_no, resolve_law_id
+from ..contracts.disk import ParentChunk
+from ..infra.llm import OpenAILLM
+from ..observability.trace import render_trace
+from ..search.articles import build_article_index, parse_article_no, resolve_law_id
 from .corpus import RE_ARTICLE, RE_LAW
 
 USAGE = """跨法规多跳题集：从条文反向造题 + 机械护栏。
@@ -108,7 +108,7 @@ class Library:
 
     @classmethod
     def load(cls) -> Library:
-        from ..kb.chunker import ChunkStage
+        from ..indexing.chunker import ChunkStage
 
         return cls.from_parents(list(ChunkStage(verbose=False).load().parents))
 
@@ -341,8 +341,8 @@ def defect_diagnostic(cases: list[HopCase], library: Library) -> str:
 
 
 def baseline_diagnostic(cases: list[HopCase], *, top_k: int = 6, verbose: bool = True) -> dict:
-    from ..api import qa
-    from ..contracts import RetrievalResult
+    from ..api.facade import qa
+    from ..contracts.retrieval import RetrievalResult
 
     hit = miss = 0
     rows: list[dict] = []
@@ -470,7 +470,7 @@ def generate(
     verbose: bool = True,
 ) -> list[dict]:
     library = library or Library.load()
-    llm = ToolCallingLLM()
+    llm = OpenAILLM()
     if not llm.available:
         raise HopError("未配置 LLM_API_KEY，无法生成题集")
 
@@ -562,14 +562,15 @@ def trace(
     top_k: int = 6,
     verbose: bool = True,
 ) -> list[dict]:
-    from ..agents.graph import AgentRunner
-    from ..api import qa
-    from ..contracts import Answer, RetrievalResult
+    from .. import container
+    from ..api.facade import qa
+    from ..contracts.answer import Answer
+    from ..contracts.retrieval import RetrievalResult
 
     if cases is None:
         cases, _dropped = load_cases()
     cases = list(cases)[:limit]
-    runner = AgentRunner.load(top_k=top_k)
+    runner = container.boot_agent_runner(top_k=top_k)
 
     rows: list[dict] = []
     for position, case in enumerate(cases, start=1):

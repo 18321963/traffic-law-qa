@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import config
-from ..contracts import ParentChunk
+from ..contracts.disk import ParentChunk
 
 USAGE = """题集文件的唯一生成者与读者：一份源语料 → 三份桶文件。
 

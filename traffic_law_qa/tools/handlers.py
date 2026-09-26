@@ -5,17 +5,19 @@ from dataclasses import dataclass
 from typing import Any
 
 from .. import config
-from ..contracts import MaterialPassage, ParentChunk, RetrievalResult, WebFinding
-from ..obs import Tracer
-from ..qa.rag import LegalRAG
+from ..contracts.disk import ParentChunk
+from ..contracts.retrieval import MaterialPassage, RetrievalResult, WebFinding
+from ..infra.websearch import search_web as fetch_web
+from ..observability.tracer import Tracer
+from ..ports import RagService
+from ..search.articles import lookup_article, resolve_law_id
+from ..search.materials import search_materials as score_materials
 from .arguments import (
     parse_article_arguments,
     parse_material_arguments,
     parse_tool_arguments,
     parse_web_arguments,
 )
-from .articles import lookup_article, resolve_law_id
-from .documents import search_materials as score_materials
 from .render import render_tool_result
 from .schemas import (
     GET_ARTICLE_NAME,
@@ -24,7 +26,6 @@ from .schemas import (
     SEARCH_MATERIALS_NAME,
     WEB_SEARCH_NAME,
 )
-from .web_search import search_web as fetch_web
 
 __all__ = ["ToolCall", "ToolEnv", "ToolOutcome", "HANDLERS", "retrieval_digest"]
 
@@ -42,7 +43,7 @@ _BAD_ARGUMENTS = "参数不合法：{}。请修正后重试。"
 
 @dataclass(frozen=True)
 class ToolEnv:
-    rag: LegalRAG
+    rag: RagService
     index: dict[tuple[str, int], ParentChunk]
     cfg: config.AgentConfig
     observer: Tracer

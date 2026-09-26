@@ -43,7 +43,7 @@ def run(
 
     cases = load_bucket(config.EVAL_RETRIEVAL_PATH)
     if not cases:
-        from ..api import QaError
+        from ..api.facade import QaError
 
         raise QaError("题集 A 里没有可用的评测题")
 

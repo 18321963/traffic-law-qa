@@ -69,11 +69,10 @@ services:
     env_file:
       - path: .env
         required: false
+    # 嵌入/重排跑 GPU；宿主机没有 NVIDIA 卡或没开 WSL2 直通时删掉这行，模型会退回 CPU
+    gpus: all
     environment:
       MILVUS_URI: http://standalone:19530
-      EMBED_BASE_URL: http://host.docker.internal:11434/v1
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
     volumes:
@@ -81,13 +80,14 @@ services:
       - tlr_index:/app/法规知识库/index
       - tlr_docx:/app/法规知识库/docx
       - tlr_data:/app/data
+      - ./法规知识库/models:/app/法规知识库/models:ro
     depends_on:
       standalone:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)\""]
       interval: 30s
-      start_period: 60s
+      start_period: 180s
       timeout: 10s
       retries: 3
     restart: unless-stopped

@@ -31,17 +31,22 @@ api = [
 langfuse = [
     "langfuse>=4.15,<5",
 ]
+local = [
+    "torch>=2.4",
+    "transformers>=4.43",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
 ]
 all = [
-    "traffic-law-qa[agent,api,dev]",
+    "traffic-law-qa[agent,api,dev,local]",
 ]
 
 [project.scripts]
 tlq-qa = "traffic_law_qa.__main__:main"
-tlq-serve = "traffic_law_qa.main:main"
+tlq-build = "traffic_law_qa.cli.build:main"
+tlq-serve = "traffic_law_qa.cli.serve:main"
 
 [project.urls]
 Homepage = "https://github.com/18321963/traffic-law-qa"

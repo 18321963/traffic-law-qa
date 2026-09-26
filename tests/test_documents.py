@@ -11,17 +11,25 @@ pytest.importorskip("fastapi", reason="api extra 没装：上传端点验收跳�
 from fastapi.testclient import TestClient  # noqa: E402
 
 from traffic_law_qa import config  # noqa: E402
-from traffic_law_qa import main as server
 from traffic_law_qa.agents import graph as graph_mod  # noqa: E402
 from traffic_law_qa.agents.review import cited_labels  # noqa: E402
-from traffic_law_qa.agents.trace import render_trace  # noqa: E402
-from traffic_law_qa.contracts import ParentChunk, RetrievalResult, RetrievedArticle  # noqa: E402
-from traffic_law_qa.database import init_db  # noqa: E402
-from traffic_law_qa.database.models import STATUS_READY, STATUS_REJECTED  # noqa: E402
-from traffic_law_qa.obs import Tracer  # noqa: E402
-from traffic_law_qa.qa.generator import MATERIAL_HEADER, AnswerGenerator  # noqa: E402
-from traffic_law_qa.ready import ReadyState  # noqa: E402
-from traffic_law_qa.services.ingest import dry_run  # noqa: E402
+from traffic_law_qa.api import app as server  # noqa: E402
+from traffic_law_qa.api.runtime import Runtime  # noqa: E402
+from traffic_law_qa.app.ingest import dry_run, read_material  # noqa: E402
+from traffic_law_qa.app.readiness import ReadyState  # noqa: E402
+from traffic_law_qa.contracts.disk import ParentChunk  # noqa: E402
+from traffic_law_qa.contracts.reports import channel_label  # noqa: E402
+from traffic_law_qa.contracts.retrieval import RetrievalResult, RetrievedArticle  # noqa: E402
+from traffic_law_qa.generation.generator import AnswerGenerator  # noqa: E402
+from traffic_law_qa.infra.sqlite import (  # noqa: E402
+    STATUS_READY,
+    STATUS_REJECTED,
+    init_database,
+    list_documents,
+)
+from traffic_law_qa.observability.trace import render_trace  # noqa: E402
+from traffic_law_qa.observability.tracer import Tracer  # noqa: E402
+from traffic_law_qa.prompts import MATERIAL_HEADER  # noqa: E402
 
 LAW_NAME = "中华人民共和国道路交通安全法"
 ARTICLE = ParentChunk(
@@ -59,13 +67,13 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "UPLOAD_DIR", tmp_path / "data" / "uploads")
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "data" / "documents.db")
     monkeypatch.setattr(config, "SOURCE_DIR", tmp_path / "docx")
-    init_db.init_database()
+    init_database()
     return tmp_path
 
 
 @pytest.fixture
 def client(store):
-    server.app.state.rt = server.Runtime(
+    server.app.state.rt = Runtime(
         ready=ReadyState(
             action="reuse",
             reason="",
@@ -103,6 +111,20 @@ def test_session_upload_is_listed_and_deletable(client) -> None:
 
     assert client.delete(f"/documents/{body['doc_id']}").status_code == 200
     assert client.get("/documents").json()["count"] == 0
+    assert not config.upload_dir(body["doc_id"]).exists()
+
+
+def test_a_file_with_no_paragraphs_is_refused_with_the_ingest_receipt(client) -> None:
+    resp = _upload(client, "", "空文件.md", "session")
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["accepted"] is False
+    paragraphs, note = read_material(b"", "空文件.md")
+    assert paragraphs is None and "没有可解析的段落" in note
+    assert body["note"] == note, "路由另写了一份回执，不是上传判据那一份"
+    rows = client.get("/documents", params={"mode": "session"}).json()["documents"]
+    assert [row["status"] for row in rows] == [STATUS_REJECTED]
     assert not config.upload_dir(body["doc_id"]).exists()
 
 
@@ -146,7 +168,7 @@ def test_permanent_rows_refuse_deletion(client) -> None:
     body = _upload(client, MATERIAL_MD, "车辆管理规定.md", "permanent").json()
     resp = client.delete(f"/documents/{body['doc_id']}")
     assert resp.status_code == 400
-    assert "pipeline build" in resp.json()["detail"]
+    assert "cli.build build" in resp.json()["detail"]
     assert len(config.source_files()) == 1
 
 
@@ -169,6 +191,36 @@ def test_documents_endpoint_needs_a_live_service(store) -> None:
     assert resp.json()["detail"] == "Milvus 连不上"
 
 
+def test_reindex_rebuilds_and_replaces_the_runtime(client, monkeypatch) -> None:
+    from traffic_law_qa.api import routes
+
+    rebuilt = Runtime(
+        ready=ReadyState(
+            action="rebuild",
+            reason="docx 与索引不一致",
+            rows=812,
+            laws=6,
+            articles=508,
+            parents=508,
+            dense=False,
+            milvus="v2.6.24",
+        ),
+        rag=None,
+        boot_ms=12.0,
+    )
+    monkeypatch.setattr(routes, "boot_runtime", lambda: rebuilt)
+
+    resp = client.post("/reindex")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["action"] == "rebuild" and body["reason"] == "docx 与索引不一致"
+    assert body["articles"] == 508
+    assert body["channels"] == channel_label(False)
+    assert server.app.state.rt is rebuilt
+
+
 class _ScriptedLLM:
     def __init__(self, replies: list[dict], *, model: str) -> None:
         self.cfg = config.LLMConfig(base_url="http://stub", api_key="stub", model=model)
@@ -178,6 +230,10 @@ class _ScriptedLLM:
     @property
     def available(self) -> bool:
         return True
+
+    @property
+    def model_name(self) -> str:
+        return self.cfg.model
 
     def chat(self, messages, *, tools=None, temperature=None, name="llm.chat"):
         self.offered.append({tool["function"]["name"] for tool in tools or ()})
@@ -379,7 +435,7 @@ def test_a_budget_that_runs_out_still_reaches_an_answer(monkeypatch) -> None:
 def test_ledger_keeps_the_sha1_and_the_original_name(client) -> None:
     _upload(client, MATERIAL_MD, "车辆管理规定.md", "session")
 
-    got = init_db.list_documents()[0]
+    got = list_documents()[0]
     assert got.sha1 == hashlib.sha1(MATERIAL_MD.encode("utf-8")).hexdigest()
     assert got.display_name == "车辆管理规定.md"
     assert got.bytes == len(MATERIAL_MD.encode("utf-8"))

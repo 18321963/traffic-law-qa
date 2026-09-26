@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import threading
 
-from traffic_law_qa.agents.langfuse_tracer import LangfuseTracer
-from traffic_law_qa.obs import Recorder, Tracer
+from traffic_law_qa.observability.langfuse import LangfuseTracer
+from traffic_law_qa.observability.tracer import Recorder, Tracer
 
 
 class _FakeObs:

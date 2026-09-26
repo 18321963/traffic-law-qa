@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import config
-from ..contracts import RetrievalResult
+from ..contracts.reports import channel_label
+from ..contracts.retrieval import RetrievalResult
 from .corpus import BucketError, EvalCase, display_path, load_bucket
 
 USAGE = """离线检索评测：data/eval_retrieval.json → hit@1/@3/@6 + MRR。
@@ -38,8 +39,8 @@ USAGE = """离线检索评测：data/eval_retrieval.json → hit@1/@3/@6 + MRR�
 - ground truth 取答案里引用的**全部**本库条号，不是只取第一条：一条答案合法引用多条
   是常态，只认第一条会低估命中率
 - 命中 = 期望的 parent_id 出现在返回列表里，名次取**最靠前**的那个；报告里的
-  82 道 → hit@1 69.5% / hit@3 84.1% / hit@6 91.5% / MRR 0.777 是**当前配置的属性**，
-  换向量模型这组数就会动，别当成模型的属性。
+  82 道 → hit@1 75.6% / hit@3 86.6% / hit@6 91.5% / MRR 0.819（本地 bge-m3 + 交叉编码器重排）
+  是**当前配置的属性**，换向量模型或关掉重排这组数就会动，别当成模型的属性。
 
 原先设过的**「域内外分开报」机制已拆除**：域外题清零后，`in_domain` 标记、
 `--in-domain` 开关、报告里的域外行全都失去了真实调用，留着就是一份没人执行的契约。
@@ -124,9 +125,9 @@ class EvalReport:
     def vector_label(self) -> str:
         used = sum(1 for row in self.results if row.used_vector)
         if used == 0:
-            return "纯 BM25"
+            return channel_label(False)
         if used == len(self.results):
-            return "稠密+BM25"
+            return channel_label(True)
         return f"部分降级（{used}/{len(self.results)} 题走稠密）"
 
     def render(self, *, show_misses: int = 0) -> str:
@@ -163,11 +164,11 @@ def evaluate(
     with_vector: bool = True,
     verbose: bool = True,
 ) -> EvalReport:
-    from ..api import qa
+    from ..api.facade import qa
 
     data_path = Path(data_path or config.EVAL_RETRIEVAL_PATH)
     if not data_path.exists():
-        from ..api import QaError
+        from ..api.facade import QaError
 
         raise QaError(f"题集不存在：{data_path}（先跑 python -m traffic_law_qa.eval.corpus build）")
 
@@ -175,7 +176,7 @@ def evaluate(
     if limit:
         cases = cases[:limit]
     if not cases:
-        from ..api import QaError
+        from ..api.facade import QaError
 
         raise QaError(f"{display_path(data_path)} 里没有题")
 
@@ -362,12 +363,12 @@ def evaluate_reference(
     compare_baseline: bool = True,
     verbose: bool = True,
 ) -> ReferenceReport:
-    from ..kb.chunker import ChunkStage
-    from ..tools.articles import build_article_index, find_article
+    from ..indexing.chunker import ChunkStage
+    from ..search.articles import build_article_index, find_article
 
     data_path = Path(data_path or config.EVAL_REFERENCE_PATH)
     if not data_path.exists():
-        from ..api import QaError
+        from ..api.facade import QaError
 
         raise QaError(f"题集不存在：{data_path}（先跑 python -m traffic_law_qa.eval.corpus build）")
 
@@ -375,7 +376,7 @@ def evaluate_reference(
     if limit:
         cases = cases[:limit]
     if not cases:
-        from ..api import QaError
+        from ..api.facade import QaError
 
         raise QaError(f"{display_path(data_path)} 里没有题")
 
@@ -387,7 +388,7 @@ def evaluate_reference(
     baseline_ran = False
     if compare_baseline:
         try:
-            from ..api import qa
+            from ..api.facade import qa
 
             top_k = top_k or max(KS)
             for item in cases:
@@ -450,7 +451,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     import sys
 
-    from ..api import QaError
+    from ..api.facade import QaError
 
     args = list(sys.argv[1:] if argv is None else argv)
     if "-h" in args or "--help" in args:
