@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from traffic_law_qa import config
-from traffic_law_qa.contracts.disk import Chunk, ParentChunk
-from traffic_law_qa.contracts.retrieval import Query
-from traffic_law_qa.infra.embedding import LocalEmbedder
-from traffic_law_qa.infra.reranking import LocalReranker
-from traffic_law_qa.search.retriever import HybridRetriever
+from rag_contracts import config
+from rag_contracts.domain.disk import Chunk, ParentChunk
+from rag_contracts.domain.retrieval import Query
+from rag_service.adapters.embedding import LocalEmbedder
+from rag_service.adapters.reranking import LocalReranker
+from rag_service.query.retriever import HybridRetriever
 
 LAW_NAME = "中华人民共和国道路交通安全法"
 CITATION = f"《{LAW_NAME}》"

@@ -31,8 +31,11 @@ dist/
 volumes/
 
 # --- 与镜像无关的数据 ---
-# 上游原始素材：管道只读 docx，pdf 是更上游的下载件，装进镜像只是白占体积。
-法规知识库/pdf/
+# 派生产物：镜像只带真源（法规知识库/docx/ 与 法规知识库/pdf/），这四个目录容器首启自己重建。
+法规知识库/parsed/
+法规知识库/text/
+法规知识库/chunks/
+法规知识库/index/
 # 模型权重（约 4.6GB）：容器靠 compose 在运行时 bind mount 挂进去，
 # 进构建上下文只会让每次 build 都往 daemon 塞几 GB。
 法规知识库/models/

@@ -3,16 +3,28 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from traffic_law_qa import config
-from traffic_law_qa.app.rag import LegalRAG
-from traffic_law_qa.container import build_retriever
-from traffic_law_qa.contracts.answer import Question
-from traffic_law_qa.contracts.disk import Chunk, ChunkSet, ParentChunk
-from traffic_law_qa.contracts.retrieval import Query, RetrievalResult, RetrievedArticle
-from traffic_law_qa.generation.generator import AnswerGenerator
-from traffic_law_qa.ports import LLM, Embedder, RagService, Reranker, VectorStore
+import rag_contracts
+import rag_service
+from rag_contracts import config
+from rag_contracts.domain.answer import Question
+from rag_contracts.domain.disk import Chunk, ChunkSet, ParentChunk
+from rag_contracts.domain.retrieval import Query, RetrievalResult, RetrievedArticle
+from rag_contracts.ports import LLM, Embedder, RagService, Reranker, VectorStore
+from rag_service.container import build_retriever
+from rag_service.query.generator import AnswerGenerator
+from rag_service.query.rag import LegalRAG
 
-PACKAGE = Path(__file__).resolve().parent.parent / "traffic_law_qa"
+PACKAGE = Path(rag_service.__file__).resolve().parent
+SOURCES = sorted(path for path in PACKAGE.rglob("*.py") if "__pycache__" not in path.parts)
+assert len(SOURCES) > 20, f"扫描根不成立：{PACKAGE} 下只有 {len(SOURCES)} 个 .py，端口门会报成「全都没实现」"
+
+CONTRACTS_PACKAGE = Path(rag_contracts.__file__).resolve().parent
+CONTRACT_SOURCES = sorted(
+    path for path in CONTRACTS_PACKAGE.rglob("*.py") if "__pycache__" not in path.parts
+)
+assert len(CONTRACT_SOURCES) > 10, (
+    f"扫描根不成立：{CONTRACTS_PACKAGE} 下只有 {len(CONTRACT_SOURCES)} 个 .py，端口门会报成「全都没实现」"
+)
 
 PORTS = (
     "Embedder",
@@ -43,6 +55,10 @@ class _EchoEmbedder(Embedder):
     @property
     def model_label(self) -> str:
         return "内存嵌入"
+
+    @property
+    def fingerprint(self) -> str:
+        return ""
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         return [[0.0, 1.0] for _ in texts]
@@ -80,7 +96,11 @@ class _ScriptedLLM(LLM):
         return "内存模型"
 
     def chat(self, messages, *, tools=None, temperature=None, name="llm.chat"):
-        return {"role": "assistant", "content": f"【依据1】{ARTICLE_TEXT}"}, {"total_tokens": 3}
+        return (
+            {"role": "assistant", "content": f"【依据1】{ARTICLE_TEXT}"},
+            {"total_tokens": 3},
+            "stop",
+        )
 
     def stream(self, messages, *, temperature=None):
         yield "delta", ARTICLE_TEXT
@@ -176,8 +196,8 @@ def _chunk_set() -> ChunkSet:
 
 def test_every_port_has_an_implementation() -> None:
     found: dict[str, list[str]] = {name: [] for name in PORTS}
-    for path in sorted(PACKAGE.rglob("*.py")):
-        if "__pycache__" in path.parts or path.name == "ports.py":
+    for path in list(SOURCES) + list(CONTRACT_SOURCES):
+        if path.name == "ports.py":
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -194,6 +214,10 @@ def test_every_port_has_an_implementation() -> None:
 
 def test_legalrag_declares_the_rag_service_port() -> None:
     assert issubclass(LegalRAG, RagService)
+    assert LegalRAG.__abstractmethods__ == frozenset(), (
+        "端口加了成员、实现没跟上（issubclass 会绿，一构造就 TypeError）："
+        f"{sorted(LegalRAG.__abstractmethods__)}"
+    )
 
 
 def test_search_runs_on_an_injected_in_memory_store() -> None:
@@ -211,6 +235,40 @@ def test_search_runs_on_an_injected_in_memory_store() -> None:
     assert [hit.article.article_no for hit in result.articles] == [ARTICLE_NO]
     assert [hit.article.text for hit in result.articles] == [ARTICLE_TEXT]
     assert store.searches == [(QUESTION, None)], "检索没走到注入的存储上，或问句原话没带上"
+
+
+def _legal_rag() -> LegalRAG:
+    retriever = build_retriever(
+        with_vector=True,
+        store=_InMemoryStore([("c1", 0.9)]),
+        embedder=_EchoEmbedder(),
+        reranker=_OffReranker(),
+        chunk_set=_chunk_set(),
+    )
+    generator = AnswerGenerator(
+        config.LLMConfig(base_url="http://stub", api_key="stub", model="内存模型"),
+        llm=_ScriptedLLM(),
+    )
+    return LegalRAG(retriever, generator)
+
+
+def test_the_tool_face_needs_nothing_but_the_port() -> None:
+    rag = _legal_rag()
+
+    laws = rag.laws()
+    assert [(law.law_name, law.articles) for law in laws] == [(LAW_NAME, 1)]
+
+    hit, error = rag.get_article(ARTICLE_NO, LAW_NAME)
+    assert error == "" and hit is not None
+    assert [item.article.text for item in hit.articles] == [ARTICLE_TEXT]
+
+    missing, why = rag.get_article("第九十九条", LAW_NAME)
+    assert missing is None and "没有第 99 条" in why
+    assert rag.get_article(ARTICLE_NO, "不存在的法")[0] is None
+
+    assert rag.materials(()) == ()
+    passages, note = rag.search_materials(QUESTION, ())
+    assert passages == () and "没有上传材料" in note
 
 
 def test_the_answer_comes_from_the_injected_llm() -> None:
