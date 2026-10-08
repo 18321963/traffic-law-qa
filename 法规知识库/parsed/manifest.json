@@ -1,6 +1,9 @@
 {
-  "generated_at": "2026-09-23T10:49:22+00:00",
-  "source_dir": "法规知识库/docx",
+  "generated_at": "2026-10-08T05:44:36+00:00",
+  "source_dirs": [
+    "法规知识库/docx",
+    "法规知识库/pdf"
+  ],
   "cross_check": false,
   "laws": [
     {
@@ -14,7 +17,7 @@
       "chapters": 8,
       "sections": 7,
       "leftovers": 0,
-      "generated_at": "2026-09-17T16:22:45+00:00"
+      "generated_at": "2026-09-28T06:54:20+00:00"
     },
     {
       "law_id": "road_traffic_safety_regulation",
@@ -27,7 +30,7 @@
       "chapters": 8,
       "sections": 7,
       "leftovers": 0,
-      "generated_at": "2026-09-17T16:22:45+00:00"
+      "generated_at": "2026-09-28T06:54:20+00:00"
     },
     {
       "law_id": "road_transport_regulation",
@@ -40,7 +43,7 @@
       "chapters": 7,
       "sections": 3,
       "leftovers": 0,
-      "generated_at": "2026-09-19T01:39:26+00:00"
+      "generated_at": "2026-09-28T06:54:20+00:00"
     },
     {
       "law_id": "traffic_insurance_regulation",
@@ -53,7 +56,7 @@
       "chapters": 5,
       "sections": 0,
       "leftovers": 0,
-      "generated_at": "2026-09-19T01:39:26+00:00"
+      "generated_at": "2026-09-28T06:54:20+00:00"
     },
     {
       "law_id": "sz_icv_regulation",
@@ -66,7 +69,7 @@
       "chapters": 9,
       "sections": 0,
       "leftovers": 0,
-      "generated_at": "2026-09-17T16:22:46+00:00"
+      "generated_at": "2026-09-28T06:54:20+00:00"
     },
     {
       "law_id": "sz_traffic_penalty_regulation",
@@ -79,7 +82,33 @@
       "chapters": 6,
       "sections": 0,
       "leftovers": 0,
-      "generated_at": "2026-09-17T16:22:46+00:00"
+      "generated_at": "2026-09-28T06:54:20+00:00"
+    },
+    {
+      "law_id": "driving_license_regulation",
+      "law_name": "机动车驾驶证申领和使用规定",
+      "version": "2021-12-27",
+      "file": "机动车驾驶证申领和使用规定_20211227.pdf",
+      "sha1": "ba563579cba8ee70e36c2466a51d823eebaae9db",
+      "articles": 111,
+      "chars": 22268,
+      "chapters": 7,
+      "sections": 8,
+      "leftovers": 0,
+      "generated_at": "2026-10-08T05:44:36+00:00"
+    },
+    {
+      "law_id": "demerit_points_measures",
+      "law_name": "道路交通安全违法行为记分管理办法",
+      "version": "2021-12-27",
+      "file": "道路交通安全违法行为记分管理办法_20211227.pdf",
+      "sha1": "9f565dab0a77509926aaef87715f76eb55bd472d",
+      "articles": 37,
+      "chars": 6420,
+      "chapters": 7,
+      "sections": 0,
+      "leftovers": 0,
+      "generated_at": "2026-10-08T05:44:36+00:00"
     }
   ]
 }

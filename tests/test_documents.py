@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import replace
 
 import pytest
 
@@ -10,28 +9,29 @@ pytest.importorskip("fastapi", reason="api extra 没装：上传端点验收跳�
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from traffic_law_qa import config  # noqa: E402
-from traffic_law_qa.agents import graph as graph_mod  # noqa: E402
-from traffic_law_qa.agents.review import cited_labels  # noqa: E402
-from traffic_law_qa.api import app as server  # noqa: E402
-from traffic_law_qa.api.runtime import Runtime  # noqa: E402
-from traffic_law_qa.app.ingest import dry_run, read_material  # noqa: E402
-from traffic_law_qa.app.readiness import ReadyState  # noqa: E402
-from traffic_law_qa.contracts.disk import ParentChunk  # noqa: E402
-from traffic_law_qa.contracts.reports import channel_label  # noqa: E402
-from traffic_law_qa.contracts.retrieval import RetrievalResult, RetrievedArticle  # noqa: E402
-from traffic_law_qa.generation.generator import AnswerGenerator  # noqa: E402
-from traffic_law_qa.infra.sqlite import (  # noqa: E402
+from rag_contracts import config  # noqa: E402
+from rag_contracts.domain.answer import Question  # noqa: E402
+from rag_contracts.domain.disk import ParentChunk  # noqa: E402
+from rag_contracts.domain.reports import channel_label  # noqa: E402
+from rag_contracts.domain.retrieval import RetrievalResult, RetrievedArticle  # noqa: E402
+from rag_contracts.ports import TRUNCATED_FINISH_REASON  # noqa: E402
+from rag_service.adapters.sqlite import (  # noqa: E402
     STATUS_READY,
     STATUS_REJECTED,
     init_database,
     list_documents,
 )
-from traffic_law_qa.observability.trace import render_trace  # noqa: E402
-from traffic_law_qa.observability.tracer import Tracer  # noqa: E402
-from traffic_law_qa.prompts import MATERIAL_HEADER  # noqa: E402
+from rag_service.api import app as server  # noqa: E402
+from rag_service.api.runtime import Runtime  # noqa: E402
+from rag_service.indexing.ingest import dry_run, read_material  # noqa: E402
+from rag_service.indexing.parser import LawLibrary, ParseStage  # noqa: E402
+from rag_service.indexing.readiness import ReadyState  # noqa: E402
+from rag_service.prompts import MATERIAL_HEADER  # noqa: E402
+from rag_service.query.generator import AnswerGenerator  # noqa: E402
+from rag_service.query.materials import load_materials, search_materials  # noqa: E402
 
 LAW_NAME = "中华人民共和国道路交通安全法"
+QUESTION_TEXT = "饮酒后驾驶营运机动车怎么处罚"
 ARTICLE = ParentChunk(
     parent_id=f"{LAW_NAME}#第九十一条",
     law_id="road_traffic_safety",
@@ -44,7 +44,6 @@ ARTICLE = ParentChunk(
     section=None,
     text="饮酒后驾驶机动车的，处暂扣六个月机动车驾驶证，并处一千元以上二千元以下罚款。",
 )
-PARENTS = {ARTICLE.parent_id: ARTICLE}
 
 MATERIAL_MD = """# 某某公司车辆管理规定
 
@@ -67,6 +66,8 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "UPLOAD_DIR", tmp_path / "data" / "uploads")
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "data" / "documents.db")
     monkeypatch.setattr(config, "SOURCE_DIR", tmp_path / "docx")
+    monkeypatch.setattr(config, "PDF_DIR", tmp_path / "pdf")
+    (tmp_path / "pdf").mkdir()
     init_database()
     return tmp_path
 
@@ -96,6 +97,14 @@ def _upload(client, text: str, name: str, mode: str):
         "/documents",
         files={"file": (name, text.encode("utf-8"), "text/markdown")},
         data={"mode": mode},
+    )
+
+
+def _pdf_upload(client, data: bytes, name: str):
+    return client.post(
+        "/documents",
+        files={"file": (name, data, "application/pdf")},
+        data={"mode": "permanent"},
     )
 
 
@@ -179,8 +188,65 @@ def test_unknown_mode_is_refused(client) -> None:
 
 
 def test_dry_run_refuses_unreadable_suffix() -> None:
+    plan, note = dry_run(b"any bytes", "条例.doc")
+    assert plan is None and ".doc" in note and "docx" in note
+
+
+def test_dry_run_reports_a_pdf_that_has_no_readable_text_layer() -> None:
     plan, note = dry_run(b"%PDF-1.7", "条例.pdf")
-    assert plan is None and ".pdf" not in note and "docx" in note
+    assert plan is None and "读不出内容" in note
+
+
+PDF_LAW_PAGES = [
+    ["2026/9/19 08:49 测试条例 _ 公安部 _ 中国政府网", "第一条 为了测试，制定本条例。"],
+    ["2026/9/19 08:49 测试条例 _ 公安部 _ 中国政府网", "第二条 本条例所称测试，是指自动化测试。"],
+    ["2026/9/19 08:49 测试条例 _ 公安部 _ 中国政府网", "第三条 本条例自2025年1月1日起施行。"],
+]
+PDF_LAW_PAGES_REVISED = [
+    ["2026/9/19 08:49 测试条例 _ 公安部 _ 中国政府网", "第一条 为了测试，制定本条例（修订版）。"],
+    ["2026/9/19 08:49 测试条例 _ 公安部 _ 中国政府网", "第二条 本条例所称测试，是指端到端的自动化测试。"],
+    ["2026/9/19 08:49 测试条例 _ 公安部 _ 中国政府网", "第三条 本条例自2025年6月1日起施行。"],
+]
+
+
+def test_a_synthetic_pdf_passes_the_full_dry_run(store, pdf_maker) -> None:
+    plan, note = dry_run(pdf_maker(PDF_LAW_PAGES), "测试条例_20250101.pdf")
+
+    assert plan is not None
+    assert plan.law_name == "测试条例" and plan.version == "2025-01-01"
+    assert plan.articles == 3 and plan.filename == "测试条例_20250101.pdf"
+    assert "可以入库" in note
+
+
+def test_a_revised_copy_of_the_same_law_is_refused_by_law_id(client, pdf_maker) -> None:
+    first = _pdf_upload(client, pdf_maker(PDF_LAW_PAGES), "测试条例_20250101.pdf")
+    assert first.status_code == 200 and first.json()["file"] == "测试条例_20250101.pdf"
+
+    again = _pdf_upload(client, pdf_maker(PDF_LAW_PAGES_REVISED), "测试条例_20250101.pdf")
+
+    assert again.status_code == 400
+    note = again.json()["note"]
+    assert "同一部法规" in note and "测试条例_20250101.pdf" in note
+    assert len(config.source_files()) == 1
+
+
+def test_the_parse_stage_refuses_two_source_files_with_one_law_id(tmp_path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    for name in ("测试法规_20210101.md", "测试法规_20220202.md"):
+        (source / name).write_text("第一条 为了测试，制定本规定。\n", encoding="utf-8")
+    stage = ParseStage(
+        source_dir=source,
+        library=LawLibrary(parsed_dir=tmp_path / "parsed", text_dir=tmp_path / "text"),
+        verbose=False,
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        stage.run()
+
+    message = str(excinfo.value)
+    assert "测试法规_20210101.md" in message and "测试法规_20220202.md" in message
+    assert "先删旧版本" in message
 
 
 def test_documents_endpoint_needs_a_live_service(store) -> None:
@@ -191,13 +257,11 @@ def test_documents_endpoint_needs_a_live_service(store) -> None:
     assert resp.json()["detail"] == "Milvus 连不上"
 
 
-def test_reindex_rebuilds_and_replaces_the_runtime(client, monkeypatch) -> None:
-    from traffic_law_qa.api import routes
-
-    rebuilt = Runtime(
+def _rebuilt(reason: str = "docx 与索引不一致") -> Runtime:
+    return Runtime(
         ready=ReadyState(
             action="rebuild",
-            reason="docx 与索引不一致",
+            reason=reason,
             rows=812,
             laws=6,
             articles=508,
@@ -208,7 +272,14 @@ def test_reindex_rebuilds_and_replaces_the_runtime(client, monkeypatch) -> None:
         rag=None,
         boot_ms=12.0,
     )
-    monkeypatch.setattr(routes, "boot_runtime", lambda: rebuilt)
+
+
+def test_reindex_rebuilds_and_replaces_the_runtime(client, monkeypatch) -> None:
+    from rag_service.api import routes
+
+    rebuilt = _rebuilt()
+    calls = []
+    monkeypatch.setattr(routes, "boot_runtime", lambda **kwargs: calls.append(kwargs) or rebuilt)
 
     resp = client.post("/reindex")
 
@@ -219,12 +290,27 @@ def test_reindex_rebuilds_and_replaces_the_runtime(client, monkeypatch) -> None:
     assert body["articles"] == 508
     assert body["channels"] == channel_label(False)
     assert server.app.state.rt is rebuilt
+    assert calls == [{"rebuild": True}], "手动重建必须显式覆盖权重门，否则指纹对不上时它也会被拦"
+
+
+def test_reindex_is_still_the_way_out_when_the_boot_failed(client, monkeypatch) -> None:
+    from rag_service.api import routes
+
+    server.app.state.rt = None
+    server.app.state.boot_error = "权重与索引快照对不上"
+    monkeypatch.setattr(routes, "boot_runtime", lambda **kwargs: _rebuilt("重建后指纹已刷新"))
+
+    resp = client.post("/reindex")
+
+    assert resp.status_code == 200, "全站 503 时 /reindex 是唯一出口，不能先要求有一个健康的 runtime"
+    assert server.app.state.boot_error is None and server.app.state.rt is not None
 
 
 class _ScriptedLLM:
-    def __init__(self, replies: list[dict], *, model: str) -> None:
+    def __init__(self, replies: list[dict], *, model: str, finish: str = "stop") -> None:
         self.cfg = config.LLMConfig(base_url="http://stub", api_key="stub", model=model)
         self._replies = list(replies)
+        self.finish = finish
         self.offered: list[set[str]] = []
 
     @property
@@ -237,44 +323,18 @@ class _ScriptedLLM:
 
     def chat(self, messages, *, tools=None, temperature=None, name="llm.chat"):
         self.offered.append({tool["function"]["name"] for tool in tools or ()})
-        return self._replies.pop(0), {"total_tokens": 7}
+        return self._replies.pop(0), {"total_tokens": 7}, self.finish
 
 
-def _tool_call(call_id: str, name: str, arguments: dict) -> dict:
-    return {
-        "id": call_id,
-        "type": "function",
-        "function": {"name": name, "arguments": json.dumps(arguments)},
-    }
-
-
-def _call(call_id: str, name: str, **arguments) -> dict:
-    return {"role": "assistant", "content": "", "tool_calls": [_tool_call(call_id, name, arguments)]}
-
-
-class _FakeRAG:
-    top_k = 6
-
-    def __init__(self, generator: AnswerGenerator) -> None:
-        self.parents = PARENTS
-        self._generator = generator
-
-    def search(self, query, top_k=None, *, channel_debug=False, law_filter=()) -> RetrievalResult:
-        return RetrievalResult(
-            query=query,
-            articles=(RetrievedArticle(article=ARTICLE, score=0.9),),
-            used_vector=False,
-            used_bm25=True,
-            elapsed_ms=1.0,
-        )
-
-    def expand(self, text: str) -> str:
-        return text
-
-    def answer(self, question, retrieval, *, timeliness=(), materials=()):
-        return self._generator.generate(
-            question, retrieval, timeliness=timeliness, materials=materials
-        )
+def _retrieval(query: str) -> RetrievalResult:
+    return RetrievalResult(
+        query=query,
+        articles=(RetrievedArticle(article=ARTICLE, score=0.9),),
+        used_vector=False,
+        used_bm25=True,
+        elapsed_ms=1.0,
+        matched_text=query,
+    )
 
 
 def _generator_citing_materials(monkeypatch, generator: AnswerGenerator) -> None:
@@ -283,7 +343,7 @@ def _generator_citing_materials(monkeypatch, generator: AnswerGenerator) -> None
         cited = ""
         if materials and MATERIAL_HEADER in prompt and materials[0].label in prompt:
             cited = f"培训费按每人每年一千二百元包干。[{materials[0].label[1:-1]}]"
-        return f"{cited}依《{LAW_NAME}》第九十一条。[依据1]", {"total_tokens": 11}
+        return f"{cited}依《{LAW_NAME}》第九十一条。[依据1]", {"total_tokens": 11}, "stop"
 
     monkeypatch.setattr(generator, "_call_llm", fake_call_llm)
 
@@ -302,134 +362,64 @@ def _write_material(text: str, doc_id: str = "d0", name: str = "车辆管理规�
     return doc_id
 
 
-def _runner(replies: list[dict], generator: AnswerGenerator, *, cfg=None):
-    llm = _ScriptedLLM(replies, model="stub-agent")
-    runner = graph_mod.AgentRunner(
-        _FakeRAG(generator),
-        llm=llm,
-        region_llm=_ScriptedLLM([{"role": "assistant", "content": '{"region": "?"}'}], model="stub-region"),
-        review_llm=_ScriptedLLM(
-            [{"role": "assistant", "content": json.dumps({"judgments": [{"n": 1, "supported": True}]})}],
-            model="stub-review",
+def _generate_once(finish: str):
+    generator = AnswerGenerator(
+        config.LLMConfig(base_url="http://stub", api_key="stub", model="stub-gen"),
+        llm=_ScriptedLLM(
+            [{"role": "assistant", "content": f"依《{LAW_NAME}》第九十一条。[依据1]"}],
+            model="stub-gen",
+            finish=finish,
         ),
-        tracer=Tracer(),
-        cfg=cfg,
     )
-    return runner, llm
+    return generator.generate(Question(text=QUESTION_TEXT), _retrieval(QUESTION_TEXT))
 
 
-def test_material_reaches_the_answer_prompt_and_trace(store, monkeypatch) -> None:
+def test_a_truncated_answer_carries_the_cut_note() -> None:
+    answer = _generate_once(TRUNCATED_FINISH_REASON)
+
+    assert answer.text.endswith("[依据1]")
+    assert [note for note in answer.notes if "截断" in note] == [
+        "模型输出被 max_tokens 截断，答案可能不完整"
+    ]
+
+
+def test_a_complete_answer_carries_no_cut_note() -> None:
+    assert [note for note in _generate_once("stop").notes if "截断" in note] == []
+
+
+def test_the_material_section_reaches_the_generation_prompt(store, monkeypatch) -> None:
     doc_id = _write_material(MATERIAL_MD)
     generator = AnswerGenerator(
         config.LLMConfig(base_url="http://stub", api_key="stub", model="stub-gen")
     )
     _generator_citing_materials(monkeypatch, generator)
-    runner, llm = _runner(
-        [
-            _call("c1", "search_materials", query="培训费用怎么算"),
-            _call("c2", "search_law", query="饮酒驾驶怎么处罚"),
-            {"role": "assistant", "content": "够了"},
-        ],
-        generator,
+    passages, _note = search_materials("我们公司培训费怎么算", load_materials([doc_id]))
+
+    answer = generator.generate(
+        Question(text="我们公司培训费怎么算"), _retrieval("我们公司培训费怎么算"), materials=passages
     )
 
-    state = runner.invoke("我们公司培训费怎么算", material_ids=[doc_id])
-    answer = state["answer"]
-
-    assert llm.offered == [{"search_law", "get_article", "search_materials"}] * 3
-    assert [m.display_name for m in answer.materials] == ["车辆管理规定.md"]
+    assert len(answer.materials) == 3
+    assert {m.display_name for m in answer.materials} == {"车辆管理规定.md"}
     assert answer.materials[0].label == "[材料3]"
-    assert answer.materials[0].index == 2
     assert "一千二百元" in answer.materials[0].text
-    assert "[材料3]" in answer.text and "[依据1]" in answer.text
-    assert cited_labels(answer.text) == [1]
-    assert answer.review is not None and answer.review.passed
-    assert "1 次材料检索（1 段）" in "".join(answer.notes)
-
-    out = render_trace(state, color=True)
-    assert "材料#3" in out
-    assert "未取到" not in out
-    assert "\033[33m" not in out
+    assert "[材料3]" in answer.text, (
+        "假生成器只在这两样都在 prompt 里时才吐 [材料3] —— 这句在，材料段就进了 prompt"
+    )
 
 
-def test_materials_are_not_loaded_without_a_doc_id(store, monkeypatch) -> None:
-    _write_material(MATERIAL_MD)
+def test_the_generation_prompt_has_no_material_section_without_passages() -> None:
     generator = AnswerGenerator(
         config.LLMConfig(base_url="http://stub", api_key="stub", model="stub-gen")
     )
-    _generator_citing_materials(monkeypatch, generator)
-    runner, llm = _runner(
-        [
-            _call("c1", "search_materials", query="培训费用怎么算"),
-            _call("c2", "search_law", query="饮酒驾驶怎么处罚"),
-            {"role": "assistant", "content": "够了"},
-        ],
-        generator,
+    retrieval = _retrieval(QUESTION_TEXT)
+
+    prompt = generator.build_prompt(
+        Question(text=QUESTION_TEXT), generator.build_evidence(retrieval)
     )
 
-    state = runner.invoke("我们公司培训费怎么算")
+    assert MATERIAL_HEADER not in prompt
 
-    assert state["answer"].materials == ()
-    assert state["messages"][1]["content"].startswith("本次会话没有上传材料")
-
-
-def test_repeat_material_search_does_not_duplicate_the_label(store, monkeypatch) -> None:
-    doc_id = _write_material(MATERIAL_MD)
-    generator = AnswerGenerator(
-        config.LLMConfig(base_url="http://stub", api_key="stub", model="stub-gen")
-    )
-    _generator_citing_materials(monkeypatch, generator)
-    runner, llm = _runner(
-        [
-            _call("c1", "search_materials", query="培训费用怎么算"),
-            _call("c2", "search_materials", query="培训费用怎么算"),
-            _call("c3", "search_law", query="饮酒驾驶怎么处罚"),
-            {"role": "assistant", "content": "够了"},
-        ],
-        generator,
-    )
-
-    state = runner.invoke("我们公司培训费怎么算", material_ids=[doc_id])
-
-    assert [m.label for m in state["answer"].materials] == ["[材料3]"]
-    assert "材料#3" in state["messages"][1]["content"]
-    assert state["messages"][3]["content"].startswith("⚠ 这些段上一轮")
-    assert "材料#3" in state["messages"][3]["content"]
-
-
-def test_a_budget_that_runs_out_still_reaches_an_answer(monkeypatch) -> None:
-    generator = AnswerGenerator(
-        config.LLMConfig(base_url="http://stub", api_key="stub", model="stub-gen")
-    )
-    _generator_citing_materials(monkeypatch, generator)
-    runner, llm = _runner(
-        [
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    _tool_call("c1", "search_law", {"query": "饮酒驾驶怎么处罚"}),
-                    _tool_call("c2", "get_article", {"article_no": "第九十九条"}),
-                ],
-            }
-        ],
-        generator,
-        cfg=replace(config.agent_config(), max_steps=1),
-    )
-
-    state = runner.invoke("饮酒驾驶怎么处罚")
-    notes = "".join(state["answer"].notes)
-
-    assert state["steps"] == 1
-    assert "已达最大轮数 1，强制进入作答" in notes
-    assert "规划轮 token 合计 7" in notes
-
-    out = render_trace(state, color=True)
-    assert "→ search_law" in out and "→ 命中 1 条" in out
-    assert "未取到：库里没有任何一部法规有第 99 条。\033[0m" in out
-    assert "\033[33m[agent] 已达最大轮数 1，强制进入作答\033[0m" in out
-    assert "[agent] 规划轮 token 合计 7" in out
-    assert "[agent] Agent：" in out
 
 
 def test_ledger_keeps_the_sha1_and_the_original_name(client) -> None:

@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from traffic_law_qa.infra.websearch import search_web
+from agent_service.websearch import search_web
 
 QUERY = "深圳 电动自行车 最新规定"
 

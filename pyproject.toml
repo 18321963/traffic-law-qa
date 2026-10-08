@@ -13,7 +13,6 @@ keywords = ["rag", "agent", "langgraph", "milvus", "legal", "traffic-law"]
 dependencies = [
     "python-dotenv>=1.0",
     "openai>=1.40",
-    "pymilvus>=2.6,<3",
     "httpx>=0.27",
 ]
 
@@ -40,19 +39,29 @@ dev = [
     "ruff>=0.6",
 ]
 all = [
-    "traffic-law-qa[agent,api,dev,local]",
+    "traffic-law-qa[agent,api,dev,local,mcp,milvus,pdf]",
+]
+mcp = [
+    "mcp>=2.2,<3",
+]
+milvus = [
+    "pymilvus>=2.6,<3",
+]
+pdf = [
+    "pypdf>=5.1,<7",
 ]
 
 [project.scripts]
-tlq-qa = "traffic_law_qa.__main__:main"
-tlq-build = "traffic_law_qa.cli.build:main"
-tlq-serve = "traffic_law_qa.cli.serve:main"
+tlq-qa = "rag_service.__main__:main"
+tlq-build = "rag_service.cli.build:main"
+tlq-serve = "rag_service.cli.serve:main"
+tlq-eval = "eval.harness:main"
 
 [project.urls]
 Homepage = "https://github.com/18321963/traffic-law-qa"
 
 [tool.setuptools.packages.find]
-include = ["traffic_law_qa*"]
+include = ["rag_contracts*", "rag_service*", "agent_service*", "eval*", "mcp_server*", "api_contracts*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

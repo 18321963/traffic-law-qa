@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import threading
 
-from traffic_law_qa.observability.langfuse import LangfuseTracer
-from traffic_law_qa.observability.tracer import Recorder, Tracer
+import pytest
+
+from rag_contracts.observability.langfuse import LangfuseTracer
+from rag_contracts.observability.tracer import Recorder, Tracer
 
 
 class _FakeObs:
@@ -12,6 +14,7 @@ class _FakeObs:
         self.trace_id = f"trace-{index}"
         self.id = f"span-{index}"
         self.updates: list[dict] = []
+        self.exits: list[tuple] = []
 
     def update(self, **fields) -> None:
         self.updates.append(fields)
@@ -20,6 +23,7 @@ class _FakeObs:
         return self
 
     def __exit__(self, *exc) -> bool:
+        self.exits.append(exc)
         return False
 
 
@@ -128,3 +132,107 @@ def test_empty_backends_accept_the_boundary_flag():
     with recorder.span("invoke", root=True):
         pass
     assert [row["name"] for row in recorder.spans] == ["invoke"]
+
+
+def test_an_exception_inside_a_span_reaches_the_observation():
+    tracer, client = _tracer()
+    with pytest.raises(RuntimeError):
+        with tracer.span("node.boom"):
+            raise RuntimeError("工具炸了")
+
+    exits = client.of("node.boom")[0]["obs"].exits
+    assert len(exits) == 1
+    assert exits[0][0] is RuntimeError
+
+
+def test_a_span_on_another_thread_anchors_to_the_single_open_run():
+    tracer, client = _tracer()
+
+    def hop() -> None:
+        with tracer.span("node.agent"):
+            pass
+
+    with tracer.span("invoke", root=True):
+        worker = threading.Thread(target=hop)
+        worker.start()
+        worker.join(timeout=10)
+
+    run, node = client.of("invoke")[0], client.of("node.agent")[0]
+    assert node["trace_context"] == {
+        "trace_id": run["obs"].trace_id,
+        "parent_span_id": run["obs"].id,
+    }
+
+
+def test_a_span_on_a_foreign_thread_does_not_pick_between_two_open_runs():
+    tracer, client = _tracer()
+    ready = threading.Event()
+    release = threading.Event()
+
+    def other_run() -> None:
+        with tracer.span("invoke", root=True):
+            ready.set()
+            release.wait(timeout=10)
+
+    def hop() -> None:
+        with tracer.span("node.orphan"):
+            pass
+
+    worker = threading.Thread(target=other_run)
+    with tracer.span("invoke", root=True):
+        worker.start()
+        assert ready.wait(timeout=10)
+        foreign = threading.Thread(target=hop)
+        foreign.start()
+        foreign.join(timeout=10)
+        release.set()
+        worker.join(timeout=10)
+
+    assert client.of("node.orphan")[0]["trace_context"] is None
+
+
+def test_a_second_root_does_not_chain_under_the_first_open_root():
+    tracer, client = _tracer()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def second_run() -> None:
+        with tracer.span("invoke", root=True):
+            entered.set()
+            release.wait(timeout=10)
+
+    worker = threading.Thread(target=second_run)
+    with tracer.span("invoke", root=True):
+        worker.start()
+        assert entered.wait(timeout=10)
+        release.set()
+        worker.join(timeout=10)
+
+    runs = client.of("invoke")
+    assert len(runs) == 2
+    assert [run["trace_context"] for run in runs] == [None, None]
+
+
+def test_a_root_left_in_another_thread_local_stops_counting_once_closed():
+    tracer, client = _tracer()
+    entered = threading.Event()
+    closed = threading.Event()
+    holder: dict = {}
+
+    def first_run() -> None:
+        span = tracer.span("invoke", root=True)
+        holder["span"] = span
+        span.__enter__()
+        entered.set()
+        closed.wait(timeout=10)
+        with tracer.span("node.after"):
+            pass
+
+    worker = threading.Thread(target=first_run)
+    worker.start()
+    assert entered.wait(timeout=10)
+    holder["span"].__exit__(None, None, None)
+    closed.set()
+    worker.join(timeout=10)
+
+    assert client.of("node.after")[0]["trace_context"] is None
