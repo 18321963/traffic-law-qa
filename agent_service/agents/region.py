@@ -20,6 +20,8 @@ __all__ = [
 
 HISTORY_ANSWER_CHARS = 300
 
+_NOT_A_PLACE = frozenset({"?", "？", "全国"})
+
 
 def national_law_ids(laws: Sequence[LawInfo]) -> tuple[str, ...]:
     return tuple(sorted({law.law_id for law in laws if not law.local}))
@@ -47,6 +49,10 @@ def _parse_region(text: str) -> tuple[str, str]:
         if isinstance(data, dict):
             region = str(data.get("region") or "").strip() or REGION_UNKNOWN
             place = str(data.get("place") or "").strip()
+            if region in _NOT_A_PLACE:
+                region = REGION_UNKNOWN
+            if place in _NOT_A_PLACE:
+                place = ""
             return region, place
     return REGION_UNKNOWN, ""
 
