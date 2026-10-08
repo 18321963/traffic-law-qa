@@ -4,7 +4,7 @@
 
 三条链路共用同一份检索与生成：
 
-- **离线建库**：6 部法规的 docx 是唯一真源，走 `解析 → 法→章→节→条 → 父子块 → 向量索引`。
+- **离线建库**：8 部法规的 docx 与 pdf 是建库真源，走 `解析 → 法→章→节→条 → 父子块 → 向量索引`。
 - **在线问答**：一句大白话进来，走 `口语对齐 → 稠密 + BM25 混合检索 → 交叉编码器重排 → 强制引用式生成`。
 - **Agentic RAG**：模型自己决定查什么、查几轮，末端逐条复核引用是否被原文支撑。
 
@@ -99,7 +99,7 @@
 ├── mcp_server/            MCP 适配层：stdio → HTTP，薄客户端，不载模型
 ├── deploy/                docker-compose.yml + reinstall.sh
 ├── tests/                 179 条离线用例，不碰 Milvus 也不调模型
-├── 法规知识库/            docx（公开法规原文，唯一真源）→ text → parsed → chunks → index；models/ 放本地权重
+├── 法规知识库/            docx + pdf（公开法规原文，建库真源）→ text → parsed → chunks → index；models/ 放本地权重
 ├── data/                  题集源语料 + 四份桶文件 + 上传台账（documents.db）（跑批轨迹不进版本库）
 └── pyproject.toml         依赖与打包的唯一真源
 
@@ -138,10 +138,10 @@ agent_service/
 ### 一、离线建库
 
 ```
-法规知识库/docx/（6 部法规，唯一真源）
-  → indexing/sources.py    按后缀挑读者（docx / txt / md）
-  → indexing/parser.py     段落 → 法→章→节→条（508 条），sha1 门控：源文件没变就跳过解析
-  → indexing/chunker.py    条 = 父块，段 = 子块（812 个可检索块）
+法规知识库/docx/ + pdf/（8 部法规，建库真源）
+  → indexing/sources.py    按后缀挑读者（docx / txt / md / pdf）
+  → indexing/parser.py     段落 → 法→章→节→条（656 条），sha1 门控：源文件没变就跳过解析
+  → indexing/chunker.py    条 = 父块，段 = 子块（966 个可检索块）
   → indexing/indexer.py    稠密（bge-m3，1024 维）+ 稀疏（BM25，jieba 分词）
   → Milvus 集合 traffic_law（分词与 RRF 融合都在服务端）
   → 磁盘产物：法规知识库/{text,parsed,chunks,index}
@@ -295,7 +295,7 @@ ruff check .
 | `POST /qa` | 一次问答：`ask`（检索+生成，默认）｜ `search`（只检索，不花钱）。输出撞上 `max_tokens` 被截断时，`notes` 里会明说 |
 | `POST /qa/stream` | 同上，SSE 边生成边推：`evidence`（检索结果，一发）+ `delta`（真 token 流，若干）+ `done`（含 `truncated` / `usage` / `citations`） |
 | `POST /answer` | 只生成、不检索：body 带 `question`（含 `history`）与已经检索好的 `retrieval`（`POST /qa?mode=search` 的返回），可选 `timeliness` / `materials`。语义是「我已经检索好了，你只负责生成」——`retrieval` 缺了就是 422，服务端不会自己再去检索一次 |
-| `POST /documents` | 传 docx / md / txt：`session` 只进本次会话（工具面可查，答完即弃）｜ `permanent` 干跑校验后入知识库，落台账 |
+| `POST /documents` | 传 docx / md / txt / pdf：`session` 只进本次会话（工具面可查，答完即弃）｜ `permanent` 干跑校验后入知识库，落台账 |
 | `GET /documents` | 上传台账；`DELETE /documents/{id}` 撤掉一份 |
 | `POST /reindex` | 重建索引并热替换运行中的 runtime |
 | `GET /laws` | 库内法规清单（`law_id` / 名称 / 版本 / 条数）—— 要用 `law_filter` 先来这儿拿 id |
@@ -337,7 +337,7 @@ ruff check .
 | 模型 | 生成 `qwen3-30b-a3b-instruct-2507`（`.env.example` 默认 `qwen-flash`）· 向量 `BAAI/bge-m3` · 重排 `BAAI/bge-reranker-v2-m3`（后两个在进程内跑，权重在 `法规知识库/models/`，有 GPU 就用 GPU） |
 | 服务 | FastAPI + uvicorn，`/qa/stream` 走 SSE |
 | Agent | LangGraph 状态机，LLM 调用直接走 `openai` SDK |
-| 依赖 | 基础组只有三个包：`openai` · `python-dotenv` · `httpx`；`pymilvus` 在 `milvus` 组，嵌入/重排的 `torch` + `transformers` 在 `local` 可选组，不装也能跑，退化成纯 BM25（agent 侧这两组都不装） |
+| 依赖 | 基础组只有三个包：`openai` · `python-dotenv` · `httpx`；`pymilvus` 在 `milvus` 组，嵌入/重排的 `torch` + `transformers` 在 `local` 可选组，不装也能跑，退化成纯 BM25（agent 侧这两组都不装）；pdf 解析的 `pypdf` 在 `pdf` 组 —— 建库碰到 PDF 缺它就显式报错，不静默跳过 |
 
 ## 进阶
 
@@ -346,7 +346,7 @@ ruff check .
     —— 前半已落：末端复核节点（判支撑 + 算分 + 低分降级）。还差后半：阈值标定要跑批；
        检测力不足（「给一条依据追加它原文里没有的话」探过两次都判支撑）得换更强模型或加代码校验。
 - 加网页搜索工具 —— 已实现，但没挂进工具面，见上。
-- 加PDF解析
+- 加PDF解析 —— 已落地：pdf/ 与 docx/ 并列建库真源、上传通道也收 pdf（缺 pypdf 显式报错不降级），8 部 / 656 条 / 966 块。
 - 记忆（这项目好像需求不高）
 - 再进阶：数据库优化 / redis / 消息队列 / 更清晰的架构
 
@@ -383,7 +383,7 @@ ruff check .
 ├── api_contracts/           openapi.json · client.py（薄 httpx 客户端）· regen.py
 ├── deploy/                  docker-compose.yml · reinstall.sh
 ├── tests/                   19 个测试文件 / 179 条离线用例
-├── 法规知识库/              docx（唯一真源）· text · parsed · chunks · index · models · pdf
+├── 法规知识库/              docx + pdf（建库真源）· text · parsed · chunks · index · models
 ├── data/                    题集与桶文件 · documents.db · uploads/ · traces/
 ├── volumes/                 etcd / MinIO / Milvus 的运行时数据（compose 挂载，可重建）
 ├── pyproject.toml · requirements.txt
@@ -395,18 +395,18 @@ ruff check .
 
 | 文件 | 作用 |
 |---|---|
-| `rag_service/Dockerfile` | 服务镜像：python:3.11-slim → CUDA 版 torch + `.[api,local,milvus]` → 把五个包（`rag_contracts/` `rag_service/` `eval/` `mcp_server/` `api_contracts/`）与 `法规知识库/`、`data/` 一起烤进镜像 → 非 root 用户 → `uvicorn rag_service.api.app:app` |
+| `rag_service/Dockerfile` | 服务镜像：python:3.11-slim → CUDA 版 torch（独立一层，改源码重建不重下）→ `.[api,local,milvus,pdf]` → 把五个包（`rag_contracts/` `rag_service/` `eval/` `mcp_server/` `api_contracts/`）与 `法规知识库/`、`data/` 一起烤进镜像 → 非 root 用户 → `uvicorn rag_service.api.app:app` |
 | `agent_service/Dockerfile` | agent 服务镜像：同一个底（python:3.11-slim、非 root uid 1000、`EXPOSE 8000`），装 `.[agent,api,langfuse]`，只 COPY 三个包（`rag_contracts/` `api_contracts/` `agent_service/`）—— 没有 torch、没有 Milvus 客户端、也没有 `法规知识库/` 与 `data/`：它不载模型、不落盘 |
 | `deploy/docker-compose.yml` | 五个服务：etcd / MinIO / Milvus standalone / app（rag）/ agent。app 挂 GPU、四个命名卷、健康检查打 `/health`；agent 只发布 8001、不挂 GPU 也不挂卷，healthcheck 读 `/health` 的 body（要 `rag.status=ok`，不是只看 200）。顶层 `name: agent` 钉住项目名（否则项目名随目录走，挪文件会换一组空卷）；`build.context` / `env_file` / 卷路径都相对本文件解析，**但 `build.dockerfile` 相对 `context` 解析**（`context: ..` 时写 `rag_service/Dockerfile`，写成 `../rag_service/Dockerfile` 会跑去找仓库外那一层、且 `config` 不报错）—— 固定用 `docker compose -f deploy/docker-compose.yml` 起 |
 | `deploy/reinstall.sh` | 重装 editable 包：探 Clash 代理 → `pip install -e ".[all,mcp]"` → 换到仓外验证六个包 import 装没装上 |
-| `pyproject.toml` | 依赖与打包的唯一真源：基础三依赖 + `agent` / `api` / `langfuse` / `local` / `mcp` / `milvus` / `dev` / `all` 可选组、四个短命令、pytest 与 ruff 配置；`packages.find` 覆盖 `rag_contracts*` / `rag_service*` / `agent_service*` / `eval*` / `mcp_server*` / `api_contracts*`（顶层包与模式双向比对由 `tests/test_contracts_architecture.py` 盯着） |
+| `pyproject.toml` | 依赖与打包的唯一真源：基础三依赖 + `agent` / `api` / `langfuse` / `local` / `mcp` / `milvus` / `pdf` / `dev` / `all` 可选组、四个短命令、pytest 与 ruff 配置；`packages.find` 覆盖 `rag_contracts*` / `rag_service*` / `agent_service*` / `eval*` / `mcp_server*` / `api_contracts*`（顶层包与模式双向比对由 `tests/test_contracts_architecture.py` 盯着） |
 | `requirements.txt` | 只镜像基础三依赖，给「不装整包、只装依赖」的场景（`pymilvus` 已移到 `milvus` 组，不在这里）；依赖的真源仍是 `pyproject.toml` |
 | `.env.example` | 配置模板：三段模型端点、`RAG_*` 检索参数、`AGENT_*`、Langfuse、博查 |
 | `.gitignore` | 挡掉 `.env`、虚拟环境、缓存，以及 `data/`、`法规知识库/` 里的运行产物 |
 | `.gitattributes` | 仓库内一律存 LF；docx / pdf / db 等声明为二进制，不做换行转换 |
-| `.dockerignore` | 构建上下文排除 `.git`、`.venv`、`volumes/`、`法规知识库/{pdf,models}`、`data/traces/` —— 顺带保证密钥不进镜像层 |
+| `.dockerignore` | 构建上下文排除 `.git`、`.venv`、`volumes/`、`法规知识库/{parsed,text,chunks,index,models}`、`data/traces/` —— 镜像只带真源（docx + pdf），顺带保证密钥不进镜像层 |
 | `README.md` | 本文件 |
-| `法规知识库/` | `docx/` 唯一真源；`text/` `parsed/` `chunks/` `index/` 是管线产物；`models/` 本地权重（约 4.6GB）；`pdf/` 更上游的下载件 |
+| `法规知识库/` | `docx/` 与 `pdf/` 是建库真源（公开法规原文）；`text/` `parsed/` `chunks/` `index/` 是管线产物；`models/` 本地权重（约 4.6GB） |
 | `data/` | 题集源语料 + 四份桶文件（`eval_*.json`）+ `documents.db` 上传台账 + `uploads/` + `traces/` 跑批轨迹 |
 | `volumes/` | compose 挂载的运行时数据（etcd / MinIO / Milvus），可重建 |
 
@@ -478,7 +478,7 @@ ruff check .
 |---|---|
 | `indexing/sources.py` | 三种读者（docx 直读 zip + ElementTree、txt、md）与 `reader_for` 按后缀挑 |
 | `indexing/parser.py` | 段落 → 法→章→节→条；`LawParser` / `LawLibrary` / `ParseStage`；中文数字、目录页、零宽字符清洗、sha1 门控 |
-| `indexing/chunker.py` | 条 = 父块、段 = 子块（812 个可检索块） |
+| `indexing/chunker.py` | 条 = 父块、段 = 子块（966 个可检索块） |
 | `indexing/indexer.py` | 写 Milvus（稠密 + 稀疏）与磁盘产物 |
 | `indexing/status.py` | `CorpusStatus`：比对 docx / 本地产物 / 集合三者，给出 `stale_reason` 与期望的嵌入模型名 |
 | `indexing/build.py` | `RagPipeline`：把上面几步串成一次 build（`IndexBuilder` 的实现），也暴露 parse / chunk 单步 |
