@@ -10,7 +10,6 @@ import tomllib
 
 import rag_contracts
 import rag_service
-
 from rag_contracts import config
 
 PACKAGE = Path(rag_service.__file__).resolve().parent
