@@ -8,15 +8,15 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# 嵌入与重排要 CUDA 版 torch：PyPI 上的 linux 轮子是 CPU-only，得另找 cu124 轮子；
-# 直连 download.pytorch.org 在国内不稳，默认走阿里云的 flat 轮子目录（pip 的 --find-links 认它），
-# 依赖（nvidia-* 等）走清华 PyPI 镜像。换回官方源：
-#   --build-arg TORCH_WHEELS=https://download.pytorch.org/whl/cu124/torch/ --build-arg PYPI_INDEX=https://pypi.org/simple
-# torch 单独一层：装法不读 pyproject、只随 ARG/基础镜像变，改源码重建时这一层缓存直接命中。
-ARG TORCH_WHEELS=https://mirrors.aliyun.com/pytorch-wheels/cu124/
+# 嵌入与重排要 CUDA 版 torch：PyPI 上 linux 的 torch 轮子本身就是 cu124 构建（requires
+# nvidia-*-cu12==12.4.127 / cudnn 9.1 / triton 3.2），清华 PyPI 直装即可。download.pytorch.org 的
+# 轮子实际由 R2 CDN 分发（实测 768MB 下到 338MB 读超时、pip 不续传）、aliyun 的 pytorch-wheels 被
+# 限速到 ~250KB/s，这两条都别换回来。torch 单独一层：装法不读 pyproject、只随 ARG/基础镜像变，
+# 改源码重建时这一层缓存直接命中；pip 缓存挂载让失败重试不必重下已下完的依赖。
 ARG PYPI_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
-RUN pip install --no-cache-dir --index-url ${PYPI_INDEX} --find-links ${TORCH_WHEELS} \
-      "torch==2.6.0+cu124"
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --index-url ${PYPI_INDEX} --retries 5 --timeout 60 \
+      "torch==2.6.0"
 
 COPY pyproject.toml ./
 COPY rag_contracts/ ./rag_contracts/
