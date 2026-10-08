@@ -18,6 +18,8 @@ _MAX_DEPTH = 6
 def _trim(value: Any, *, depth: int = 0) -> Any:
     if depth > _MAX_DEPTH:
         return "…（层级太深，略）"
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
     if isinstance(value, str):
         if len(value) <= _MAX_CHARS:
             return value
@@ -32,7 +34,7 @@ def _trim(value: Any, *, depth: int = 0) -> Any:
     to_dict = getattr(value, "to_dict", None)
     if callable(to_dict):
         return _trim(to_dict(), depth=depth + 1)
-    return value
+    return str(value)
 
 
 class _RunState(threading.local):

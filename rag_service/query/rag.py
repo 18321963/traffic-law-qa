@@ -87,9 +87,16 @@ class LegalRAG(RagService):
             query, retrieval, timeliness=timeliness, materials=materials
         )
 
-    def stream(self, question: str | Question, retrieval: RetrievalResult):
+    def stream(
+        self,
+        question: str | Question,
+        retrieval: RetrievalResult,
+        *,
+        timeliness: tuple[WebFinding, ...] = (),
+        materials: tuple[MaterialPassage, ...] = (),
+    ):
         query = question if isinstance(question, Question) else Question(text=question)
-        return self._generator.stream(query, retrieval)
+        return self._generator.stream(query, retrieval, timeliness=timeliness, materials=materials)
 
     def expand(self, text: str) -> str:
         return self._retriever.expand(text)

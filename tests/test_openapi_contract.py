@@ -22,6 +22,12 @@ SPEC_PATH = Path(__file__).resolve().parent.parent / "api_contracts" / "openapi.
 def _record(seen: list[tuple[str, str]]):
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append((request.method, request.url.path))
+        if request.url.path == "/answer/stream":
+            return httpx.Response(
+                200,
+                text='event: done\ndata: {"answer": "好"}\n\n',
+                headers={"content-type": "text/event-stream"},
+            )
         return httpx.Response(200, json={"ok": True})
 
     return handler
@@ -58,6 +64,14 @@ def test_the_client_only_calls_operations_the_spec_declares():
     client.ask("醉驾怎么处罚", 3)
     client.get_article("第九十条", "道路交通安全法")
     client.search_materials("培训费", ["d0"], top_k=3)
+    list(
+        client.answer_stream(
+            "醉驾怎么处罚",
+            RetrievalResult(
+                query="q", articles=(), used_vector=False, used_bm25=False, elapsed_ms=1.0
+            ),
+        )
+    )
 
     assert seen == [
         ("GET", "/health"),
@@ -72,6 +86,7 @@ def test_the_client_only_calls_operations_the_spec_declares():
         ("POST", "/answer"),
         ("POST", "/articles/lookup"),
         ("POST", "/materials/search"),
+        ("POST", "/answer/stream"),
     ]
     spec = app.openapi()
     for method, path in seen:

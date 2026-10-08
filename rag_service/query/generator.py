@@ -111,6 +111,33 @@ class AnswerGenerator:
             external=_external_block(timeliness, materials),
         )
 
+    def _assemble(
+        self,
+        question: Question,
+        retrieval: RetrievalResult,
+        *,
+        text: str,
+        model: str,
+        evidences: list[Evidence],
+        notes: list[str],
+        started: float,
+        usage: dict[str, Any] | None = None,
+        timeliness: tuple[WebFinding, ...] = (),
+        materials: tuple[MaterialPassage, ...] = (),
+    ) -> Answer:
+        return Answer(
+            question=question.text,
+            text=text,
+            evidences=tuple(evidences),
+            model=model,
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+            usage=usage or {},
+            retrieval=retrieval,
+            notes=tuple(notes),
+            timeliness=timeliness,
+            materials=materials,
+        )
+
     def generate(
         self,
         question: Question,
@@ -124,27 +151,27 @@ class AnswerGenerator:
         notes = list(retrieval.notes)
 
         if retrieval.is_empty:
-            return Answer(
-                question=question.text,
+            return self._assemble(
+                question,
+                retrieval,
                 text=EMPTY_RETRIEVAL_ANSWER,
-                evidences=(),
                 model="(skip)",
-                elapsed_ms=(time.perf_counter() - started) * 1000,
-                retrieval=retrieval,
-                notes=tuple(notes + ["检索结果为空，未调用 LLM"]),
+                evidences=[],
+                notes=notes + ["检索结果为空，未调用 LLM"],
+                started=started,
                 timeliness=timeliness,
                 materials=materials,
             )
 
         if not self.available:
-            return Answer(
-                question=question.text,
+            return self._assemble(
+                question,
+                retrieval,
                 text=UNAVAILABLE_ANSWER,
-                evidences=tuple(evidences),
                 model="(unavailable)",
-                elapsed_ms=(time.perf_counter() - started) * 1000,
-                retrieval=retrieval,
-                notes=tuple(notes + [self.unavailable_reason]),
+                evidences=evidences,
+                notes=notes + [self.unavailable_reason],
+                started=started,
                 timeliness=timeliness,
                 materials=materials,
             )
@@ -154,30 +181,90 @@ class AnswerGenerator:
         )
         if finish_reason == TRUNCATED_FINISH_REASON:
             notes.append("模型输出被 max_tokens 截断，答案可能不完整")
-        return Answer(
-            question=question.text,
+        return self._assemble(
+            question,
+            retrieval,
             text=content,
-            evidences=tuple(evidences),
             model=self.cfg.model,
-            elapsed_ms=(time.perf_counter() - started) * 1000,
+            evidences=evidences,
+            notes=notes,
+            started=started,
             usage=usage,
-            retrieval=retrieval,
-            notes=tuple(notes),
             timeliness=timeliness,
             materials=materials,
         )
 
-    def stream(self, question: Question, retrieval: RetrievalResult):
+    def stream(
+        self,
+        question: Question,
+        retrieval: RetrievalResult,
+        *,
+        timeliness: tuple[WebFinding, ...] = (),
+        materials: tuple[MaterialPassage, ...] = (),
+    ):
+        started = time.perf_counter()
         evidences = self.build_evidence(retrieval)
+        notes = list(retrieval.notes)
 
-        if retrieval.is_empty or not self.available:
-            text = EMPTY_RETRIEVAL_ANSWER if retrieval.is_empty else UNAVAILABLE_ANSWER
-            yield "delta", text
+        if retrieval.is_empty:
+            yield "delta", EMPTY_RETRIEVAL_ANSWER
             yield "usage", {}
+            yield "answer", self._assemble(
+                question,
+                retrieval,
+                text=EMPTY_RETRIEVAL_ANSWER,
+                model="(skip)",
+                evidences=[],
+                notes=notes + ["检索结果为空，未调用 LLM"],
+                started=started,
+                timeliness=timeliness,
+                materials=materials,
+            )
             return
 
-        yield from self.llm.stream(
-            self._messages(question, evidences), temperature=self.cfg.temperature
+        if not self.available:
+            yield "delta", UNAVAILABLE_ANSWER
+            yield "usage", {}
+            yield "answer", self._assemble(
+                question,
+                retrieval,
+                text=UNAVAILABLE_ANSWER,
+                model="(unavailable)",
+                evidences=evidences,
+                notes=notes + [self.unavailable_reason],
+                started=started,
+                timeliness=timeliness,
+                materials=materials,
+            )
+            return
+
+        parts: list[str] = []
+        usage: dict[str, Any] = {}
+        finish_reason: str | None = None
+        for kind, payload in self.llm.stream(
+            self._messages(question, evidences, timeliness=timeliness, materials=materials),
+            temperature=self.cfg.temperature,
+        ):
+            if kind == "delta":
+                parts.append(payload)
+            elif kind == "usage":
+                usage = payload
+            elif kind == "finish_reason":
+                finish_reason = payload
+            yield kind, payload
+        if finish_reason == TRUNCATED_FINISH_REASON:
+            notes.append("模型输出被 max_tokens 截断，答案可能不完整")
+        yield "answer", self._assemble(
+            question,
+            retrieval,
+            text="".join(parts).strip(),
+            model=self.cfg.model,
+            evidences=evidences,
+            notes=notes,
+            started=started,
+            usage=usage,
+            timeliness=timeliness,
+            materials=materials,
         )
 
     def _messages(

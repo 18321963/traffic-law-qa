@@ -5,7 +5,7 @@ import re
 from dataclasses import replace
 
 from rag_contracts import config
-from rag_contracts.domain.answer import Evidence, Review
+from rag_contracts.domain.answer import Answer, Evidence, Review
 from rag_contracts.ports import LLM, TRUNCATED_FINISH_REASON
 
 from ..prompts import REVIEW_DOWNGRADE_ANSWER, REVIEW_SYSTEM_PROMPT
@@ -95,21 +95,33 @@ def _build_payload(question: str, answer_text: str, listed: list[Evidence]) -> l
 
 
 def make_review_node(llm: LLM, cfg: config.AgentConfig):
+    from langgraph.types import Overwrite
+
+    def _remember(state: AgentState, answer: Answer, text: str) -> dict:
+        entry = {"question": answer.question, "answer": text}
+        entries = list(state.get("conversation") or ()) + [entry]
+        keep = max(cfg.history_turns, 0)
+        if len(entries) > 2 * keep:
+            return {"conversation": Overwrite(entries[len(entries) - keep :])}
+        return {"conversation": [entry]}
 
     def review_node(state: AgentState) -> dict:
         answer = state.get("answer")
-        if answer is None or cfg.review_min_score < 0:
+        if answer is None:
             return {}
+        if cfg.review_min_score < 0:
+            return _remember(state, answer, answer.text)
 
         threshold = cfg.review_min_score
         labels = cited_labels(answer.text)
         if not labels:
             return {
+                **_remember(state, answer, answer.text),
                 "answer": replace(
                     answer,
                     notes=answer.notes
                     + ("复核未打分：答案里没有 [依据N]（拒答与未配置模型那两句常量文案走这条）",),
-                )
+                ),
             }
 
         evidences = answer.evidences
@@ -127,10 +139,11 @@ def make_review_node(llm: LLM, cfg: config.AgentConfig):
         if listed:
             if not llm.available:
                 return {
+                    **_remember(state, answer, answer.text),
                     "answer": replace(
                         answer,
                         notes=answer.notes + ("复核未完成：未配置复核模型，本次未拦截",),
-                    )
+                    ),
                 }
             try:
                 reply, _usage, finish_reason = llm.chat(
@@ -141,10 +154,11 @@ def make_review_node(llm: LLM, cfg: config.AgentConfig):
             except Exception as exc:  # noqa: BLE001
                 reason = f"{type(exc).__name__}: {exc}"[:120]
                 return {
+                    **_remember(state, answer, answer.text),
                     "answer": replace(
                         answer,
                         notes=answer.notes + (f"复核未完成：{reason}，本次未拦截",),
-                    )
+                    ),
                 }
             judgments = parse_judgments(reply.get("content") or "")
             if not judgments:
@@ -154,10 +168,11 @@ def make_review_node(llm: LLM, cfg: config.AgentConfig):
                     else "判据解析失败"
                 )
                 return {
+                    **_remember(state, answer, answer.text),
                     "answer": replace(
                         answer,
                         notes=answer.notes + (f"复核未完成：{reason}，本次未拦截",),
-                    )
+                    ),
                 }
 
         supported: list[int] = []
@@ -202,13 +217,15 @@ def make_review_node(llm: LLM, cfg: config.AgentConfig):
             model=llm.model_name,
             passed=passed,
         )
+        final_text = answer.text if passed else downgrade_text(review, evidences)
         return {
+            **_remember(state, answer, final_text),
             "answer": replace(
                 answer,
-                text=answer.text if passed else downgrade_text(review, evidences),
+                text=final_text,
                 notes=answer.notes + tuple(notes),
                 review=review,
-            )
+            ),
         }
 
     return review_node

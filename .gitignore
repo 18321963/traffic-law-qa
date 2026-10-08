@@ -38,6 +38,7 @@ desktop.ini
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+.langgraph_api/
 
 # --- 个人文件（与本项目无关且含隐私信息，禁止入库）---
 简历*.md
