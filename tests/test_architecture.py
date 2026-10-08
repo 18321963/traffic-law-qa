@@ -323,7 +323,8 @@ def test_the_prompt_teaches_exactly_the_tools_the_model_gets() -> None:
     assert not missing, f"这些工具对模型可见，提示词里却一个字没提：{missing}"
     assert "web_search" not in prompts.AGENT_SYSTEM_PROMPT, (
         "提示词教模型用 web_search，但它不在 TOOLS 里 —— 模型会去调一个看不见的工具。"
-        "要恢复网搜：把 WEB_SEARCH_TOOL 加回 nodes.TOOLS，并在这里换成 4 个名字。"
+        "要恢复网搜：把 tools/registry.py 里 web_search 那行的 llm_visible 改成 True，"
+        "并在这里换成 4 个名字。"
     )
 
     rendered = prompts.AGENT_SYSTEM_PROMPT % {"max_steps": 3, "law_count": 1, "laws": "- 示例法规"}
@@ -333,15 +334,53 @@ def test_the_prompt_teaches_exactly_the_tools_the_model_gets() -> None:
 def test_every_offered_tool_has_something_to_run_it() -> None:
     pytest.importorskip("langgraph", reason="agent extra 没装：只跑结构检查")
     from agent_service.agents import nodes
-    from agent_service.tools import handlers
+    from agent_service.tools import registry
 
     offered = {tool["function"]["name"] for tool in nodes.TOOLS}
-    missing = sorted(offered - set(handlers.HANDLERS))
+    missing = sorted(offered - set(registry.HANDLERS))
     assert not missing, (
         "这些工具下发给模型了，却没有实现 —— 模型一调就拿到「未知工具」，"
         "而且是运行期才炸、测试全绿：\n  " + repr(missing) + "\n"
-        "（反方向多出几个是允许的：web_search 就是刻意留着的接线位，"
-        "恢复网搜时不必再写一遍实现）"
+        "（反方向多出几个是允许的：web_search 就是刻意留着的接线位——"
+        "registry 里 llm_visible=False，恢复网搜时不必再写一遍实现）"
+    )
+
+
+def test_the_tool_registry_names_match_their_schemas() -> None:
+    from agent_service.tools import registry
+
+    names = [spec.name for spec in registry.TOOL_REGISTRY]
+    assert len(names) == len(set(names)), f"工具名重复：{names}"
+    for spec in registry.TOOL_REGISTRY:
+        declared = spec.schema["function"]["name"]
+        assert spec.name == declared, (
+            f"注册表的名字与 schema 里声明的名字对不上：{spec.name} vs {declared}"
+        )
+
+
+def test_handlers_and_tools_are_derived_from_the_same_table() -> None:
+    from agent_service.tools import registry
+
+    declared = {spec.schema["function"]["name"] for spec in registry.TOOL_REGISTRY}
+    assert set(registry.HANDLERS) == declared, (
+        "HANDLERS 的键与注册表 schema 声明的名字对不上（分发面漂了）：\n  "
+        f"HANDLERS：{sorted(registry.HANDLERS)}\n  schema：{sorted(declared)}"
+    )
+    visible = [spec.schema for spec in registry.TOOL_REGISTRY if spec.llm_visible]
+    assert registry.TOOLS == visible, (
+        "TOOLS 与注册表的 llm_visible 派生结果不一致（被手改了？）：\n  "
+        f"TOOLS：{[tool['function']['name'] for tool in registry.TOOLS]}\n  "
+        f"应有：{[tool['function']['name'] for tool in visible]}"
+    )
+
+
+def test_web_search_stays_the_only_tool_the_model_cannot_see() -> None:
+    from agent_service.tools import registry
+
+    invisible = [spec.name for spec in registry.TOOL_REGISTRY if not spec.llm_visible]
+    assert invisible == ["web_search"], (
+        "不可见工具集合变了：新增第二个要让模型看不见的工具，先在这行写下理由。"
+        f"实际：{invisible}"
     )
 
 

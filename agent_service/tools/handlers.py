@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,14 +22,8 @@ from .arguments import (
     parse_web_arguments,
 )
 from .render import render_tool_result
-from .schemas import (
-    GET_ARTICLE_NAME,
-    SEARCH_LAW_NAME,
-    SEARCH_MATERIALS_NAME,
-    WEB_SEARCH_NAME,
-)
 
-__all__ = ["ToolCall", "ToolEnv", "ToolOutcome", "HANDLERS", "retrieval_digest"]
+__all__ = ["ToolCall", "ToolEnv", "ToolOutcome", "retrieval_digest"]
 
 NO_FRESH_EVIDENCE = (
     "注意：本轮一条新证据都没取到（命中的条上一轮都已经给过你了）。同一个方向换词换不出新东西 ——"
@@ -198,11 +191,3 @@ def search_materials(env: ToolEnv, call: ToolCall) -> ToolOutcome:
     if hits and not fresh:
         text = NO_FRESH_MATERIAL + text
     return ToolOutcome(text, passages=fresh)
-
-
-HANDLERS: dict[str, Callable[[ToolEnv, ToolCall], ToolOutcome]] = {
-    SEARCH_LAW_NAME: search_law,
-    GET_ARTICLE_NAME: get_article,
-    WEB_SEARCH_NAME: web_search,
-    SEARCH_MATERIALS_NAME: search_materials,
-}

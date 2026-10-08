@@ -34,7 +34,7 @@
 | 共享内核出包 | ✅ | `rag_contracts/`（域类型 + 端口 + 配置 + LLM 客户端 + 埋点）：两端共用，依赖方向单向，import 它不拉起重依赖 |
 | 架构门禁 | ✅ | 用 AST 加子进程逐条检查：import 方向、装配只准在哪发生、重依赖不许被 `import rag_service` 顺手拉起、退役包名不许复活、同一句文案只许写一遍、提示词教的工具与真给模型的工具必须一致；契约包侧另查反向 import、轻依赖、打包面覆盖 |
 | 可观测 | ✅ | 终端决策链渲染（`--trace` / `--timing`），可选 Langfuse 上报；分数/排名/通道留在 `search_log`，进不进提示词由渲染层定 |
-| 联网检索 | ⚠️ 未接线 | `agent_service/websearch.py`（博查 API）已实现、有 8 条离线单测，但当前没挂进工具面 —— 要恢复就把 `WEB_SEARCH_TOOL` 加回 `agent_service/agents/nodes.py` 的 `TOOLS` |
+| 联网检索 | ⚠️ 未接线 | `agent_service/websearch.py`（博查 API）已实现、有 8 条离线单测，但当前没挂进工具面 —— 要恢复就把 `agent_service/tools/registry.py` 里 web_search 那行的 `llm_visible` 改成 `True` |
 | 降级可跑 | ✅ | 没有 LLM key：生成层拒答、检索照常；`法规知识库/models/` 里没有权重：退化成一套可用的纯 BM25 |
 
 ## 效果
@@ -466,7 +466,7 @@ ruff check .
 | 文件 | 作用 |
 |---|---|
 | `agents/graph.py` | `AgentRunner`（`attach` / `ask` / `invoke` / `stream` / `describe`）与图的路由函数；`rag` 属性是 `RagClient`；`stream` 用 `stream_mode=["updates","values"]` 发轮次事件，终态取最后一片 `values` |
-| `agents/nodes.py` | 三个节点工厂（主循环 / 工具执行 / 收尾）+ `TOOLS` 清单 + 零证据闸 `_unearned_stop` |
+| `agents/nodes.py` | 三个节点工厂（主循环 / 工具执行 / 收尾）+ 零证据闸 `_unearned_stop` |
 | `agents/region.py` | 判地区（本地 / 深圳 / 全国）→ 定法名范围 |
 | `agents/review.py` | 末端复核：抽 `[依据N]`、逐条判「被原文支撑？」、低分整篇降级 |
 | `agents/state.py` | `AgentState`：图状态（消息、检索日志、外部结果、材料、用量…） |
@@ -474,6 +474,7 @@ ruff check .
 | `tools/arguments.py` | 模型给的参数 → 规整后的调用，以及回执封装 |
 | `tools/render.py` | 工具回执渲染（摘录、去重、只留可动的 note）+ `LOG_SEARCH` / `LOG_WEB` / `LOG_MATERIAL` 前缀，写方与轨迹解析方共引 |
 | `tools/handlers.py` | 工具实现：`search_law` / `get_article` / `web_search` / `search_materials`；`ToolEnv` 是它们的运行环境（`env.rag` 就是 `RagClient`） |
+| `tools/registry.py` | 工具面唯一一张表：名字 / schema / handler / 可见性同源（`llm_visible=False` 的只实现、不示人）；下发给模型的 `TOOLS` 与分发用的 `HANDLERS` 都由它派生 |
 | `merge.py` | 多轮检索结果按 `parent_id` 合并去重（从 rag 搬来的；不再要 rag 进程内的 `parents` 表） |
 | `websearch.py` | 博查联网检索：已实现、有离线用例，当前未挂进工具面 |
 | `trace.py` | 终端渲染：`--trace` 决策链与 `--timing` 分段耗时（渲染 `AgentState`） |

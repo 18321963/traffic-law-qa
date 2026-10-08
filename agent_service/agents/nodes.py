@@ -14,14 +14,12 @@ from rag_contracts.ports import LLM, TRUNCATED_FINISH_REASON
 from ..merge import merge_retrievals
 from ..prompts import AGENT_SYSTEM_PROMPT
 from ..tools.arguments import tool_message
-from ..tools.handlers import HANDLERS, ToolCall, ToolEnv, retrieval_digest
+from ..tools.handlers import ToolCall, ToolEnv, retrieval_digest
+from ..tools.registry import HANDLERS, TOOLS
 from ..tools.schemas import (
     GET_ARTICLE_NAME,
-    GET_ARTICLE_TOOL,
     SEARCH_LAW_NAME,
-    SEARCH_LAW_TOOL,
     SEARCH_MATERIALS_NAME,
-    SEARCH_MATERIALS_TOOL,
     WEB_SEARCH_NAME,
 )
 from .state import AgentState
@@ -32,8 +30,6 @@ __all__ = [
     "make_tools_node",
     "make_finalize_node",
 ]
-
-TOOLS = [SEARCH_LAW_TOOL, GET_ARTICLE_TOOL, SEARCH_MATERIALS_TOOL]
 
 _NO_EVIDENCE_STOP_NUDGE = (
     "你这一轮没有调用任何工具，而手上一条证据都还没有 ——「够了」这个判断此刻无凭无据，"
