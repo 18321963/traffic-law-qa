@@ -12,6 +12,8 @@ __all__ = ["AgentState"]
 class AgentState(TypedDict, total=False):
     question: str
     history: list[tuple[str, str]]
+    session_id: str
+    stream_tokens: bool
     top_k: int
     max_steps: int
 
@@ -26,5 +28,7 @@ class AgentState(TypedDict, total=False):
 
     region: str
     region_scope: tuple[str, ...]
+    place: str
 
+    conversation: Annotated[list[dict], operator.add]
     answer: Answer | None

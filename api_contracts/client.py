@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Any, Protocol
 
 import httpx
@@ -203,6 +203,54 @@ class RagClient:
             "materials": [item.to_dict() for item in materials],
         }
         return Answer.from_dict(self.request("POST", "/answer", body=body, timeout=timeout))
+
+    def answer_stream(
+        self,
+        question: str | Question,
+        retrieval: RetrievalResult,
+        *,
+        timeliness: Sequence[WebFinding] = (),
+        materials: Sequence[MaterialPassage] = (),
+    ) -> Iterator[tuple[str, Any]]:
+        asked = question if isinstance(question, Question) else Question(text=question)
+        body = {
+            "question": {
+                "text": asked.text,
+                "history": [[role, content] for role, content in asked.history],
+            },
+            "retrieval": retrieval.to_dict(),
+            "timeliness": [item.to_dict() for item in timeliness],
+            "materials": [item.to_dict() for item in materials],
+        }
+        try:
+            with self._client.stream("POST", "/answer/stream", json=body) as resp:
+                if resp.status_code >= 400:
+                    resp.read()
+                    raise QaError(
+                        f"POST /answer/stream 返回 {resp.status_code}：{self._detail(resp)}"
+                    )
+                yield from self._answer_frames(resp)
+        except httpx.HTTPError as exc:
+            raise QaError(f"POST /answer/stream 连不上 {self.base_url}：{exc}") from None
+
+    def _answer_frames(self, resp: httpx.Response) -> Iterator[tuple[str, Any]]:
+        event = ""
+        done = False
+        for raw in resp.iter_lines():
+            line = raw.strip()
+            if line.startswith("event:"):
+                event = line.removeprefix("event:").strip()
+            elif line.startswith("data:"):
+                payload = json.loads(line.removeprefix("data:").strip())
+                if event == "delta":
+                    yield "delta", str(payload.get("text") or "")
+                elif event == "done":
+                    done = True
+                    yield "answer", Answer.from_dict(payload)
+                elif event == "error":
+                    raise QaError(str(payload.get("message") or ""))
+        if not done:
+            raise QaError("POST /answer/stream 的流结束了，却没有 done 帧（断流）")
 
     def ask(
         self,

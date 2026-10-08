@@ -79,8 +79,8 @@ MUTATIONS = [
     (
         "M11 /answer 丢掉请求里的检索结果，自己重检索",
         "rag_service/api/app.py",
-        "    retrieval = RetrievalResult.from_dict(req.retrieval)\n",
-        "    retrieval = rt.rag.search(req.question.text)\n",
+        "    retrieval = RetrievalResult.from_dict(req.retrieval)\n    answer = rt.rag.answer(\n",
+        "    retrieval = rt.rag.search(req.question.text)\n    answer = rt.rag.answer(\n",
         ["tests/test_tool_parity.py"],
     ),
     (

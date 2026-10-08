@@ -5,7 +5,7 @@ from dataclasses import replace
 
 from api_contracts import RagClient
 from rag_contracts import config
-from rag_contracts.domain.answer import Question
+from rag_contracts.domain.answer import Question, drain
 from rag_contracts.domain.laws import LawInfo
 from rag_contracts.domain.retrieval import MaterialPassage, RetrievalResult, WebFinding
 from rag_contracts.observability.tracer import Tracer
@@ -235,6 +235,11 @@ def make_finalize_node(
             extra = list(logs)
             notes.append("本轮未取到任何证据（未调用工具，或工具调用全部失败），已按单轮管道兜底检索一次")
 
+        region = str(state.get("region") or "")
+        place = str(state.get("place") or "")
+        if region == "national" and place:
+            notes.append(f"这题涉及「{place}」：按全国法作答（未叠加地方性法规）")
+
         merged = merge_retrievals(
             logs,
             question=state["question"],
@@ -247,12 +252,26 @@ def make_finalize_node(
             history=tuple(tuple(pair) for pair in state.get("history") or ()),
             top_k=active_top_k,
         )
-        answer = rag.answer(
-            question,
-            merged,
-            timeliness=tuple(state.get("external") or ()),
-            materials=tuple(state.get("materials") or ()),
-        )
+        if state.get("stream_tokens") and hasattr(rag, "answer_stream"):
+            from langgraph.config import get_stream_writer
+
+            writer = get_stream_writer()
+            answer = drain(
+                rag.answer_stream(
+                    question,
+                    merged,
+                    timeliness=tuple(state.get("external") or ()),
+                    materials=tuple(state.get("materials") or ()),
+                ),
+                on_delta=lambda delta: writer({"text": delta}),
+            )
+        else:
+            answer = rag.answer(
+                question,
+                merged,
+                timeliness=tuple(state.get("external") or ()),
+                materials=tuple(state.get("materials") or ()),
+            )
         return {"answer": replace(answer, notes=answer.notes + tuple(notes)), "search_log": extra}
 
     return finalize_node

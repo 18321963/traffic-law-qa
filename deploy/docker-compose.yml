@@ -105,8 +105,11 @@ services:
         required: false
     environment:
       RAG_BASE_URL: http://app:8000
+      AGENT_CLARIFY: "1"
     ports:
       - "8001:8000"
+    volumes:
+      - tlr_sessions:/app/data
     depends_on:
       app:
         condition: service_healthy
@@ -123,6 +126,7 @@ volumes:
   tlr_index:
   tlr_docx:
   tlr_data:
+  tlr_sessions:
 
 networks:
   default:

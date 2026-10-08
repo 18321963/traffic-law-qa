@@ -19,11 +19,14 @@
 | 交叉编码器重排 | ✅ | `bge-reranker-v2-m3`（sigmoid）；不可用或抛异常时按融合序返回并留一条 note |
 | 强制引用式生成 | ✅ | 每条结论挂 `[依据N]`；参考文献段由 `Answer.render()` 拼，编号与原文的对应不过模型的手 |
 | Agentic RAG | ✅ | LangGraph 单节点循环：模型自决查什么、查几轮；一轮没调工具就想收工会被代码闸拦下 |
+| 会话记忆（短期） | ✅ | 请求带 `session_id` = 同一张会话跨轮记得住（LangGraph checkpointer，SQLite 落 `data/sessions.db`）；提示词里带最近 N 轮，不带则每问独立 |
+| 地区澄清（人在环） | ✅ | 问题沾到具体地区时先中断问一句「按该地法规还是只按全国法」再作答，回复经 resume 端点交回（服务里默认开，`AGENT_CLARIFY` 控制） |
+| 流式输出 | ✅ | rag `/qa/stream` 推检索结果与逐字 token；agent `/qa/stream` 推步骤流 + 逐字草稿；**草稿是草稿** —— `done` 才是复核之后的权威 |
 | 末端复核 | ✅ | 逐条判「被原文支撑？」→ 低分整篇降级（检测力尚未标定，见文末台账） |
 | 就绪门 | ✅ | 启动时比对 docx／本地产物／集合三者，不一致自动重建；也能 `--rebuild` 或 `POST /reindex` 手动触发 |
 | 权重门禁 | ✅ | 索引快照里记着嵌入权重的指纹（文件名 + 大小 + mtime）：换了权重就拒绝服务并说明差在哪，`POST /reindex` / `RAG_ALLOW_REBUILD=1` 显式放行；老快照没指纹不拦，只标 `degraded`。启发式，防误换不防篡改 |
 | 上传入库 | ✅ | `session` 只进本次会话（工具面可查，答完即弃）｜`permanent` 干跑校验后写进真源、落台账、重建生效 |
-| HTTP 服务 | ✅ | `/qa` · `/qa/stream`（SSE）· `/answer`（只生成）· `/health` · `/documents` 台账 · `/reindex` 热替换 runtime · `/laws` · `/articles/lookup` · `/materials/search` |
+| HTTP 服务 | ✅ | `/qa` · `/qa/stream`（SSE）· `/answer`（只生成）· `/answer/stream` · `/health` · `/documents` 台账 · `/reindex` 热替换 runtime · `/laws` · `/articles/lookup` · `/materials/search` |
 | 服务契约 | ✅ | `api_contracts/openapi.json`（提交即冻结）+ 漂移测试 + 薄 httpx 客户端；4xx/5xx 一律归成 `QaError` |
 | MCP 适配层 | ✅ | `python -m mcp_server`（stdio）把 5 个工具喂给 MCP 客户端，只把请求转给上面的端点，返回原样透传；工具表不载模型、不 import SDK |
 | 端口化 + 唯一装配点 | ✅ | `rag_contracts/ports.py` 7 个 ABC，换向量库/换供应商只改继承；装配只在各自的 `container.py`，别处不许自己 new 具体实现 |
@@ -165,8 +168,9 @@ agent_service/
 ### 三、Agentic（`agent_service`，另一个进程）
 
 ```
-问题（POST http://127.0.0.1:8001/qa）
+问题（POST http://127.0.0.1:8001/qa，可带 session_id 记上下文）
   → agents/region          判地区（本地 / 深圳 / 全国）→ 定法名范围
+  → agents/clarify         沾到具体地区先问一句再答（开了 AGENT_CLARIFY 时）
   → 单节点循环             模型自己决定调哪个工具、调几轮
       ├─ search_law            混合检索（可多轮，结果按 parent_id 合并去重）
       ├─ get_article           已知条号直取原文
@@ -177,7 +181,7 @@ agent_service/
   → trace.py               决策链渲染（--trace / --timing / Langfuse）
 ```
 
-上面每一步要的检索、取条、材料，都经 `RagClient` 打到 rag 服务的 HTTP 面（`/qa?mode=search` · `/articles/lookup` · `/materials/search` · `/laws` · `/answer`）—— 进程里没有第二个 `LegalRAG`，也没有 `rag_service` 的任何 import。
+上面每一步要的检索、取条、材料，都经 `RagClient` 打到 rag 服务的 HTTP 面（`/qa?mode=search` · `/articles/lookup` · `/materials/search` · `/laws` · `/answer` · `/answer/stream`）—— 进程里没有第二个 `LegalRAG`，也没有 `rag_service` 的任何 import。请求带 `session_id` 时同一会话跨轮记忆（LangGraph checkpointer，落 `data/sessions.db`）；开了 `AGENT_CLARIFY` 时，沾到地方的问题先中断问一句、由 resume 端点收尾（见「端点」）。
 
 三道关卡都在代码里，不靠提示词自觉：**就绪门**（rag 服务启动/请求前保证索引可用）、**零证据闸**（`agents/nodes.py::_unearned_stop`）、**末端复核**（逐条判支撑，支撑不住的整篇降级）。
 
@@ -203,7 +207,7 @@ rag 那条路只剩两档；agent 循环搬走之后，它有自己的端点（�
 pip install -e ".[all]"
 ```
 
-基础依赖只有三个包（`openai` · `python-dotenv` · `httpx`）；`pymilvus` 在 `milvus` 组，不装只是连不上 Milvus；`torch` + `transformers` 在 `local` 可选组里，不装也能跑 —— 退化成纯 BM25；`langgraph` 在 `agent` 组，不装只是起不了 agent 服务；`fastapi` + `uvicorn` 在 `api` 组，不装只是不能起服务；MCP SDK 在 `mcp` 组，不装只是不能 `python -m mcp_server`。`.[all]` 把这些组全带上（Langfuse 不在内，要上报单装 `.[langfuse]`）。
+基础依赖只有三个包（`openai` · `python-dotenv` · `httpx`）；`pymilvus` 在 `milvus` 组，不装只是连不上 Milvus；`torch` + `transformers` 在 `local` 可选组里，不装也能跑 —— 退化成纯 BM25；`langgraph` 在 `agent` 组，不装只是起不了 agent 服务；`fastapi` + `uvicorn` 在 `api` 组，不装只是不能起服务；MCP SDK 在 `mcp` 组，不装只是不能 `python -m mcp_server`。`.[all]` 把这些组全带上（Langfuse 不在内，要上报单装 `.[langfuse]`；Studio 演示台在 `studio` 组，也不进 `all`）。
 
 两个镜像各取所需，都不装对方的：rag 服务镜像装 `api,local,milvus`；agent 镜像装 `agent,api,langfuse`（不装 `pymilvus`、也不装 `torch` —— 它两条都不需要）。
 
@@ -229,7 +233,7 @@ docker compose -f deploy/docker-compose.yml ps   # 等五个容器 healthy
 curl.exe localhost:8000/health  # 必须带 .exe：PowerShell 的 curl 是 IWR 别名
 ```
 
-镜像里两个服务都在 compose 里：`app`（rag 服务，宿主 :8000；挂 GPU、四个命名卷、模型只读挂载）与 `agent`（agent 服务，宿主 :8001 → 容器内 :8000；不挂 GPU、不挂卷 —— 它不载模型也不落盘，rag 地址由 `RAG_BASE_URL=http://app:8000` 给）。agent 的 healthcheck 读的是 `/health` 的 body：自己 `status=ok` 且内嵌的 `rag.status=ok` 才算健康，所以 rag 断掉它就会变 unhealthy。
+镜像里两个服务都在 compose 里：`app`（rag 服务，宿主 :8000；挂 GPU、四个命名卷、模型只读挂载）与 `agent`（agent 服务，宿主 :8001 → 容器内 :8000；不挂 GPU，挂一卷 `tlr_sessions` 存会话记忆、不载模型，rag 地址由 `RAG_BASE_URL=http://app:8000` 给，地区澄清默认开）。agent 的 healthcheck 读的是 `/health` 的 body：自己 `status=ok` 且内嵌的 `rag.status=ok` 才算健康，所以 rag 断掉它就会变 unhealthy。
 
 `--build` 省不得：镜像把源码烤进去了，不带它跑的还是上一版，且不报任何错。首次构建要下 CUDA 版 torch（约 2.8GB），之后有缓存就快。构建中途别 Ctrl-C：torch 下到一半断了不落缓存，下次还得重下。两个镜像构建完的体量：rag 6.03GB（大头就是 CUDA 版 torch），agent 263MB。
 
@@ -257,7 +261,7 @@ print(qa("深圳 行人在机动车道 罚款多少", mode="search").render())  
 ### 测试
 
 ```powershell
-python -m pytest                # 181 条离线用例，约 12 秒；不碰 Milvus、不调模型
+python -m pytest                # 263 条离线用例，约 24 秒；不碰 Milvus、不调模型
 ruff check .
 ```
 
@@ -273,13 +277,14 @@ ruff check .
 | `python -m rag_service.cli.build <子命令>` | 建库：`build` / `status` / `layers` / `docx` / `parse` / `chunk` / `index` |
 | `python -m rag_service.cli.serve [--host H] [--port P]` | 起知识库服务 |
 | `python -m agent_service "问题" [--trace] [--timing] [--json]` | 提问：完整 Agent 循环（判地区 → 规划 → 工具调用 → 复核 → 生成），打的是 rag 服务的 HTTP 面 |
-| `python -m uvicorn agent_service.api.app:app --port 8001` | 把 agent 立成服务（`/qa` · `/qa/stream` · `/health`）；compose 里已常驻一个（宿主 :8001），这条是裸跑用 |
+| `python -m uvicorn agent_service.api.app:app --port 8001` | 把 agent 立成服务（`/qa` · `/qa/stream` · `/qa/resume` · `/qa/resume/stream` · `/health`）；compose 里已常驻一个（宿主 :8001），这条是裸跑用 |
 | `python -m eval [--reference] [--pool N] [--http asgi\|URL]` | 评测：域内 池子召回 / hit@k / 单通道召回 ｜ 点名桶取条。`--http` 把同一套题发到服务端点（跨进程那条臂；不给默认走 asgi，等于在本进程里起一个真 app 过真 HTTP） |
 | `python -m eval.singlehop` | 单跳两臂对照 |
 | `python -m eval.multihop` | 跨法多跳 |
 | `python -m eval.corpus build\|check` | 题集桶文件：重建 / 只读比对 |
 | `python -m eval.mutations.run all` | 变异自检：把规则改坏，看门禁是否翻红（`retrieval` / `contract` / `gates` / `mcp` 四张表） |
 | `python -m mcp_server` | MCP 适配层（stdio）：把工具面喂给 MCP 客户端，请求转给上面的 HTTP 端点。`--list-tools` 离线打印工具表，`--base-url` / `RAG_BASE_URL` 指定服务地址 |
+| `langgraph dev` | Studio 演示台（要 `pip install -e ".[agent,studio]"`，rag 服务先起着）：起 `agent_service/studio.py` 那张图，看步骤流与澄清中断。Windows 上配 `PYTHONUTF8=1` + `--allow-blocking`，细节在接口文档 §7 |
 | `python -m api_contracts.regen` | 重出 `api_contracts/openapi.json` |
 | `tlq-qa` / `tlq-build` / `tlq-serve` / `tlq-eval` | 上面各条的短命令 |
 
@@ -295,10 +300,11 @@ ruff check .
 | `POST /qa` | 一次问答：`ask`（检索+生成，默认）｜ `search`（只检索，不花钱）。输出撞上 `max_tokens` 被截断时，`notes` 里会明说 |
 | `POST /qa/stream` | 同上，SSE 边生成边推：`evidence`（检索结果，一发）+ `delta`（真 token 流，若干）+ `done`（含 `truncated` / `usage` / `citations`） |
 | `POST /answer` | 只生成、不检索：body 带 `question`（含 `history`）与已经检索好的 `retrieval`（`POST /qa?mode=search` 的返回），可选 `timeliness` / `materials`。语义是「我已经检索好了，你只负责生成」——`retrieval` 缺了就是 422，服务端不会自己再去检索一次 |
+| `POST /answer/stream` | 同 `/answer` 的流式版（SSE）：`delta` 逐字 + `done`=完整 `Answer`。agent 的逐字流走这条 |
 | `POST /documents` | 传 docx / md / txt / pdf：`session` 只进本次会话（工具面可查，答完即弃）｜ `permanent` 干跑校验后入知识库，落台账 |
 | `GET /documents` | 上传台账；`DELETE /documents/{id}` 撤掉一份 |
 | `POST /reindex` | 重建索引并热替换运行中的 runtime |
-| `GET /laws` | 库内法规清单（`law_id` / 名称 / 版本 / 条数）—— 要用 `law_filter` 先来这儿拿 id |
+| `GET /laws` | 库内法规清单（`law_id` / 名称 / 版本 / 条数 / 是否地方性）—— 要用 `law_filter` 先来这儿拿 id |
 | `POST /articles/lookup` | 按条号精确取一条原文：`article_no`（可选配 `law_name`），或直接给一句带条号的 `text`。查不到不报错：200 + `found=false` + `note` 说明为什么 |
 | `POST /materials/search` | 在本次会话上传的材料里检索，返回 `passages` 与渲染好的 `text` |
 
@@ -311,8 +317,11 @@ ruff check .
 | 端点 | 干什么 |
 |---|---|
 | `GET /health` | 自己没就绪（缺 langgraph / 没 key）就 503 带原因；就绪时透传 rag 服务的 `/health`（`rag.status=unreachable` 时整条 `status` 变 `degraded`） |
-| `POST /qa` | **完整 Agent 循环**：判地区 → 规划 → 工具调用（可多轮）→ 复核 → 生成。与 rag 的 `/qa?mode=ask\|search` 语义不同、**不是它的代理**：模型自己决定查几轮、查什么，末端还要逐条复核引用是否被原文支撑，支撑不住的整篇降级。body：`question` · `top_k` · `doc_ids`（本次会话材料的 doc_id） |
-| `POST /qa/stream` | 同上，SSE 推轮次级 `step` 帧（每个节点一步：`region` / `agent` / `tools` / `finalize` / `review`）+ 一发 `done`（整篇答案，**没有 token 流**——节点里直调模型，拿不到逐字回调） |
+| `POST /qa` | **完整 Agent 循环**：判地区 → 规划 → 工具调用（可多轮）→ 复核 → 生成。与 rag 的 `/qa?mode=ask\|search` 语义不同、**不是它的代理**：模型自己决定查几轮、查什么，末端还要逐条复核引用是否被原文支撑，支撑不住的整篇降级。body：`question` · `top_k` · `doc_ids`（本次会话材料的 doc_id）· `session_id`（跨轮记忆句柄）。开了澄清且问题沾到地方时返回 `status=interrupted`（拿 `session_id` 去 resume），答完是 `status=ok`——两种都是 200 |
+| `POST /qa/stream` | 同上，SSE 推：步骤流 `step`（每个节点一步）+ 逐字 `delta`（**草稿**）+ `done`（复核之后的权威整篇）+ `interrupt`（等澄清回复，出了它就是这一轮的终点）；中途任何一步出错收成 `error` 帧 |
+| `POST /qa/resume` · `/qa/resume/stream` | 把澄清回复交回去：body `{session_id, value: {region}}` —— `region` 给地区名就按该地法规 + 全国法答，给 `national` 只按全国法。前者普通 JSON（没有等待中的澄清 → 409），后者 SSE（同类冲突收成 `error` 帧）；细节在接口文档 §3.2 |
+
+带 `session_id` 的请求共用一张会话；会话记忆落 SQLite（`AGENT_SESSION_DB`，默认 `data/sessions.db`）。流式面上 `delta` 是草稿、`done` 才是权威 —— 末端复核可能整篇降级替换。
 
 这个面不出 openapi：本轮没有第二个消费者，契约面只冻结 rag 那一侧（`api_contracts/openapi.json`），agent 侧的字段由 `tests/test_agent_wire.py` 过真 HTTP 盯着。
 
@@ -373,20 +382,21 @@ ruff check .
 │   ├── adapters/            向量库 · 本地模型 · 台账
 │   └── Dockerfile           服务镜像
 ├── agent_service/          Agent 服务（源码包，另一个进程）
-│   ├── container.py         ★ agent 侧唯一装配点（只造 RagClient）
+│   ├── container.py         ★ agent 侧唯一装配点（RagClient、会话库、法条清单）
 │   ├── prompts.py           agent 侧提示词
-│   ├── agents/  tools/      图与节点 · 工具面
+│   ├── agents/  tools/      图与节点（含澄清中断、会话记忆）· 工具面
 │   ├── api/  cli.py         自己的 HTTP 面 · 命令行
+│   ├── studio.py            Studio 演示台入口（langgraph.json 指向它）
 │   └── merge.py  websearch.py  trace.py
 ├── eval/                    评测（harness / singlehop / multihop / corpus）＋ 变异自检 mutations/
 ├── mcp_server/              MCP 适配层：tools.py（工具表，不 import SDK）· main.py（stdio 装配）
 ├── api_contracts/           openapi.json · client.py（薄 httpx 客户端）· regen.py
 ├── deploy/                  docker-compose.yml · reinstall.sh
-├── tests/                   19 个测试文件 / 179 条离线用例
+├── tests/                   22 个测试文件 / 263 条离线用例
 ├── 法规知识库/              docx + pdf（建库真源）· text · parsed · chunks · index · models
 ├── data/                    题集与桶文件 · documents.db · uploads/ · traces/
 ├── volumes/                 etcd / MinIO / Milvus 的运行时数据（compose 挂载，可重建）
-├── pyproject.toml · requirements.txt
+├── pyproject.toml · requirements.txt · langgraph.json
 ├── .env.example · .gitignore · .gitattributes · .dockerignore
 └── README.md
 ```
@@ -396,8 +406,8 @@ ruff check .
 | 文件 | 作用 |
 |---|---|
 | `rag_service/Dockerfile` | 服务镜像：python:3.11-slim → CUDA 版 torch（独立一层，改源码重建不重下）→ `.[api,local,milvus,pdf]` → 把五个包（`rag_contracts/` `rag_service/` `eval/` `mcp_server/` `api_contracts/`）与 `法规知识库/`、`data/` 一起烤进镜像 → 非 root 用户 → `uvicorn rag_service.api.app:app` |
-| `agent_service/Dockerfile` | agent 服务镜像：同一个底（python:3.11-slim、非 root uid 1000、`EXPOSE 8000`），装 `.[agent,api,langfuse]`，只 COPY 三个包（`rag_contracts/` `api_contracts/` `agent_service/`）—— 没有 torch、没有 Milvus 客户端、也没有 `法规知识库/` 与 `data/`：它不载模型、不落盘 |
-| `deploy/docker-compose.yml` | 五个服务：etcd / MinIO / Milvus standalone / app（rag）/ agent。app 挂 GPU、四个命名卷、健康检查打 `/health`；agent 只发布 8001、不挂 GPU 也不挂卷，healthcheck 读 `/health` 的 body（要 `rag.status=ok`，不是只看 200）。顶层 `name: agent` 钉住项目名（否则项目名随目录走，挪文件会换一组空卷）；`build.context` / `env_file` / 卷路径都相对本文件解析，**但 `build.dockerfile` 相对 `context` 解析**（`context: ..` 时写 `rag_service/Dockerfile`，写成 `../rag_service/Dockerfile` 会跑去找仓库外那一层、且 `config` 不报错）—— 固定用 `docker compose -f deploy/docker-compose.yml` 起 |
+| `agent_service/Dockerfile` | agent 服务镜像：同一个底（python:3.11-slim、非 root uid 1000、`EXPOSE 8000`），装 `.[agent,api,langfuse]`，只 COPY 三个包（`rag_contracts/` `api_contracts/` `agent_service/`）—— 没有 torch、没有 Milvus 客户端、也没有 `法规知识库/` 与 `data/`：它不载模型；自己的会话记忆写在挂载卷上（镜像里先把 `/app/data` 的属主铺好） |
+| `deploy/docker-compose.yml` | 五个服务：etcd / MinIO / Milvus standalone / app（rag）/ agent。app 挂 GPU、四个命名卷、健康检查打 `/health`；agent 只发布 8001、不挂 GPU，挂一卷 `tlr_sessions:/app/data`（会话记忆）并置 `AGENT_CLARIFY=1`，healthcheck 读 `/health` 的 body（要 `rag.status=ok`，不是只看 200）。顶层 `name: agent` 钉住项目名（否则项目名随目录走，挪文件会换一组空卷）；`build.context` / `env_file` / 卷路径都相对本文件解析，**但 `build.dockerfile` 相对 `context` 解析**（`context: ..` 时写 `rag_service/Dockerfile`，写成 `../rag_service/Dockerfile` 会跑去找仓库外那一层、且 `config` 不报错）—— 固定用 `docker compose -f deploy/docker-compose.yml` 起 |
 | `deploy/reinstall.sh` | 重装 editable 包：探 Clash 代理 → `pip install -e ".[all,mcp]"` → 换到仓外验证六个包 import 装没装上 |
 | `pyproject.toml` | 依赖与打包的唯一真源：基础三依赖 + `agent` / `api` / `langfuse` / `local` / `mcp` / `milvus` / `pdf` / `dev` / `all` 可选组、四个短命令、pytest 与 ruff 配置；`packages.find` 覆盖 `rag_contracts*` / `rag_service*` / `agent_service*` / `eval*` / `mcp_server*` / `api_contracts*`（顶层包与模式双向比对由 `tests/test_contracts_architecture.py` 盯着） |
 | `requirements.txt` | 只镜像基础三依赖，给「不装整包、只装依赖」的场景（`pymilvus` 已移到 `milvus` 组，不在这里）；依赖的真源仍是 `pyproject.toml` |

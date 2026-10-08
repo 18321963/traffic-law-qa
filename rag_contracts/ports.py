@@ -178,7 +178,12 @@ class RagService(ABC):
 
     @abstractmethod
     def stream(
-        self, question: str | Question, retrieval: RetrievalResult
+        self,
+        question: str | Question,
+        retrieval: RetrievalResult,
+        *,
+        timeliness: tuple[WebFinding, ...] = (),
+        materials: tuple[MaterialPassage, ...] = (),
     ) -> Iterator[tuple[str, Any]]: ...
 
     @abstractmethod

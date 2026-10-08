@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,7 +13,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from rag_contracts import config
-from rag_contracts.domain.answer import Answer, Question
+from rag_contracts.domain.answer import Answer, Question, drain
 from rag_contracts.domain.errors import QaError
 from rag_contracts.domain.reports import WEIGHTS_OK, channel_label
 from rag_contracts.domain.retrieval import (
@@ -174,6 +176,11 @@ def generate(request: Request, req: AnswerRequest) -> dict:
     return payload
 
 
+@app.post("/answer/stream")
+def generate_stream(request: Request, req: AnswerRequest) -> StreamingResponse:
+    return _streaming(_answer_events(runtime_of(request), req))
+
+
 @app.post("/qa/stream")
 def ask_stream(request: Request, req: QaRequest) -> StreamingResponse:
     return _streaming(_sse_events(runtime_of(request), req))
@@ -236,6 +243,44 @@ def _sse_events(rt: Runtime, req: QaRequest):
             "truncated": truncated,
         },
     )
+
+
+def _answer_events(rt: Runtime, req: AnswerRequest):
+    started = time.perf_counter()
+    question = Question(
+        text=req.question.text,
+        history=tuple((str(role), str(content)) for role, content in req.question.history),
+    )
+    retrieval = RetrievalResult.from_dict(req.retrieval)
+    timeliness = tuple(WebFinding.from_dict(item) for item in req.timeliness)
+    materials = tuple(MaterialPassage.from_dict(item) for item in req.materials)
+    rt.dense_live = retrieval.used_vector
+
+    out: queue.Queue = queue.Queue()
+
+    def worker() -> None:
+        try:
+            frames = rt.rag.stream(question, retrieval, timeliness=timeliness, materials=materials)
+            answer = drain(frames, on_delta=lambda text: out.put(("delta", text)))
+            payload = answer.to_dict()
+            payload["request_ms"] = round((time.perf_counter() - started) * 1000, 2)
+            out.put(("done", payload))
+        except Exception as exc:  # noqa: BLE001
+            out.put(("error", {"message": str(exc)}))
+        finally:
+            out.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    while True:
+        item = out.get()
+        if item is None:
+            return
+        kind, payload = item
+        if kind == "delta":
+            yield _sse("delta", {"text": payload})
+        else:
+            yield _sse(kind, payload)
 
 
 def _sse(event: str, payload: dict) -> str:

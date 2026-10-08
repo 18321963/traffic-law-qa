@@ -40,7 +40,22 @@ def test_laws_of_counts_articles_per_law() -> None:
         "law_name": ROAD,
         "version": "2021",
         "articles": 2,
+        "local": False,
     }
+
+
+def test_local_flag_comes_from_the_law_name_and_round_trips() -> None:
+    SHENZHEN = "深圳经济特区道路交通安全违法行为处罚条例"
+    laws = laws_of(
+        [
+            _parent("sz", SHENZHEN, "第一条"),
+            _parent("road", ROAD, "第九十条"),
+        ]
+    )
+    by_id = {law.law_id: law for law in laws}
+    assert by_id["sz"].local is True
+    assert by_id["road"].local is False
+    assert LawInfo.from_dict(by_id["sz"].to_dict()) == by_id["sz"]
 
 
 def test_a_law_name_resolves_exactly_before_it_loosely() -> None:

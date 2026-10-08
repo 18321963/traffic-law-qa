@@ -13,6 +13,7 @@ from rag_contracts.domain.errors import QaError
 from rag_contracts.domain.retrieval import TOP_K_MAX, TOP_K_MIN
 
 from .. import container
+from ..agents.errors import ResumeConflict, SessionUnsupported
 
 __all__ = ["app"]
 
@@ -43,6 +44,16 @@ def _qa_error(request: Request, exc: QaError) -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
+@app.exception_handler(SessionUnsupported)
+def _session_unsupported(request: Request, exc: SessionUnsupported) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(ResumeConflict)
+def _resume_conflict(request: Request, exc: ResumeConflict) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
 @app.exception_handler(RuntimeError)
 def _runtime_error(request: Request, exc: RuntimeError) -> JSONResponse:
     return JSONResponse(status_code=500, content={"detail": f"服务内部错误：{exc}"})
@@ -66,6 +77,20 @@ class AgentRequest(BaseModel):
         default_factory=list,
         description="本次会话材料的 doc_id（rag 服务 POST /documents mode=session 的返回）",
     )
+    session_id: str | None = Field(
+        None, min_length=1, description="会话 id：带上才有跨轮记忆；响应会把同一个值回传"
+    )
+
+
+class ResumeValue(BaseModel):
+    region: str = Field(..., min_length=1, description="澄清回复的地区名；national=只按全国法作答")
+
+
+class ResumeRequest(BaseModel):
+    session_id: str = Field(..., min_length=1, description="那个被中断响应的 session_id")
+    value: ResumeValue = Field(
+        ..., description='澄清回复，形如 {"region": "national"} 或 {"region": "深圳"}'
+    )
 
 
 @app.get("/health")
@@ -83,16 +108,40 @@ async def health(request: Request) -> dict:
 def ask(request: Request, req: AgentRequest) -> dict:
     runner = runner_of(request)
     started = time.perf_counter()
-    answer = runner.ask(Question(text=req.question, top_k=req.top_k), material_ids=req.doc_ids)
-    payload = answer.to_dict()
-    payload["request_ms"] = round((time.perf_counter() - started) * 1000, 2)
-    return payload
+    status, payload = runner.ask_payload(
+        Question(text=req.question, top_k=req.top_k),
+        material_ids=req.doc_ids,
+        session_id=req.session_id,
+    )
+    return {"status": status, **payload, "request_ms": round((time.perf_counter() - started) * 1000, 2)}
+
+
+@app.post("/qa/resume")
+def resume(request: Request, req: ResumeRequest) -> dict:
+    runner = runner_of(request)
+    started = time.perf_counter()
+    status, payload = runner.resume(req.session_id, {"region": req.value.region})
+    return {"status": status, **payload, "request_ms": round((time.perf_counter() - started) * 1000, 2)}
 
 
 @app.post("/qa/stream")
 def ask_stream(request: Request, req: AgentRequest) -> StreamingResponse:
     runner = runner_of(request)
-    return _streaming(_events(runner, req))
+    return _streaming(
+        _events(
+            runner.stream(
+                Question(text=req.question, top_k=req.top_k),
+                material_ids=req.doc_ids,
+                session_id=req.session_id,
+            )
+        )
+    )
+
+
+@app.post("/qa/resume/stream")
+def resume_stream(request: Request, req: ResumeRequest) -> StreamingResponse:
+    runner = runner_of(request)
+    return _streaming(_events(runner.resume_stream(req.session_id, {"region": req.value.region})))
 
 
 def _streaming(events) -> StreamingResponse:
@@ -106,13 +155,18 @@ def _streaming(events) -> StreamingResponse:
     )
 
 
-def _events(runner, req: AgentRequest):
+def _events(events):
     started = time.perf_counter()
-    question = Question(text=req.question, top_k=req.top_k)
     try:
-        for kind, payload in runner.stream(question, material_ids=req.doc_ids):
+        for kind, payload in events:
             if kind == "step":
                 yield _sse("step", payload)
+                continue
+            if kind == "delta":
+                yield _sse("delta", payload)
+                continue
+            if kind == "interrupt":
+                yield _sse("interrupt", payload)
                 continue
             if kind != "answer":
                 continue

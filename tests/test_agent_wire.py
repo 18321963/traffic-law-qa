@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from conftest import AgentStubLLM
+from conftest import PENALTY, AgentStubLLM
 
 from rag_contracts import config
 from rag_contracts.domain.answer import Question
@@ -13,6 +13,8 @@ from rag_contracts.observability.tracer import Tracer
 pytest.importorskip("fastapi", reason="api extra 没装：agent 侧 HTTP 验收跳过")
 pytest.importorskip("httpx", reason="TestClient 要 httpx（dev extra）")
 pytest.importorskip("langgraph", reason='agent 循环要 pip install -e ".[agent]"')
+
+from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 
 from agent_service.agents import graph as graph_mod  # noqa: E402
 
@@ -31,8 +33,9 @@ def _call(call_id: str, name: str, **arguments) -> dict:
     return {"role": "assistant", "content": "", "tool_calls": [_tool_call(call_id, name, arguments)]}
 
 
-def _region(text: str) -> list[dict]:
-    return [{"role": "assistant", "content": json.dumps({"region": text}, ensure_ascii=False)}]
+def _region(text: str, place: str = "") -> list[dict]:
+    payload = {"region": text, "place": place}
+    return [{"role": "assistant", "content": json.dumps(payload, ensure_ascii=False)}]
 
 
 def _review(*judgments: bool) -> list[dict]:
@@ -58,16 +61,17 @@ MATERIAL_THEN_ANSWER = [
 ]
 
 
-def _runner(remote, *, plan=None, region="深圳", llm=None):
+def _runner(remote, *, plan=None, region=("深圳", ""), llm=None, sessions=None, clarify=False):
     return graph_mod.AgentRunner(
         remote,
-        cfg=config.AgentConfig(max_steps=2),
+        cfg=config.AgentConfig(max_steps=2, clarify=clarify),
         llm=llm
         if llm is not None
         else AgentStubLLM(list(plan or PLAN_THEN_ANSWER), model="stub-agent", tokens=7),
-        region_llm=AgentStubLLM(_region(region), model="stub-region"),
+        region_llm=AgentStubLLM(_region(*region), model="stub-region"),
         review_llm=AgentStubLLM(_review(True), model="stub-review"),
         tracer=Tracer(),
+        sessions=sessions,
     )
 
 
@@ -101,6 +105,16 @@ def _sse_frames(text: str) -> list[tuple[str, dict]]:
     return frames
 
 
+def _post_stream(http, path: str, body: dict) -> list[tuple[str, dict]]:
+    with http.stream("POST", path, json=body) as resp:
+        assert resp.status_code == 200, path
+        return _sse_frames("".join(f"{line}\n" for line in resp.iter_lines()))
+
+
+def _nodes(frames: list[tuple[str, dict]]) -> list[str]:
+    return [payload["node"] for event, payload in frames if event == "step"]
+
+
 def test_the_agent_stream_over_http_carries_steps_then_the_real_answer(agent_wire) -> None:
     remote, rt, _rag_app = agent_wire
     http = _agent_http(_runner(remote))
@@ -109,8 +123,9 @@ def test_the_agent_stream_over_http_carries_steps_then_the_real_answer(agent_wir
         assert resp.status_code == 200
         frames = _sse_frames("".join(f"{line}\n" for line in resp.iter_lines()))
 
-    assert [event for event, _payload in frames] == ["step"] * 6 + ["done"]
-    assert [payload["node"] for event, payload in frames if event == "step"] == [
+    kinds = [event for event, _payload in frames]
+    assert [event for event in kinds if event != "delta"] == ["step"] * 6 + ["done"]
+    assert _nodes(frames) == [
         "region",
         "agent",
         "tools",
@@ -129,7 +144,15 @@ def test_the_agent_stream_over_http_carries_steps_then_the_real_answer(agent_wir
     assert "桩生成器：没花真调用" in done["notes"]
     assert any(note.startswith("Agent：") for note in done["notes"])
     assert "mode" not in done
+    assert done["session_id"] is None
     assert done["request_ms"] >= 0
+    deltas = [payload["text"] for event, payload in frames if event == "delta"]
+    assert deltas == ["答案", "正文[依据1]"]
+    assert "".join(deltas) == done["answer"]
+    first_delta = kinds.index("delta")
+    assert kinds[:first_delta].count("step") == 4
+    assert "finalize" not in _nodes(frames[:first_delta])
+    assert rt.rag.answers == []
     assert rt.rag.searches[0]["law_filter"] == ("road_traffic_safety", "shenzhen_penalty")
     assert rt.rag.searches[0]["top_k"] == 6
 
@@ -194,8 +217,13 @@ def test_every_endpoint_hands_back_the_boot_error_while_the_agent_is_down() -> N
     boot_error = '未安装 langgraph：agent 这条路要 pip install -e ".[agent]"'
     http = _unbooted_http(boot_error)
 
-    for path in ("/health", "/qa", "/qa/stream"):
-        payload = None if path == "/health" else {"question": QUESTION}
+    for path in ("/health", "/qa", "/qa/stream", "/qa/resume", "/qa/resume/stream"):
+        if path == "/health":
+            payload = None
+        elif path.startswith("/qa/resume"):
+            payload = {"session_id": "s1", "value": {"region": "深圳"}}
+        else:
+            payload = {"question": QUESTION}
         resp = http.request("GET" if payload is None else "POST", path, json=payload)
 
         assert resp.status_code == 503, path
@@ -231,3 +259,129 @@ def test_the_fallback_asks_the_service_to_search_and_generate(agent_wire) -> Non
     assert rt.rag.answers[0]["question"].text == QUESTION
     assert answer.text == "答案正文[依据1]"
     assert answer.retrieval is not None and len(answer.retrieval.articles) == 2
+
+
+def test_a_place_question_pauses_the_wire_stream_with_an_interrupt(agent_wire) -> None:
+    remote, _rt, _rag_app = agent_wire
+    http = _agent_http(
+        _runner(remote, region=("深圳", "深圳"), clarify=True, sessions=InMemorySaver())
+    )
+
+    frames = _post_stream(http, "/qa/stream", {"question": QUESTION, "session_id": "s1"})
+
+    kinds = [event for event, _payload in frames]
+    assert [event for event in kinds if event != "delta"] == ["step", "interrupt"]
+    assert _nodes(frames) == ["region"]
+    payload = frames[-1][1]
+    assert payload["session_id"] == "s1"
+    assert payload["interrupt"]["value"]["type"] == "region_clarify"
+    assert payload["interrupt"]["value"]["place"] == "深圳"
+    assert payload["interrupt"]["value"]["laws"] == [PENALTY]
+    assert "done" not in kinds
+
+
+def test_the_wire_resume_stream_closes_the_clarified_session(agent_wire) -> None:
+    remote, _rt, _rag_app = agent_wire
+    http = _agent_http(
+        _runner(remote, region=("深圳", "深圳"), clarify=True, sessions=InMemorySaver())
+    )
+
+    primed = _post_stream(http, "/qa/stream", {"question": QUESTION, "session_id": "s1"})
+    assert primed[-1][0] == "interrupt"
+
+    frames = _post_stream(
+        http, "/qa/resume/stream", {"session_id": "s1", "value": {"region": "national"}}
+    )
+
+    kinds = [event for event, _payload in frames]
+    assert [event for event in kinds if event != "delta"] == ["step"] * 6 + ["done"]
+    assert _nodes(frames) == ["clarify", "agent", "tools", "agent", "finalize", "review"]
+    done = frames[-1][1]
+    assert done["question"] == QUESTION
+    assert done["answer"] == "答案正文[依据1]"
+    assert done["session_id"] == "s1"
+
+
+def test_the_wire_resume_answers_once_and_then_conflicts(agent_wire) -> None:
+    remote, _rt, _rag_app = agent_wire
+    http = _agent_http(
+        _runner(remote, region=("深圳", "深圳"), clarify=True, sessions=InMemorySaver())
+    )
+    _post_stream(http, "/qa/stream", {"question": QUESTION, "session_id": "s1"})
+    body = {"session_id": "s1", "value": {"region": "national"}}
+
+    answered = http.post("/qa/resume", json=body)
+
+    assert answered.status_code == 200
+    payload = answered.json()
+    assert payload["status"] == "ok"
+    assert payload["answer"] == "答案正文[依据1]"
+    assert payload["session_id"] == "s1"
+    assert payload["request_ms"] >= 0
+
+    conflict = http.post("/qa/resume", json=body)
+
+    assert conflict.status_code == 409
+    assert "没有等待澄清" in conflict.json()["detail"]
+
+    frames = _post_stream(http, "/qa/resume/stream", body)
+
+    assert [event for event, _payload in frames] == ["error"]
+    assert "没有等待澄清" in frames[-1][1]["message"]
+
+
+def test_the_resume_body_needs_a_session_and_a_non_empty_region(agent_wire) -> None:
+    remote, _rt, _rag_app = agent_wire
+    http = _agent_http(_runner(remote))
+
+    for body in (
+        {"session_id": "s1", "value": {}},
+        {"session_id": "s1", "value": {"region": ""}},
+        {"session_id": "s1", "value": None},
+        {"session_id": "s1"},
+    ):
+        resp = http.post("/qa/resume", json=body)
+        assert resp.status_code == 422, body
+
+
+def test_the_wire_remembers_the_first_round_under_one_session_id(agent_wire) -> None:
+    remote, _rt, _rag_app = agent_wire
+    runner = _runner(remote, plan=list(PLAN_THEN_ANSWER) * 2, sessions=InMemorySaver())
+    http = _agent_http(runner)
+
+    first = http.post("/qa", json={"question": QUESTION, "session_id": "s1"})
+    second = http.post("/qa", json={"question": "那记分呢？", "session_id": "s1"})
+
+    assert first.status_code == 200 and second.status_code == 200
+    assert second.json()["session_id"] == "s1"
+    prompt = runner.llm.prompts[2]
+    assert {"role": "user", "content": QUESTION} in prompt
+    assert {"role": "assistant", "content": "答案正文[依据1]"} in prompt
+
+
+def test_the_wire_stream_falls_back_to_the_service_without_an_llm(agent_wire) -> None:
+    remote, _rt, _rag_app = agent_wire
+    http = _agent_http(
+        _runner(remote, llm=AgentStubLLM(model="none", available=False), sessions=InMemorySaver())
+    )
+
+    frames = _post_stream(http, "/qa/stream", {"question": QUESTION, "session_id": "s1"})
+
+    kinds = [event for event, _payload in frames]
+    assert [event for event in kinds if event != "delta"] == ["done"]
+    assert frames[-1][1]["session_id"] == "s1"
+
+
+def test_a_runner_without_sessions_refuses_a_session_id_on_the_wire(agent_wire) -> None:
+    remote, _rt, _rag_app = agent_wire
+    http = _agent_http(_runner(remote))
+
+    refused = http.post("/qa", json={"question": QUESTION, "session_id": "s1"})
+
+    assert refused.status_code == 400
+    assert "没接会话存储" in refused.json()["detail"]
+
+    frames = _post_stream(http, "/qa/stream", {"question": QUESTION, "session_id": "s1"})
+
+    assert [event for event, _payload in frames] == ["error"]
+    assert "没接会话存储" in frames[-1][1]["message"]

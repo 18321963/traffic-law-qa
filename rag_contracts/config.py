@@ -258,6 +258,10 @@ class AgentConfig:
     3 条判据里错 1 条就会被拦下来。真跑完标定再回来改这个数。
     """
 
+    session_db: str = str(DATA_DIR / "sessions.db")
+    clarify: bool = False
+    history_turns: int = 5
+
 
 def agent_config() -> AgentConfig:
     return AgentConfig(
@@ -268,6 +272,9 @@ def agent_config() -> AgentConfig:
         temperature=_env_float("AGENT_TEMPERATURE", 0.0),
         retries=_env_int("AGENT_RETRIES", 2),
         review_min_score=_env_float("AGENT_REVIEW_MIN_SCORE", 0.6),
+        session_db=_env("AGENT_SESSION_DB", str(DATA_DIR / "sessions.db")),
+        clarify=_env_bool("AGENT_CLARIFY", False),
+        history_turns=_env_int("AGENT_HISTORY_TURNS", 5),
     )
 
 

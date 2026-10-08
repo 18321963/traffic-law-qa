@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
 from .disk import ParentChunk
+from .errors import QaError
 from .retrieval import MaterialPassage, RetrievalResult, WebFinding
 
 __all__ = [
@@ -11,6 +13,7 @@ __all__ = [
     "Question",
     "Review",
     "Answer",
+    "drain",
 ]
 
 
@@ -177,3 +180,18 @@ class Answer:
             parts.append("")
             parts += [f"注：{n}" for n in self.notes]
         return "\n".join(parts)
+
+
+def drain(
+    frames: Iterable[tuple[str, Any]], on_delta: Callable[[str], None] | None = None
+) -> Answer:
+    final: Answer | None = None
+    for kind, payload in frames:
+        if kind == "delta":
+            if on_delta is not None:
+                on_delta(payload)
+        elif kind == "answer":
+            final = payload
+    if final is None:
+        raise QaError("流里没有 answer 尾帧，无法定稿")
+    return final

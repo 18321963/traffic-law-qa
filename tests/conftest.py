@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import pytest
 
 from rag_contracts.domain.answer import Answer, Evidence, Question
@@ -68,6 +70,15 @@ NOTES = (
 )
 
 
+STREAM_PARTS = ("答案", "正文[依据1]")
+
+
+def answer_frames(answer: Answer, parts: Sequence[str] = STREAM_PARTS):
+    for part in parts:
+        yield "delta", part
+    yield "answer", answer
+
+
 class AgentStubService:
 
     llm_ready = True
@@ -78,6 +89,7 @@ class AgentStubService:
         self.parents = dict(PARENTS)
         self.searches: list[dict] = []
         self.answers: list[dict] = []
+        self.streams: list[dict] = []
         self.lookups: list[tuple[str, str | None]] = []
         self.material_calls: list[tuple[str, tuple[str, ...], int]] = []
 
@@ -156,6 +168,25 @@ class AgentStubService:
                 "materials": tuple(materials),
             }
         )
+        return self._answer(question, retrieval, timeliness, materials)
+
+    def answer_stream(
+        self, question, retrieval, *, timeliness=(), materials=(), parts=STREAM_PARTS
+    ):
+        self.streams.append(
+            {
+                "question": question,
+                "retrieval": retrieval,
+                "timeliness": tuple(timeliness),
+                "materials": tuple(materials),
+            }
+        )
+        return answer_frames(self._answer(question, retrieval, timeliness, materials), parts)
+
+    def stream(self, question, retrieval, *, timeliness=(), materials=()):
+        yield from answer_frames(self._answer(question, retrieval, timeliness, materials))
+
+    def _answer(self, question, retrieval, timeliness, materials) -> Answer:
         evidences = tuple(
             Evidence(
                 label=f"【依据{index}】",

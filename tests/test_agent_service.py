@@ -6,6 +6,7 @@ import pytest
 
 from rag_contracts import config
 from rag_contracts.domain.answer import Question
+from rag_contracts.domain.errors import QaError
 from rag_contracts.domain.retrieval import (
     MATERIAL_TOP_K_DEFAULT,
     RetrievalResult,
@@ -26,6 +27,7 @@ from conftest import (  # noqa: E402
     AgentStubLLM,
     AgentStubService,
 )
+from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 
 from agent_service.agents import region as region_mod  # noqa: E402
 from agent_service.agents.graph import AgentRunner  # noqa: E402
@@ -37,6 +39,7 @@ from agent_service.trace import render_trace  # noqa: E402
 ROAD_ID = "road_traffic_safety"
 PENALTY_ID = "shenzhen_penalty"
 QUESTION = "在深圳，醉酒驾驶机动车怎么处罚？"
+NATIONAL_NOTE = "这题涉及「深圳」：按全国法作答（未叠加地方性法规）"
 
 
 def _tool_call(call_id: str, name: str, arguments: dict) -> dict:
@@ -51,8 +54,9 @@ def _call(call_id: str, name: str, **arguments) -> dict:
     return _tool_call(call_id, name, arguments)
 
 
-def _region(text: str) -> list[dict]:
-    return [{"role": "assistant", "content": json.dumps({"region": text}, ensure_ascii=False)}]
+def _region(text: str, place: str | None = None) -> list[dict]:
+    payload = {"region": text} if place is None else {"region": text, "place": place}
+    return [{"role": "assistant", "content": json.dumps(payload, ensure_ascii=False)}]
 
 
 def _review(*judgments: bool) -> list[dict]:
@@ -115,11 +119,14 @@ def _runner(
     client=None,
     plan=(),
     region="深圳",
+    place=None,
     llm=None,
     review_llm=None,
     finishes=(),
     tokens=7,
     cfg=None,
+    sessions=None,
+    clarify=False,
 ):
     client = client if client is not None else AgentStubService()
     runner = AgentRunner(
@@ -127,12 +134,13 @@ def _runner(
         llm=llm
         if llm is not None
         else AgentStubLLM(list(plan), model="stub-agent", finishes=finishes, tokens=tokens),
-        region_llm=AgentStubLLM(_region(region), model="stub-region"),
+        region_llm=AgentStubLLM(_region(region, place), model="stub-region"),
         review_llm=review_llm
         if review_llm is not None
         else AgentStubLLM(_review(True), model="stub-review"),
-        cfg=cfg or config.AgentConfig(max_steps=2),
+        cfg=cfg or config.AgentConfig(max_steps=2, clarify=clarify),
         tracer=Tracer(),
+        sessions=sessions,
     )
     return runner, client
 
@@ -472,3 +480,123 @@ def test_merge_notes_keep_the_retrieval_notes_verbatim() -> None:
     merged = merge_retrievals([first.to_dict()], question=QUESTION, max_evidence=2)
 
     assert merged.notes == tuple(f"检索#1：{note}" for note in NOTES)
+
+
+class _NoStreamService:
+
+    def __init__(self, inner: AgentStubService) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str):
+        if name == "answer_stream":
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+
+class _TruncatedStreamService(AgentStubService):
+
+    def answer_stream(self, question, retrieval, *, timeliness=(), materials=()):
+        yield "delta", "答案"
+
+
+def test_the_draft_answer_streams_out_before_the_finalize_step() -> None:
+    runner, client = _runner(plan=PLAN_THEN_ANSWER)
+
+    events = list(runner.stream(QUESTION))
+
+    assert [kind for kind, _payload in events] == [
+        "step",
+        "step",
+        "step",
+        "step",
+        "delta",
+        "delta",
+        "step",
+        "step",
+        "answer",
+    ]
+    deltas = [payload["text"] for kind, payload in events if kind == "delta"]
+    assert deltas == ["答案", "正文[依据1]"]
+    assert "".join(deltas) == "答案正文[依据1]"
+    assert events[6][1]["node"] == "finalize", "delta 应紧贴最后一次规划之后、finalize 定稿之前"
+    done = events[-1]
+    assert done[0] == "answer"
+    assert done[1]["answer"] == "答案正文[依据1]"
+    assert len(client.streams) == 1 and client.answers == []
+
+
+def test_the_done_frame_stays_authoritative_when_the_review_downgrades() -> None:
+    runner, _client = _runner(
+        plan=PLAN_THEN_ANSWER, cfg=config.AgentConfig(max_steps=2, review_min_score=1.5)
+    )
+
+    events = list(runner.stream(QUESTION))
+
+    deltas = [payload["text"] for kind, payload in events if kind == "delta"]
+    assert "".join(deltas) == "答案正文[依据1]"
+    done = events[-1]
+    assert done[0] == "answer"
+    assert done[1]["answer"].startswith(REVIEW_DOWNGRADE_ANSWER)
+    assert done[1]["review"]["passed"] is False
+
+
+def test_a_service_without_answer_stream_keeps_the_plain_answer_call() -> None:
+    inner = AgentStubService()
+    runner, _client = _runner(client=_NoStreamService(inner), plan=PLAN_THEN_ANSWER)
+
+    events = list(runner.stream(QUESTION))
+
+    assert [kind for kind, _payload in events] == [
+        "step",
+        "step",
+        "step",
+        "step",
+        "step",
+        "step",
+        "answer",
+    ]
+    assert events[-1][1]["answer"] == "答案正文[依据1]"
+    assert len(inner.answers) == 1 and inner.streams == []
+
+
+def test_a_stream_that_ends_before_the_final_frame_raises() -> None:
+    runner, _client = _runner(client=_TruncatedStreamService(), plan=PLAN_THEN_ANSWER)
+
+    with pytest.raises(QaError, match="流里没有 answer 尾帧"):
+        list(runner.stream(QUESTION))
+
+
+def test_a_national_resume_notes_the_place_it_skipped() -> None:
+    runner, _client = _runner(
+        plan=PLAN_THEN_ANSWER, region="深圳", place="深圳", clarify=True, sessions=InMemorySaver()
+    )
+
+    first = list(runner.stream(QUESTION, session_id="s1"))
+    assert [kind for kind, _payload in first] == ["step", "interrupt"]
+
+    resumed = list(runner.resume_stream("s1", {"region": "national"}))
+
+    assert resumed[-1][0] == "answer"
+    assert NATIONAL_NOTE in resumed[-1][1]["notes"]
+
+
+def test_a_national_verdict_without_a_place_gets_no_note() -> None:
+    runner, _client = _runner(plan=PLAN_THEN_ANSWER, region="national", clarify=True)
+
+    events = list(runner.stream(QUESTION))
+
+    assert events[-1][0] == "answer"
+    assert [note for note in events[-1][1]["notes"] if "按全国法作答" in note] == []
+
+
+def test_the_national_note_also_lands_on_the_non_streaming_resume() -> None:
+    runner, _client = _runner(
+        plan=PLAN_THEN_ANSWER, region="深圳", place="深圳", clarify=True, sessions=InMemorySaver()
+    )
+
+    list(runner.stream(QUESTION, session_id="s1"))
+
+    status, payload = runner.resume("s1", {"region": "national"})
+
+    assert status == "ok"
+    assert NATIONAL_NOTE in payload["notes"]

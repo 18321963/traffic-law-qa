@@ -16,7 +16,8 @@ ARG PYPI_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 RUN pip install --no-cache-dir --index-url ${PYPI_INDEX} ".[agent,api,langfuse]" \
  && rm -rf /app/build /app/*.egg-info
 
-RUN useradd --create-home --uid 1000 app \
+RUN mkdir -p /app/data \
+ && useradd --create-home --uid 1000 app \
  && chown -R app:app /app
 USER app
 
