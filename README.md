@@ -85,7 +85,7 @@
 | `agent_service/` | Agent 这一侧（另一个进程，下面单列）：`agents/` 图与节点 · `tools/` 工具面 · `merge.py` / `websearch.py` / `trace.py` / `prompts.py` · `api/` 自己的 HTTP 面 · `container.py` ★ agent 侧唯一装配点（只造 `RagClient`） |
 | `eval/` | 评测与变异自检：`harness.py` / `singlehop.py` / `multihop.py` / `corpus.py` ＋ `mutations/` 四张表 |
 | `mcp_server/` | MCP 适配层：stdio → HTTP，薄客户端，不载模型 |
-| `deploy/` | `docker-compose.yml`（etcd / MinIO / Milvus / rag 服务 / agent 服务）· `reinstall.sh` |
+| `deploy/` | `docker-compose.yml`（etcd / MinIO / Milvus / rag 服务 / agent 服务）· `docker-compose.dev.yml`（开发覆盖）· `build.sh` · `watchdog.sh` · `backup.sh` · `reinstall.sh` · `运维手册.md` |
 
 两个进程之间只有 HTTP：`agent_service ──RagClient──▶ rag_service`。agent 侧不 import `rag_service`（AST 门 + 子进程拦截门都盯着），rag 侧也不 import `agent_service` —— 反向那条同样是门禁。
 
@@ -117,7 +117,7 @@
 ├── agent_service/         Agent 这一侧（下面单列，另一个进程，调 rag 只走 HTTP）
 ├── eval/                  评测与变异自检（顶层包，`python -m eval`）
 ├── mcp_server/            MCP 适配层：stdio → HTTP，薄客户端，不载模型
-├── deploy/                docker-compose.yml + reinstall.sh
+├── deploy/                docker-compose.yml + dev 覆盖 + build/watchdog/backup 脚本 + 运维手册
 ├── tests/                 离线用例，不碰 Milvus 也不调模型
 ├── 法规知识库/            docx + pdf（公开法规原文，建库真源）→ text → parsed → chunks → index；models/ 放本地权重
 ├── data/                  题集源语料 + 四份桶文件 + 上传台账（documents.db）（跑批轨迹不进版本库）
@@ -216,7 +216,7 @@ rag 那条路只剩两档；agent 循环搬走之后，它有自己的端点（�
 ### 环境要求
 
 - Python 3.10+
-- Docker Desktop —— 跑 Milvus 用（只想裸跑也得起它一个：`docker compose -f deploy/docker-compose.yml up -d --wait standalone`）
+- Docker Desktop —— 跑 Milvus 用（只想裸跑也得起它一个：`docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up -d --wait standalone`）
 - GPU 可选：有 CUDA 就用 GPU 跑嵌入与重排；没有也能跑，只是慢
 
 ### 安装
@@ -245,21 +245,28 @@ Copy-Item .env.example .env     # 填 LLM_API_KEY
 ### 启动
 
 ```powershell
-# 一路起全（Docker）：Milvus + 知识库服务（compose 文件在 deploy/ 下）
-docker compose -f deploy/docker-compose.yml up -d --build
+# 一路起全（Docker）：Milvus + 知识库服务 + agent（compose 文件在 deploy/ 下）
+deploy/build.sh                                  # 建两个镜像并上线（直连 buildx；禁用 compose up --build）
+docker compose -f deploy/docker-compose.yml up -d
 docker compose -f deploy/docker-compose.yml ps   # 等五个容器 healthy
-curl.exe localhost:8000/health  # 必须带 .exe：PowerShell 的 curl 是 IWR 别名
+curl.exe localhost:8001/health  # 必须带 .exe：PowerShell 的 curl 是 IWR 别名
 ```
 
-镜像里两个服务都在 compose 里：`app`（rag 服务，宿主 :8000；挂 GPU、四个命名卷、模型只读挂载）与 `agent`（agent 服务，宿主 :8001 → 容器内 :8000；不挂 GPU，挂一卷 `tlr_sessions` 存会话记忆、不载模型，rag 地址由 `RAG_BASE_URL=http://app:8000` 给，地区澄清默认开）。agent 的 healthcheck 读的是 `/health` 的 body：自己 `status=ok` 且内嵌的 `rag.status=ok` 才算健康，所以 rag 断掉它就会变 unhealthy。
+生产面（base compose）**宿主只见 8001**（agent 是唯一入口；MinIO 凭据由 `deploy/.env` 两键必填提供）。本地开发用覆盖文件恢复全部端口与默认凭据：
 
-`--build` 省不得：镜像把源码烤进去了，不带它跑的还是上一版，且不报任何错。首次构建要下 CUDA 版 torch（约 2.8GB），之后有缓存就快。构建中途别 Ctrl-C：torch 下到一半断了不落缓存，下次还得重下。两个镜像构建完的体量：rag 6.03GB（大头就是 CUDA 版 torch），agent 263MB。
+```powershell
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up -d
+```
+
+镜像里两个服务都在 compose 里：`app`（rag 服务，生产面不占宿主端口、dev 覆盖暴露 :8000；挂 GPU、四个命名卷、模型只读挂载）与 `agent`（agent 服务，宿主 :8001 → 容器内 :8000；不挂 GPU，挂一卷 `tlr_sessions` 存会话记忆、不载模型，rag 地址由 `RAG_BASE_URL=http://app:8000` 给，地区澄清默认开）。agent 的 healthcheck 读的是 `/health` 的 body：自己 `status=ok` 且内嵌的 `rag.status=ok` 才算健康，所以 rag 断掉它就会变 unhealthy。
+
+改了代码要重建：跑 `deploy/build.sh`（等价直连 buildx 两条 + 把 app/agent 滚动上线）。镜像把源码烤进去了，不重建跑的还是上一版，且不报任何错；**也别用 `docker compose up --build`**（本机 compose v5.4.0 内嵌 bake 出错，报错表面像网络问题）或 `docker builder prune`。首次构建要下 CUDA 版 torch（约 2.8GB），之后有缓存就快。构建中途别 Ctrl-C：torch 下到一半断了不落缓存，下次还得重下。两个镜像构建完的体量：rag 6.03GB（大头就是 CUDA 版 torch），agent 263MB。
 
 agent 一直 `unhealthy` 怎么办 —— 两种成因，修法同一条。① 启动时就探不到 rag（`boot_error`）：agent 进程本身是活的，`restart: unless-stopped` 不会触发（Docker 没有「unhealthy 就重启」这回事），而 lifespan 只跑一次，所以它不会自愈；② 起来之后 rag 又断了：healthcheck 变红，进程同样不重启。**先修好 rag，再 `docker compose -f deploy/docker-compose.yml restart agent`** —— 重启才会重跑一次 lifespan、重新探一遍 rag。
 
 ```powershell
 # 裸跑（改代码即时生效）
-docker compose -f deploy/docker-compose.yml up -d --wait standalone   # 只起 Milvus
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up -d --wait standalone   # 只起 Milvus（dev 覆盖才有宿主 19530）
 python -m rag_service.cli.build build        # 建库，docx 没变就跳过解析
 python -m rag_service "醉驾怎么处罚"          # 提问（线性管道）
 python -m rag_service.cli.serve              # 起 rag 服务（另开一个终端）
@@ -409,7 +416,7 @@ ruff check .
 ├── eval/                    评测（harness / singlehop / multihop / corpus）＋ 变异自检 mutations/
 ├── mcp_server/              MCP 适配层：tools.py（工具表，不 import SDK）· main.py（stdio 装配）
 ├── api_contracts/           openapi.json · client.py（薄 httpx 客户端）· regen.py
-├── deploy/                  docker-compose.yml · reinstall.sh
+├── deploy/                  docker-compose.yml · docker-compose.dev.yml · build.sh · watchdog.sh · backup.sh · reinstall.sh · 运维手册.md
 ├── tests/                   离线用例（不碰 Milvus、不调模型）
 ├── 法规知识库/              docx + pdf（建库真源）· text · parsed · chunks · index · models
 ├── data/                    题集与桶文件 · documents.db · uploads/ · traces/
@@ -427,6 +434,8 @@ ruff check .
 | `agent_service/Dockerfile` | agent 服务镜像：同一个底（python:3.11-slim、非 root uid 1000、`EXPOSE 8000`），装 `.[agent,api,langfuse]`，只 COPY 三个包（`rag_contracts/` `api_contracts/` `agent_service/`）—— 没有 torch、没有 Milvus 客户端、也没有 `法规知识库/` 与 `data/`：它不载模型；自己的会话记忆写在挂载卷上（镜像里先把 `/app/data` 的属主铺好） |
 | `deploy/docker-compose.yml` | 五个服务：etcd / MinIO / Milvus standalone / app（rag）/ agent。app 挂 GPU、四个命名卷、健康检查打 `/health`；agent 只发布 8001、不挂 GPU，挂一卷 `tlr_sessions:/app/data`（会话记忆）并置 `AGENT_CLARIFY=1`，healthcheck 读 `/health` 的 body（要 `rag.status=ok`，不是只看 200）。顶层 `name: agent` 钉住项目名（否则项目名随目录走，挪文件会换一组空卷）；`build.context` / `env_file` / 卷路径都相对本文件解析，**但 `build.dockerfile` 相对 `context` 解析**（`context: ..` 时写 `rag_service/Dockerfile`，写成 `../rag_service/Dockerfile` 会跑去找仓库外那一层、且 `config` 不报错）—— 固定用 `docker compose -f deploy/docker-compose.yml` 起 |
 | `deploy/reinstall.sh` | 重装 editable 包：探 Clash 代理 → `pip install -e ".[all]"`（依赖组可用第一个参数换，默认 `all`）→ 换到仓外验证六个包 import 装没装上 |
+| `deploy/docker-compose.dev.yml` | 开发覆盖：恢复 8000/9000/9001/19530/9091 宿主端口与默认 MinIO 凭据（字面值优先于 base 的必填插值） |
+| `deploy/build.sh` · `watchdog.sh` · `backup.sh` · `运维手册.md` | 重建镜像（直连 buildx，禁用 `up --build`）· 探活告警（单次/`--loop`，可 POST webhook）· 冷备与恢复（`--keep`/`--restore`）· 部署/巡检/告警/并发闸/成本/会话清理/备份恢复/密钥轮换/口径五条的作业面 |
 | `pyproject.toml` | 依赖与打包的唯一真源：基础三依赖 + `agent` / `api` / `langfuse` / `local` / `mcp` / `milvus` / `pdf` / `dev` / `all` 可选组、四个短命令、pytest 与 ruff 配置；`packages.find` 覆盖 `rag_contracts*` / `rag_service*` / `agent_service*` / `eval*` / `mcp_server*` / `api_contracts*`（顶层包与模式双向比对由 `tests/test_contracts_architecture.py` 盯着） |
 | `requirements.txt` | 只镜像基础三依赖，给「不装整包、只装依赖」的场景（`pymilvus` 已移到 `milvus` 组，不在这里）；依赖的真源仍是 `pyproject.toml` |
 | `.env.example` | 配置模板：三段模型端点、`RAG_*` 检索参数、`AGENT_*`、Langfuse、博查 |
@@ -552,7 +561,7 @@ ruff check .
 | `api_contracts/openapi.json` | 服务端契约（`app.openapi()` 生成后提交，此后为冻结面） |
 | `api_contracts/client.py` | 薄 httpx 客户端：进出一律 dict，4xx/5xx 一律抛 `QaError`；MCP 与 eval 的 HTTP 臂共用 |
 | `api_contracts/regen.py` | 重出 `openapi.json` |
-| `deploy/docker-compose.yml` · `deploy/reinstall.sh` | 见「仓库根」一节 |
+| `deploy/`（compose · dev 覆盖 · build/watchdog/backup · reinstall · 运维手册） | 见「仓库根」一节 |
 
 ### tests/
 

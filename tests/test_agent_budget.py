@@ -11,6 +11,7 @@ pytest.importorskip("langgraph", reason='agent 图要 pip install -e ".[agent]"'
 
 from conftest import AgentStubLLM, AgentStubService  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 
 from agent_service.agents.graph import AgentRunner  # noqa: E402
 from agent_service.api import app as server  # noqa: E402
@@ -211,19 +212,56 @@ def test_every_run_endpoint_shares_the_gate_streams_included(wire, monkeypatch, 
     assert runner.stream_calls == 0
 
 
-def test_a_real_run_keeps_the_ledger_equal_to_its_own_usage_channel(tmp_path, monkeypatch) -> None:
+def test_a_real_run_keeps_the_ledger_equal_to_its_own_usage_events(tmp_path, monkeypatch) -> None:
     ledger = tmp_path / "usage.db"
     monkeypatch.setattr(budget, "db_path", lambda: ledger)
     runner = _real_runner()
 
     state = runner.invoke(QUESTION)
 
-    rows = state["usage"]
+    rows = [*state["usage"], *state["usage_extra"]]
     assert len(rows) >= 2
     assert budget.used_today(path=ledger) == (
         sum(int(row["total_tokens"]) for row in rows),
         len(rows),
     )
+
+
+def _clarify_runner(sessions) -> AgentRunner:
+    return AgentRunner(
+        AgentStubService(),
+        llm=AgentStubLLM([dict(message) for message in PLAN], model="stub-agent"),
+        region_llm=AgentStubLLM(_region_line("national", place="深圳"), model="stub-region"),
+        review_llm=AgentStubLLM(_review_line(True) * 4, model="stub-review"),
+        cfg=config.AgentConfig(max_steps=2, clarify=True),
+        tracer=Tracer(),
+        sessions=sessions,
+    )
+
+
+def test_a_clarify_interrupt_records_the_region_call(tmp_path, monkeypatch) -> None:
+    ledger = tmp_path / "usage.db"
+    monkeypatch.setattr(budget, "db_path", lambda: ledger)
+    runner = _clarify_runner(InMemorySaver())
+
+    kind, _payload = runner.ask_payload(QUESTION, material_ids=(), session_id="s1")
+
+    assert kind == "interrupted"
+    assert budget.used_today(path=ledger) == (3, 1)
+
+
+def test_a_resume_does_not_recount_the_interrupted_turn(tmp_path, monkeypatch) -> None:
+    ledger = tmp_path / "usage.db"
+    monkeypatch.setattr(budget, "db_path", lambda: ledger)
+    runner = _clarify_runner(InMemorySaver())
+
+    runner.ask_payload(QUESTION, material_ids=(), session_id="s1")
+    assert budget.used_today(path=ledger) == (3, 1)
+
+    status, _payload = runner.resume("s1", {"region": "national"})
+
+    assert status == "ok"
+    assert budget.used_today(path=ledger) == (21, 5)
 
 
 def test_a_finished_run_records_the_sum_of_every_event(tmp_path, monkeypatch) -> None:

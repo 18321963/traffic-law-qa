@@ -25,7 +25,8 @@ __all__ = [
 USAGE = """成本闸（R3）：按 UTC 日累计 LLM token 用量，超额拦问答入口
 
 账本：data/usage.db（WAL），表 usage_daily(day TEXT PRIMARY KEY, tokens INTEGER, calls INTEGER)，
-day = UTC 日期；run 出口（正常 / 中断 / 异常三路）取状态快照 usage 通道全部事件求和记账。
+day = UTC 日期；run 出口（正常 / 中断 / 异常三路）取状态快照 usage 与 usage_extra 两个通道全部事件求和记账
+（规划轮在 usage；地区识别 / 复核 / 答案生成在 usage_extra；中断轮已记的用量由澄清节点在 resume 续跑时清零，不重复入账）。
 写库失败只打 stderr（前缀 [usage.db] 记账失败），不拦请求。
 
 环境变量：AGENT_DAILY_TOKEN_BUDGET（默认 0 = 关；>0 时进入 run 前查当日已用，已达 → 429）。
@@ -121,7 +122,9 @@ def record_usage(tokens: int, calls: int, *, path: Path | None = None, now: floa
 
 
 def state_tokens(state) -> tuple[int, int]:
-    rows = (state.get("usage") or ()) if isinstance(state, dict) else ()
+    if not isinstance(state, dict):
+        return 0, 0
+    rows = [*(state.get("usage") or ()), *(state.get("usage_extra") or ())]
     tokens = sum(int(row.get("total_tokens") or 0) for row in rows)
     return tokens, len(rows)
 

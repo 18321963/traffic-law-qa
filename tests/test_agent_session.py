@@ -400,6 +400,7 @@ def test_parse_region_reads_both_fields_and_survives_garbage() -> None:
     assert parse('{"region": "?", "place": "?"}') == (region_mod.REGION_UNKNOWN, "")
     assert parse('{"region": "？", "place": " ？ "}') == (region_mod.REGION_UNKNOWN, "")
     assert parse('{"region": "全国", "place": "全国"}') == (region_mod.REGION_UNKNOWN, "")
+    assert parse('{"region": "空串", "place": "空串"}') == (region_mod.REGION_UNKNOWN, "")
     assert parse('{"region": "national", "place": "?"}') == ("national", "")
     assert parse("不是 JSON") == (region_mod.REGION_UNKNOWN, "")
     assert parse("") == (region_mod.REGION_UNKNOWN, "")

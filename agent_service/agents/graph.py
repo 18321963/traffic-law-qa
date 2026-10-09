@@ -243,6 +243,7 @@ class AgentRunner:
             "material_ids": list(material_ids),
             "steps": 0,
             "usage": [],
+            "usage_extra": [],
             "truncated": 0,
             "conversation": [],
         }

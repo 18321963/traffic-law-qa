@@ -20,7 +20,7 @@ __all__ = [
 
 HISTORY_ANSWER_CHARS = 300
 
-_NOT_A_PLACE = frozenset({"?", "？", "全国"})
+_NOT_A_PLACE = frozenset({"?", "？", "全国", "空串"})
 
 
 def national_law_ids(laws: Sequence[LawInfo]) -> tuple[str, ...]:
@@ -106,6 +106,7 @@ def make_region_node(llm: LLM, laws: Sequence[LawInfo], *, history_turns: int = 
             "materials": Overwrite([]),
             "steps": Overwrite(0),
             "usage": Overwrite([]),
+            "usage_extra": Overwrite([]),
             "truncated": Overwrite(0),
             "call_keys": Overwrite([]),
             "answer": None,
@@ -122,8 +123,14 @@ def make_region_node(llm: LLM, laws: Sequence[LawInfo], *, history_turns: int = 
         prompt.extend({"role": role, "content": content} for role, content in reset["history"])
         prompt.append({"role": "user", "content": state["question"]})
 
-        reply, _usage, _finish = llm.chat(prompt, temperature=0.0, name="llm.region")
+        reply, usage, _finish = llm.chat(prompt, temperature=0.0, name="llm.region")
         region, place = _parse_region(reply.get("content") or "")
-        return {**reset, "region": region, "region_scope": law_scope(region, laws), "place": place}
+        return {
+            **reset,
+            "region": region,
+            "region_scope": law_scope(region, laws),
+            "place": place,
+            "usage_extra": Overwrite([usage] if usage else []),
+        }
 
     return region_node

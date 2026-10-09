@@ -23,7 +23,7 @@ def _resume_region(value: object) -> str:
 
 
 def make_clarify_node(laws: Sequence[LawInfo]):
-    from langgraph.types import interrupt
+    from langgraph.types import Overwrite, interrupt
 
     def clarify_node(state: AgentState) -> dict:
         value = interrupt(
@@ -39,6 +39,6 @@ def make_clarify_node(laws: Sequence[LawInfo]):
         if not scope:
             region = "national"
             scope = national_law_ids(laws)
-        return {"region": region, "region_scope": scope}
+        return {"region": region, "region_scope": scope, "usage_extra": Overwrite([])}
 
     return clarify_node

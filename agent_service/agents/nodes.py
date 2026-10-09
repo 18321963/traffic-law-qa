@@ -305,6 +305,10 @@ def make_finalize_node(
                 timeliness=tuple(state.get("external") or ()),
                 materials=tuple(state.get("materials") or ()),
             )
-        return {"answer": replace(answer, notes=answer.notes + tuple(notes)), "search_log": extra}
+        return {
+            "answer": replace(answer, notes=answer.notes + tuple(notes)),
+            "search_log": extra,
+            "usage_extra": [answer.usage] if answer.usage else [],
+        }
 
     return finalize_node

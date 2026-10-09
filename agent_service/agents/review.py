@@ -146,7 +146,7 @@ def make_review_node(llm: LLM, cfg: config.AgentConfig):
                     ),
                 }
             try:
-                reply, _usage, finish_reason = llm.chat(
+                reply, usage, finish_reason = llm.chat(
                     _build_payload(answer.question, answer.text, listed),
                     temperature=0.0,
                     name="llm.review",
@@ -173,6 +173,7 @@ def make_review_node(llm: LLM, cfg: config.AgentConfig):
                         answer,
                         notes=answer.notes + (f"复核未完成：{reason}，本次未拦截",),
                     ),
+                    "usage_extra": [usage] if usage else [],
                 }
 
         supported: list[int] = []
@@ -226,6 +227,7 @@ def make_review_node(llm: LLM, cfg: config.AgentConfig):
                 notes=answer.notes + tuple(notes),
                 review=review,
             ),
+            "usage_extra": [usage] if usage else [],
         }
 
     return review_node

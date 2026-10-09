@@ -24,6 +24,7 @@ class AgentState(TypedDict, total=False):
     material_ids: list[str]
     steps: Annotated[int, operator.add]
     usage: Annotated[list[dict], operator.add]
+    usage_extra: Annotated[list[dict], operator.add]
     truncated: Annotated[int, operator.add]
     call_keys: Annotated[list[str], operator.add]
 
