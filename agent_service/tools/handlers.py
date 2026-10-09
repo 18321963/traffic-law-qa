@@ -26,11 +26,6 @@ from .render import render_tool_result
 
 __all__ = ["ToolCall", "ToolEnv", "ToolOutcome", "retrieval_digest"]
 
-NO_FRESH_EVIDENCE = (
-    "注意：本轮一条新证据都没取到（命中的条上一轮都已经给过你了）。同一个方向换词换不出新东西 ——"
-    "要么改问你真正缺的那个要素，要么就此停下作答。\n"
-)
-
 NO_FRESH_MATERIAL = (
     "注意：这些段上一轮已经给过你了，材料里没有别的相关内容。就此停下作答，或换个说法再试一次。\n"
 )
@@ -133,8 +128,6 @@ def search_law(env: ToolEnv, call: ToolCall) -> ToolOutcome:
         snippet_chars=env.cfg.snippet_chars,
         match_text=match_text,
     )
-    if not {hit.article.parent_id for hit in result.articles} - call.seen:
-        text = NO_FRESH_EVIDENCE + text
     return ToolOutcome(text, retrieval=result)
 
 
