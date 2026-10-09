@@ -261,6 +261,7 @@ class AgentConfig:
     session_db: str = str(DATA_DIR / "sessions.db")
     clarify: bool = False
     history_turns: int = 5
+    tool_timeout: float = 15.0
 
 
 def agent_config() -> AgentConfig:
@@ -275,6 +276,7 @@ def agent_config() -> AgentConfig:
         session_db=_env("AGENT_SESSION_DB", str(DATA_DIR / "sessions.db")),
         clarify=_env_bool("AGENT_CLARIFY", False),
         history_turns=_env_int("AGENT_HISTORY_TURNS", 5),
+        tool_timeout=_env_float("AGENT_TOOL_TIMEOUT", 15.0),
     )
 
 

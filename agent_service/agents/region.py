@@ -107,6 +107,7 @@ def make_region_node(llm: LLM, laws: Sequence[LawInfo], *, history_turns: int = 
             "steps": Overwrite(0),
             "usage": Overwrite([]),
             "truncated": Overwrite(0),
+            "call_keys": Overwrite([]),
             "answer": None,
             "history": _build_history(
                 state.get("conversation") or (),

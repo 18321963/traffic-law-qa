@@ -6,7 +6,7 @@ import pytest
 
 from rag_contracts import config
 from rag_contracts.domain.answer import Question
-from rag_contracts.domain.errors import QaError
+from rag_contracts.domain.errors import QaError, QaTimeout
 from rag_contracts.domain.retrieval import (
     MATERIAL_TOP_K_DEFAULT,
     RetrievalResult,
@@ -34,6 +34,7 @@ from agent_service.agents.graph import AgentRunner  # noqa: E402
 from agent_service.agents.nodes import make_agent_node, make_tools_node  # noqa: E402
 from agent_service.merge import merge_retrievals  # noqa: E402
 from agent_service.prompts import REVIEW_DOWNGRADE_ANSWER  # noqa: E402
+from agent_service.tools import handlers  # noqa: E402
 from agent_service.trace import render_trace  # noqa: E402
 
 ROAD_ID = "road_traffic_safety"
@@ -252,6 +253,162 @@ def test_a_missing_article_comes_back_as_the_service_note() -> None:
     assert client.lookups == [("第九十九条", None)]
     assert update["messages"][0]["content"] == "库里没有任何一部法规有第 99 条。"
     assert update["search_log"] == []
+
+
+class _EventRecorder(Tracer):
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    def observation(self, name: str, as_type: str = "span", **fields):
+        self.events.append({"name": name, "as_type": as_type, **fields})
+        return self
+
+
+def test_an_identical_repeat_call_is_skipped_without_executing() -> None:
+    client = AgentStubService()
+    call = _call("c1", "search_law", query=QUESTION)
+    node = _tools_node(client)
+
+    first = node(_state(call))
+    second = node(_state(call, call_keys=first["call_keys"]))
+
+    assert len(first["call_keys"]) == 1
+    assert len(client.searches) == 1
+    assert second["call_keys"] == []
+    assert "已跳过执行" in second["messages"][0]["content"]
+    assert second["search_log"] == []
+
+
+def test_web_search_repeats_are_never_skipped(monkeypatch) -> None:
+    client = AgentStubService()
+    fetched: list[str] = []
+
+    def fake_fetch(query, *, start=1, count=None):
+        fetched.append(query)
+        return [], f"联网#{start}「{query}」"
+
+    monkeypatch.setattr(handlers, "fetch_web", fake_fetch)
+    call = _call("c1", "web_search", query="深圳 电动自行车 新规")
+    node = _tools_node(client)
+
+    first = node(_state(call))
+    second = node(_state(call, call_keys=first["call_keys"]))
+
+    assert first["call_keys"] == []
+    assert fetched == ["深圳 电动自行车 新规", "深圳 电动自行车 新规"]
+    assert "已跳过" not in second["messages"][0]["content"]
+
+
+def test_a_failed_call_is_not_remembered_so_the_retry_still_runs() -> None:
+    client = AgentStubService()
+    attempts: list[str] = []
+    original = client.search
+
+    def flaky(question, top_k=None, **kwargs):
+        attempts.append(question)
+        if len(attempts) == 1:
+            raise QaError("打不通 rag 服务：Connection refused")
+        return original(question, top_k, **kwargs)
+
+    client.search = flaky
+    call = _call("c1", "search_law", query=QUESTION)
+    node = _tools_node(client)
+
+    first = node(_state(call))
+    second = node(_state(call, call_keys=first["call_keys"]))
+
+    assert "检索失败" in first["messages"][0]["content"]
+    assert first["call_keys"] == []
+    assert attempts == [QUESTION, QUESTION]
+    assert "已跳过" not in second["messages"][0]["content"]
+    assert len(second["search_log"]) == 1
+
+
+def test_a_timeout_is_classified_apart_from_a_generic_failure() -> None:
+    client = AgentStubService()
+
+    def slow(question, top_k=None, **kwargs):
+        raise QaTimeout("POST /qa 超时（4.5 秒）：ReadTimeout")
+
+    client.search = slow
+    cfg = config.AgentConfig(max_steps=2, tool_timeout=4.5)
+    node = make_tools_node(client, cfg, observer=Tracer())
+
+    update = node(_state(_call("c1", "search_law", query=QUESTION)))
+
+    text = update["messages"][0]["content"]
+    assert "检索超时（超过 4.5 秒仍未返回）" in text
+    assert "检索失败" not in text
+    assert update["call_keys"] == []
+
+
+def test_every_retrieval_tool_carries_the_timeout_budget() -> None:
+    client = AgentStubService()
+    cfg = config.AgentConfig(max_steps=2, tool_timeout=4.5)
+    node = make_tools_node(client, cfg, observer=Tracer())
+
+    node(_state(_call("c1", "search_law", query=QUESTION)))
+    node(_state(_call("c2", "get_article", article_no="第九十一条")))
+    node(_state(_call("c3", "search_materials", query="培训费")))
+
+    assert client.tool_timeouts == [
+        ("search", 4.5),
+        ("get_article", 4.5),
+        ("search_materials", 4.5),
+    ]
+
+
+def test_blocked_calls_still_leave_one_event_each() -> None:
+    client = AgentStubService()
+    recorder = _EventRecorder()
+    node = make_tools_node(client, config.AgentConfig(max_steps=2), observer=recorder)
+
+    first = node(_state(_call("c1", "search_law", query=QUESTION)))
+    node(
+        _state(
+            _call("c2", "拉格朗日插值"),
+            _call("c3", "search_law", query=QUESTION, law_name="深圳经济特区停车管理条例"),
+            _call("c4", "get_article"),
+            _call("c5", "search_law", query=QUESTION),
+            call_keys=first["call_keys"],
+        )
+    )
+
+    names = [event["name"] for event in recorder.events if event["as_type"] == "span"]
+    assert "未知工具" in names
+    assert "法规无法确定" in names
+    assert "参数不合法" in names
+    assert "重复调用已跳过" in names
+    unknown = next(event for event in recorder.events if event["name"] == "未知工具")
+    assert unknown["input"]["tool"] == "拉格朗日插值"
+
+
+def test_a_broken_article_lookup_comes_back_as_a_receipt() -> None:
+    client = AgentStubService()
+
+    def broken(article_no, law_name=None, *, timeout=None):
+        raise QaError("打不通 rag 服务：Connection refused")
+
+    client.get_article = broken
+
+    update = _tools_node(client)(_state(_call("c1", "get_article", article_no="第九十一条")))
+
+    assert "检索失败" in update["messages"][0]["content"]
+    assert update["search_log"] == []
+
+
+def test_a_broken_materials_lookup_comes_back_as_a_receipt() -> None:
+    client = AgentStubService()
+
+    def broken(query, doc_ids, *, top_k=5, timeout=None):
+        raise QaError("打不通 rag 服务：Connection refused")
+
+    client.search_materials = broken
+
+    update = _tools_node(client)(_state(_call("c1", "search_materials", query="培训费")))
+
+    assert "检索失败" in update["messages"][0]["content"]
+    assert update["materials"] == []
 
 
 def test_merge_takes_the_articles_straight_from_the_payload() -> None:

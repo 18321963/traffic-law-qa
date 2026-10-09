@@ -12,7 +12,7 @@ import httpx  # noqa: E402
 
 from api_contracts import RagClient  # noqa: E402
 from rag_contracts.domain.answer import Question  # noqa: E402
-from rag_contracts.domain.errors import QaError  # noqa: E402
+from rag_contracts.domain.errors import QaError, QaTimeout  # noqa: E402
 from rag_contracts.domain.retrieval import RetrievalResult  # noqa: E402
 from rag_service.api.app import app  # noqa: E402
 
@@ -154,3 +154,14 @@ def test_an_unreachable_service_comes_back_as_a_qa_error_too():
         _stub(handler).health()
 
     assert "connection refused" in str(excinfo.value)
+
+
+def test_a_slow_service_comes_back_as_the_timeout_subclass():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("too slow", request=request)
+
+    with pytest.raises(QaTimeout) as excinfo:
+        _stub(handler).qa("醉驾怎么处罚", timeout=2.5)
+
+    assert "超时（2.5 秒）" in str(excinfo.value)
+    assert "连不上" not in str(excinfo.value)

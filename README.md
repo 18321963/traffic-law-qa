@@ -193,12 +193,13 @@ agent_service/
       ├─ get_article           已知条号直取原文
       └─ search_materials      本次会话上传的材料
       · 零证据不许停：一轮没调任何工具就想收工 → 代码闸再叫一次
+      · 同参重发不执行：与前面某一轮参数完全相同的调用回一句「已跳过」
   → 收尾                   模型写正文 + 逐条 [依据N]
   → agents/review          逐条判「被原文支撑？」→ 低分整篇降级
   → trace.py               决策链渲染（--trace / --timing / Langfuse）
 ```
 
-上面每一步要的检索、取条、材料，都经 `RagClient` 打到 rag 服务的 HTTP 面（`/qa?mode=search` · `/articles/lookup` · `/materials/search` · `/laws` · `/answer` · `/answer/stream`）—— 进程里没有第二个 `LegalRAG`，也没有 `rag_service` 的任何 import。请求带 `session_id` 时同一会话跨轮记忆（LangGraph checkpointer，落 `data/sessions.db`）；开了 `AGENT_CLARIFY` 时，沾到地方的问题先中断问一句、由 resume 端点收尾（见「端点」）。
+上面每一步要的检索、取条、材料，都经 `RagClient` 打到 rag 服务的 HTTP 面（`/qa?mode=search` · `/articles/lookup` · `/materials/search` · `/laws` · `/answer` · `/answer/stream`）—— 进程里没有第二个 `LegalRAG`，也没有 `rag_service` 的任何 import。检索调用带超时预算（`AGENT_TOOL_TIMEOUT`，默认 15 秒）：超时回执单列「检索超时」（与一般失败分开），交模型换招、不自动重试。请求带 `session_id` 时同一会话跨轮记忆（LangGraph checkpointer，落 `data/sessions.db`）；开了 `AGENT_CLARIFY` 时，沾到地方的问题先中断问一句、由 resume 端点收尾（见「端点」）。
 
 三道关卡都在代码里，不靠提示词自觉：**就绪门**（rag 服务启动/请求前保证索引可用）、**零证据闸**（`agents/nodes.py::_unearned_stop`）、**末端复核**（逐条判支撑，支撑不住的整篇降级）。
 
