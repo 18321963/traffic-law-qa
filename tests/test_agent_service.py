@@ -245,6 +245,41 @@ def test_a_repeated_material_call_says_nothing_is_new() -> None:
     assert update["messages"][0]["content"].startswith("注意：这些段上一轮已经给过你了")
 
 
+def test_an_empty_search_gets_the_retry_note_not_the_already_given_note() -> None:
+    client = AgentStubService()
+
+    def nothing(question, top_k=None, **kwargs):
+        return _retrieval(question, ())
+
+    client.search = nothing
+    call = _call("c1", "search_law", query=QUESTION)
+
+    update = _tools_node(client)(_state(call))
+
+    text = update["messages"][0]["content"]
+    assert "没有命中的法条" in text
+    assert "换一组更接近法条原文的关键词" in text
+    assert "已给过你" not in text and "注意" not in text, (
+        "0 命中不是「都已给过」：空结果集减 seen 还是空集，这里曾恒真地贴上重复警告，"
+        "把「换词重试」这一停一续两句矛盾的话同时下发给模型"
+    )
+
+
+def test_a_repeat_search_warns_exactly_once() -> None:
+    client = AgentStubService()
+    call = _call("c1", "search_law", query=QUESTION)
+    log = [{"articles": [{"parent_id": ARTICLE.parent_id}, {"parent_id": OTHER.parent_id}]}]
+
+    update = _tools_node(client)(_state(call, search_log=log))
+
+    text = update["messages"][0]["content"]
+    assert "注意：本轮没有新增法条，与之前的检索重复。换个完全不同的角度，或直接结束检索。" in text
+    assert text.count("注意") == 1, (
+        "全旧条只该有一条合并文案（重复警告 + 停/换），渲染层与前缀各写一份时模型会收到双份"
+    )
+    assert "一条新证据都没取到" not in text
+
+
 def test_a_missing_article_comes_back_as_the_service_note() -> None:
     client = AgentStubService()
     call = _call("c1", "get_article", article_no="第九十九条")
