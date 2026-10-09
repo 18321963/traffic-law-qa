@@ -22,6 +22,7 @@ from rag_contracts.ports import TRUNCATED_FINISH_REASON  # noqa: E402
 from rag_service.api import app as server  # noqa: E402
 from rag_service.api.runtime import Runtime  # noqa: E402
 from rag_service.indexing.readiness import ReadyState  # noqa: E402
+from rag_service.query.retriever import MILVUS_PROBE_TIMEOUT, HybridRetriever  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 HEAVY = ("langgraph", "pymilvus", "openai", "langfuse", "langchain_core")
@@ -86,6 +87,22 @@ class StubRag:
         yield "delta", "半句"
         yield "finish_reason", self.finish
         yield "usage", {"total_tokens": 5}
+
+    def milvus_live(self) -> bool:
+        return True
+
+
+class _ProbeStore:
+
+    def __init__(self, *, boom: bool = False) -> None:
+        self.boom = boom
+        self.timeouts: list[float | None] = []
+
+    def ping(self, *, timeout: float | None = None) -> str:
+        self.timeouts.append(timeout)
+        if self.boom:
+            raise RuntimeError("Milvus 连不上（stub）")
+        return "v2.6.24"
 
 
 def _events(body: str) -> list[tuple[str, str]]:
@@ -205,6 +222,36 @@ def test_health_says_degraded_when_the_fingerprint_could_not_be_checked(service)
 
     body = client.get("/health").json()
     assert body["weights"] == WEIGHTS_UNKNOWN and body["degraded"] is True
+
+
+def test_health_marks_the_live_milvus_probe_separate_from_the_snapshot(service):
+    client, rt = service
+
+    body = client.get("/health").json()
+    assert body["status"] == "ok" and body["milvus_live"] is True
+
+    rt.rag.milvus_live = lambda: False
+    body = client.get("/health").json()
+    assert body["milvus_live"] is False and body["status"] == "degraded"
+    assert body["milvus"] == "v2.6.24", "探活失败不改快照字段，那是启动时看到的那份"
+
+    rt.rag.milvus_live = lambda: True
+    rt.ready = replace(rt.ready, milvus="")
+    body = client.get("/health").json()
+    assert body["milvus_live"] is True and body["status"] == "degraded", (
+        "快照里没有 milvus 版本时，探活活着也不报 ok"
+    )
+
+
+def test_the_probe_is_a_short_deadline_store_ping() -> None:
+    store = _ProbeStore()
+    retriever = HybridRetriever(store=store, parents={}, chunks={})
+
+    assert retriever.milvus_live() is True
+    assert store.timeouts == [MILVUS_PROBE_TIMEOUT]
+
+    down = HybridRetriever(store=_ProbeStore(boom=True), parents={}, chunks={})
+    assert down.milvus_live() is False
 
 
 def test_importing_the_api_app_keeps_heavy_deps_out():

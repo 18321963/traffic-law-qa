@@ -142,14 +142,17 @@ class QaRequest(BaseModel):
 
 
 @app.get("/health")
-async def health(request: Request) -> dict:
+def health(request: Request) -> dict:
     rt = runtime_of(request)
     rerank = config.rerank_config()
+    live = rt.rag.milvus_live()
+    snapshot_ok = bool(rt.ready.milvus)
     return {
-        "status": "ok",
+        "status": "ok" if snapshot_ok and live else "degraded",
         "version": app.version,
         "boot_ms": round(rt.boot_ms, 1),
         "milvus": rt.ready.milvus,
+        "milvus_live": live,
         "laws": rt.ready.laws,
         "articles": rt.ready.articles,
         "rows": rt.ready.rows,

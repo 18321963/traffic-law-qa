@@ -12,6 +12,8 @@ from rag_contracts.ports import Embedder, Reranker, VectorStore
 
 from .rewriter import QueryRewriter
 
+MILVUS_PROBE_TIMEOUT = 2.0
+
 
 class HybridRetriever:
 
@@ -69,6 +71,13 @@ class HybridRetriever:
             dense=dense,
             collection=self._store.collection,
         )
+
+    def milvus_live(self) -> bool:
+        try:
+            self._store.ping(timeout=MILVUS_PROBE_TIMEOUT)
+        except Exception:  # noqa: BLE001
+            return False
+        return True
 
     def retrieve(self, query: Query) -> RetrievalResult:
         query = query.normalized()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,8 @@ PERMANENT_DELETE_NOTE = (
 UNKNOWN_MODE_NOTE = "mode 只能是 {modes}"
 MISSING_DOC_NOTE = "没有这个 doc_id：{doc_id}"
 INVALID_DOC_ID_NOTE = "doc_id 形状不对：{doc_id}；只能是 POST /documents 返回的 12 位十六进制"
+
+_REINDEX_LOCK = threading.Lock()
 
 
 def runtime_of(request: Request) -> Any:
@@ -246,12 +249,13 @@ def remove(request: Request, doc_id: str) -> dict:
 @router.post("/reindex")
 def reindex(request: Request) -> dict:
     started = time.perf_counter()
-    try:
-        rt = boot_runtime(rebuild=True)
-    except QaError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from None
-    request.app.state.rt = rt
-    request.app.state.boot_error = None
+    with _REINDEX_LOCK:
+        try:
+            rt = boot_runtime(rebuild=True)
+        except QaError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+        request.app.state.rt = rt
+        request.app.state.boot_error = None
     return {
         "ok": True,
         "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),

@@ -58,6 +58,9 @@ class SlowRag:
     def laws(self) -> list:
         return []
 
+    def milvus_live(self) -> bool:
+        return True
+
     def stream(self, question, retrieval, *, timeliness=(), materials=()):
         yield "delta", "甲"
         if self.block_stream:
@@ -240,3 +243,39 @@ def test_a_closed_stream_generator_releases_the_gate(monkeypatch, service) -> No
 
     follow = client.post("/qa", json={"question": "断开后的", "mode": "search"})
     assert follow.status_code == 200
+
+
+def test_reindex_requests_are_serialized_by_the_rebuild_lock(monkeypatch, service) -> None:
+    from rag_service.api import routes
+
+    _client, rt = service
+    guard = threading.Lock()
+    active = {"now": 0, "peak": 0, "calls": 0}
+
+    def slow_boot(rebuild: bool = False) -> Runtime:
+        with guard:
+            active["now"] += 1
+            active["calls"] += 1
+            active["peak"] = max(active["peak"], active["now"])
+        time.sleep(0.4)
+        with guard:
+            active["now"] -= 1
+        return rt
+
+    monkeypatch.setattr(routes, "boot_runtime", slow_boot)
+
+    results: dict = {}
+
+    def hit(tag: int) -> None:
+        results[tag] = TestClient(server.app).post("/reindex")
+
+    threads = [threading.Thread(target=hit, args=(tag,)) for tag in (1, 2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=STUB_WAIT_SECONDS)
+
+    assert sorted(results) == [1, 2]
+    assert all(resp.status_code == 200 for resp in results.values())
+    assert active["calls"] == 2
+    assert active["peak"] == 1, "两个 /reindex 同时进了 boot_runtime：重建没被串行化"
