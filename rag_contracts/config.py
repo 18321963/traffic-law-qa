@@ -141,6 +141,18 @@ def rag_queue_timeout() -> float:
     return _env_float("RAG_QUEUE_TIMEOUT", 30.0)
 
 
+DEFAULT_CORS_ORIGINS = (
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+)
+
+
+def cors_origins() -> tuple[str, ...]:
+    return _env_list("CORS_ORIGINS") or DEFAULT_CORS_ORIGINS
+
+
 @dataclass(frozen=True)
 class LLMConfig:
     base_url: str
