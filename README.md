@@ -147,7 +147,7 @@ agent_service/
 ├── merge.py       多轮检索结果按 parent_id 合并去重
 ├── websearch.py   博查联网检索（已实现、当前未挂进工具面）
 ├── trace.py       终端决策链与分段耗时渲染（--trace / --timing）
-├── prompts.py     agent 侧提示词（主循环 / 判地区 / 复核 / 复核补丁 / 复核降级答复）
+├── prompts.py     agent 侧提示词（主循环 / 判地区 / 复核 / 复核补丁 / 复核降级答复 / resume 不可用答复）
 ├── cli.py         python -m agent_service
 ├── container.py   ★ agent 侧唯一装配点（只造 RagClient）
 └── Dockerfile     agent 服务镜像
@@ -505,7 +505,7 @@ ruff check .
 | `merge.py` | 多轮检索结果按 `parent_id` 合并去重（从 rag 搬来的；不再要 rag 进程内的 `parents` 表） |
 | `websearch.py` | 博查联网检索：已实现、有离线用例，当前未挂进工具面 |
 | `trace.py` | 终端渲染：`--trace` 决策链与 `--timing` 分段耗时（渲染 `AgentState`） |
-| `prompts.py` | agent 侧提示词：主循环 / 判地区 / 复核 / 复核补丁说明 / 复核降级答复 |
+| `prompts.py` | agent 侧提示词：主循环 / 判地区 / 复核 / 复核补丁说明 / 复核降级答复 / resume 不可用答复 |
 | `api/app.py` | agent 自己的 FastAPI app：`/health`（带 rag 可达性）+ `/qa` + `/qa/stream`；`app.state.runner` |
 | `cli.py` | `python -m agent_service`：`--http` / `--top-k` / `--max-steps` / `--trace` / `--timing` / `--langfuse` / `--json` |
 | `container.py` | ★ agent 侧唯一装配点：`build_client`（唯一造 `RagClient` 的地方）/ `build_agent_runner` / `boot_agent_runner`（先探 rag 就绪再装配） |
