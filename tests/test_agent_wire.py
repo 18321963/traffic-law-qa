@@ -17,6 +17,7 @@ pytest.importorskip("langgraph", reason='agent 循环要 pip install -e ".[agent
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 
 from agent_service.agents import graph as graph_mod  # noqa: E402
+from agent_service.prompts import RESUME_UNAVAILABLE_DETAIL  # noqa: E402
 
 QUESTION = "在深圳，醉酒驾驶机动车怎么处罚？"
 
@@ -328,6 +329,37 @@ def test_the_wire_resume_answers_once_and_then_conflicts(agent_wire) -> None:
 
     assert [event for event, _payload in frames] == ["error"]
     assert "没有等待澄清" in frames[-1][1]["message"]
+
+
+def test_the_wire_resume_refuses_when_the_planning_model_is_missing(agent_wire) -> None:
+    remote, _rt, _rag_app = agent_wire
+    saver = InMemorySaver()
+    http = _agent_http(
+        _runner(remote, region=("深圳", "深圳"), clarify=True, sessions=saver)
+    )
+    primed = _post_stream(http, "/qa/stream", {"question": QUESTION, "session_id": "s1"})
+    assert primed[-1][0] == "interrupt"
+
+    http = _agent_http(
+        _runner(
+            remote,
+            llm=AgentStubLLM(model="none", available=False),
+            region=("深圳", "深圳"),
+            clarify=True,
+            sessions=saver,
+        )
+    )
+    body = {"session_id": "s1", "value": {"region": "national"}}
+
+    refused = http.post("/qa/resume", json=body)
+
+    assert refused.status_code == 503
+    assert refused.json()["detail"] == RESUME_UNAVAILABLE_DETAIL
+
+    frames = _post_stream(http, "/qa/resume/stream", body)
+
+    assert [event for event, _payload in frames] == ["error"]
+    assert RESUME_UNAVAILABLE_DETAIL in frames[-1][1]["message"]
 
 
 def test_the_resume_body_needs_a_session_and_a_non_empty_region(agent_wire) -> None:

@@ -7,11 +7,13 @@ from uuid import uuid4
 from api_contracts import RagClient
 from rag_contracts import config
 from rag_contracts.domain.answer import Answer, Question
+from rag_contracts.domain.errors import QaError
 from rag_contracts.domain.laws import LawInfo
 from rag_contracts.observability.tracer import Tracer, traced
 from rag_contracts.ports import LLM
 
 from ..api import budget
+from ..prompts import RESUME_UNAVAILABLE_DETAIL
 from .clarify import make_clarify_node
 from .errors import ResumeConflict, SessionUnsupported
 from .nodes import TOOLS, make_agent_node, make_finalize_node, make_tools_node
@@ -218,6 +220,9 @@ class AgentRunner:
             )
         return self._graph
 
+    def _degraded(self) -> bool:
+        return not self.llm.available
+
     def _initial(
         self,
         query: Question,
@@ -333,7 +338,7 @@ class AgentRunner:
     ) -> Iterator[tuple[str, dict]]:
         query = question if isinstance(question, Question) else Question(text=question)
         kwargs, sid = self._config_kwargs(session_id)
-        if not self.llm.available:
+        if self._degraded():
             yield "answer", {**self.rag.ask(query).to_dict(), "session_id": sid}
             return
         initial = self._initial(query, material_ids, session_id=sid or "", stream_tokens=True)
@@ -348,7 +353,7 @@ class AgentRunner:
     ) -> Answer:
         query = question if isinstance(question, Question) else Question(text=question)
         kwargs, sid = self._config_kwargs(session_id)
-        if not self.llm.available:
+        if self._degraded():
             return self.rag.ask(query)
         final = self._run(
             self._initial(query, material_ids, session_id=sid or "", stream_tokens=False), kwargs
@@ -367,7 +372,7 @@ class AgentRunner:
     ) -> tuple[Literal["ok", "interrupted"], dict]:
         query = question if isinstance(question, Question) else Question(text=question)
         kwargs, sid = self._config_kwargs(session_id)
-        if not self.llm.available:
+        if self._degraded():
             return "ok", {**self.rag.ask(query).to_dict(), "session_id": sid}
         final = self._run(
             self._initial(query, material_ids, session_id=sid or "", stream_tokens=False), kwargs
@@ -406,11 +411,15 @@ class AgentRunner:
         self, session_id: str, value: dict
     ) -> tuple[Literal["ok", "interrupted"], dict]:
         command, kwargs, sid = self._resume_input(session_id, value, stream_tokens=False)
+        if self._degraded():
+            raise QaError(RESUME_UNAVAILABLE_DETAIL)
         final = self._run(command, kwargs, request={"resume": value, "session_id": sid})
         return self._outcome(final, sid)
 
     def resume_stream(self, session_id: str, value: dict) -> Iterator[tuple[str, dict]]:
         command, kwargs, sid = self._resume_input(session_id, value, stream_tokens=True)
+        if self._degraded():
+            raise QaError(RESUME_UNAVAILABLE_DETAIL)
         yield from self._stream_run(
             command, kwargs, sid, request={"resume": value, "session_id": sid}
         )

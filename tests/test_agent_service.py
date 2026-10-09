@@ -30,10 +30,11 @@ from conftest import (  # noqa: E402
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 
 from agent_service.agents import region as region_mod  # noqa: E402
+from agent_service.agents.errors import ResumeConflict  # noqa: E402
 from agent_service.agents.graph import AgentRunner  # noqa: E402
 from agent_service.agents.nodes import make_agent_node, make_tools_node  # noqa: E402
 from agent_service.merge import merge_retrievals  # noqa: E402
-from agent_service.prompts import REVIEW_DOWNGRADE_ANSWER  # noqa: E402
+from agent_service.prompts import RESUME_UNAVAILABLE_DETAIL, REVIEW_DOWNGRADE_ANSWER  # noqa: E402
 from agent_service.tools import handlers  # noqa: E402
 from agent_service.trace import render_trace  # noqa: E402
 
@@ -542,6 +543,43 @@ def test_stream_without_a_key_falls_back_to_the_linear_path() -> None:
     assert [kind for kind, _payload in events] == ["answer"]
     assert events[0][1]["answer"] == "答案正文[依据1]"
     assert [call["question"] for call in client.searches] == [QUESTION]
+
+
+def test_a_degraded_resume_refuses_with_a_clear_message() -> None:
+    runner, _client = _runner(
+        clarify=True, region="深圳", place="深圳", sessions=InMemorySaver()
+    )
+    status, _payload = runner.ask_payload(QUESTION, session_id="s1")
+
+    assert status == "interrupted"
+    runner.llm.available = False
+    with pytest.raises(QaError) as excinfo:
+        runner.resume("s1", {"region": "national"})
+
+    assert str(excinfo.value) == RESUME_UNAVAILABLE_DETAIL
+
+
+def test_a_degraded_resume_stream_refuses_with_the_same_message() -> None:
+    runner, _client = _runner(
+        clarify=True, region="深圳", place="深圳", sessions=InMemorySaver()
+    )
+    status, _payload = runner.ask_payload(QUESTION, session_id="s1")
+
+    assert status == "interrupted"
+    runner.llm.available = False
+    with pytest.raises(QaError) as excinfo:
+        list(runner.resume_stream("s1", {"region": "national"}))
+
+    assert str(excinfo.value) == RESUME_UNAVAILABLE_DETAIL
+
+
+def test_a_degraded_resume_reports_the_session_conflict_first() -> None:
+    runner, _client = _runner(
+        llm=AgentStubLLM(model="none", available=False), sessions=InMemorySaver()
+    )
+
+    with pytest.raises(ResumeConflict, match="没有等待澄清"):
+        runner.resume("never-started", {"region": "national"})
 
 
 def test_a_truncated_review_says_it_was_cut() -> None:

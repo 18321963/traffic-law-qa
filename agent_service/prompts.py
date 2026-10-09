@@ -6,6 +6,7 @@ __all__ = [
     "REVIEW_SYSTEM_PROMPT",
     "REVIEW_PATCH_NOTE",
     "REVIEW_DOWNGRADE_ANSWER",
+    "RESUME_UNAVAILABLE_DETAIL",
 ]
 
 
@@ -149,3 +150,9 @@ REVIEW_DOWNGRADE_ANSWER = (
 """复核不通过时的替换文案。它这一族一共四句（检索为空 / 未配置模型 / 模型说依据不足 / 复核不通过），
 另外三句是生成侧（rag 服务）写的；agent 侧只有这一句。数字与候选法条清单由
 `agents/review.downgrade_text` 拼在后面。"""
+
+
+RESUME_UNAVAILABLE_DETAIL = "规划模型暂不可用，无法恢复被中断的会话；请直接重新提问。"
+"""规划模型未配置时 resume / resume_stream 的拒绝文案（非流式 503 的 detail、流式 error 帧的 message）。
+判据与三个降级入口同源（`AgentRunner._degraded`），但动作不同：新问题入口降级为单轮检索问答，
+恢复会话不降级 —— 不能静默丢弃用户已经选好的地区，把「重新提问」的选择权交回用户。"""
