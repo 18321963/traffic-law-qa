@@ -101,7 +101,7 @@
 ├── eval/                  评测与变异自检（顶层包，`python -m eval`）
 ├── mcp_server/            MCP 适配层：stdio → HTTP，薄客户端，不载模型
 ├── deploy/                docker-compose.yml + reinstall.sh
-├── tests/                 266 条离线用例，不碰 Milvus 也不调模型
+├── tests/                 离线用例，不碰 Milvus 也不调模型
 ├── 法规知识库/            docx + pdf（公开法规原文，建库真源）→ text → parsed → chunks → index；models/ 放本地权重
 ├── data/                  题集源语料 + 四份桶文件 + 上传台账（documents.db）（跑批轨迹不进版本库）
 └── pyproject.toml         依赖与打包的唯一真源
@@ -392,7 +392,7 @@ ruff check .
 ├── mcp_server/              MCP 适配层：tools.py（工具表，不 import SDK）· main.py（stdio 装配）
 ├── api_contracts/           openapi.json · client.py（薄 httpx 客户端）· regen.py
 ├── deploy/                  docker-compose.yml · reinstall.sh
-├── tests/                   22 个测试文件 / 266 条离线用例
+├── tests/                   离线用例（不碰 Milvus、不调模型）
 ├── 法规知识库/              docx + pdf（建库真源）· text · parsed · chunks · index · models
 ├── data/                    题集与桶文件 · documents.db · uploads/ · traces/
 ├── volumes/                 etcd / MinIO / Milvus 的运行时数据（compose 挂载，可重建）
@@ -470,7 +470,7 @@ ruff check .
 | `agents/region.py` | 判地区（本地 / 深圳 / 全国）→ 定法名范围 |
 | `agents/review.py` | 末端复核：抽 `[依据N]`、逐条判「被原文支撑？」、低分整篇降级 |
 | `agents/state.py` | `AgentState`：图状态（消息、检索日志、外部结果、材料、用量…） |
-| `tools/schemas.py` | 四个工具的 JSON schema 与名字常量；`top_k` 上下界只在这定义（HTTP 入参与参数规整都引它） |
+| `tools/schemas.py` | 四个工具的 JSON schema 与名字常量；`top_k`、材料的上下界引 `rag_contracts/domain/retrieval.py` 的常量（HTTP 入参、参数规整、本 schema 三处同源）；`WEB_COUNT_*` 上下界在这定义 |
 | `tools/arguments.py` | 模型给的参数 → 规整后的调用，以及回执封装 |
 | `tools/render.py` | 工具回执渲染（摘录、去重、只留可动的 note）+ `LOG_SEARCH` / `LOG_WEB` / `LOG_MATERIAL` 前缀，写方与轨迹解析方共引 |
 | `tools/handlers.py` | 工具实现：`search_law` / `get_article` / `web_search` / `search_materials`；`ToolEnv` 是它们的运行环境（`env.rag` 就是 `RagClient`） |
