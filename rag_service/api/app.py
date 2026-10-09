@@ -6,11 +6,11 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 from rag_contracts import config
 from rag_contracts.domain.answer import Answer, Question, drain
@@ -77,8 +77,28 @@ def _runtime_error(request: Request, exc: RuntimeError) -> JSONResponse:
     return JSONResponse(status_code=500, content={"detail": f"服务内部错误：{exc}"})
 
 
+BLANK_QUESTION_NOTE = "问题不能只有空白字符"
+BAD_RETRIEVAL_NOTE = "retrieval 解析不了：{error}"
+
+
+def _not_blank_question(value: str) -> str:
+    if not value.strip():
+        raise ValueError(BLANK_QUESTION_NOTE)
+    return value
+
+
+QuestionText = Annotated[str, AfterValidator(_not_blank_question)]
+
+
+def _parsed_retrieval(payload: dict) -> RetrievalResult:
+    try:
+        return RetrievalResult.from_dict(payload)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=BAD_RETRIEVAL_NOTE.format(error=exc)) from None
+
+
 class QuestionBody(BaseModel):
-    text: str = Field(..., min_length=1, description="用户问题")
+    text: QuestionText = Field(..., min_length=1, description="用户问题")
     history: list[tuple[str, str]] = Field(
         default_factory=list, description="多轮历史 (role, content)，原样进生成提示词"
     )
@@ -95,7 +115,7 @@ class AnswerRequest(BaseModel):
 
 
 class QaRequest(BaseModel):
-    question: str = Field(..., min_length=1, description="用户问题")
+    question: QuestionText = Field(..., min_length=1, description="用户问题")
     mode: Literal["ask", "search"] = Field(
         "ask", description="ask=检索+生成（默认）；search=只检索不花钱"
     )
@@ -122,14 +142,17 @@ class QaRequest(BaseModel):
 
 
 @app.get("/health")
-async def health(request: Request) -> dict:
+def health(request: Request) -> dict:
     rt = runtime_of(request)
     rerank = config.rerank_config()
+    live = rt.rag.milvus_live()
+    snapshot_ok = bool(rt.ready.milvus)
     return {
-        "status": "ok",
+        "status": "ok" if snapshot_ok and live else "degraded",
         "version": app.version,
         "boot_ms": round(rt.boot_ms, 1),
         "milvus": rt.ready.milvus,
+        "milvus_live": live,
         "laws": rt.ready.laws,
         "articles": rt.ready.articles,
         "rows": rt.ready.rows,
@@ -179,6 +202,7 @@ def generate(request: Request, req: AnswerRequest) -> dict:
             text=req.question.text,
             history=tuple((str(role), str(content)) for role, content in req.question.history),
         )
+        _parsed_retrieval(req.retrieval)
         retrieval = RetrievalResult.from_dict(req.retrieval)
         answer = rt.rag.answer(
             question,
@@ -194,7 +218,15 @@ def generate(request: Request, req: AnswerRequest) -> dict:
 
 @app.post("/answer/stream")
 def generate_stream(request: Request, req: AnswerRequest) -> StreamingResponse:
-    return _streaming(_answer_events(runtime_of(request), req))
+    rt = runtime_of(request)
+    question = Question(
+        text=req.question.text,
+        history=tuple((str(role), str(content)) for role, content in req.question.history),
+    )
+    retrieval = _parsed_retrieval(req.retrieval)
+    timeliness = tuple(WebFinding.from_dict(item) for item in req.timeliness)
+    materials = tuple(MaterialPassage.from_dict(item) for item in req.materials)
+    return _streaming(_answer_events(rt, question, retrieval, timeliness, materials))
 
 
 @app.post("/qa/stream")
@@ -265,19 +297,18 @@ def _sse_events(rt: Runtime, req: QaRequest):
         )
 
 
-def _answer_events(rt: Runtime, req: AnswerRequest):
+def _answer_events(
+    rt: Runtime,
+    question: Question,
+    retrieval: RetrievalResult,
+    timeliness: tuple[WebFinding, ...],
+    materials: tuple[MaterialPassage, ...],
+):
     started = time.perf_counter()
     with gate() as ok:
         if not ok:
             yield _sse("error", {"message": QUEUE_TIMEOUT_DETAIL})
             return
-        question = Question(
-            text=req.question.text,
-            history=tuple((str(role), str(content)) for role, content in req.question.history),
-        )
-        retrieval = RetrievalResult.from_dict(req.retrieval)
-        timeliness = tuple(WebFinding.from_dict(item) for item in req.timeliness)
-        materials = tuple(MaterialPassage.from_dict(item) for item in req.materials)
         rt.dense_live = retrieval.used_vector
 
         out: queue.Queue = queue.Queue()

@@ -91,9 +91,9 @@ class MilvusStore(VectorStore):
                 ) from exc
         return self._client
 
-    def ping(self) -> str:
+    def ping(self, *, timeout: float | None = None) -> str:
         try:
-            version = self.client.get_server_version()
+            version = self.client.get_server_version(timeout=timeout)
         except MilvusError:
             raise
         except Exception as exc:  # noqa: BLE001

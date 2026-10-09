@@ -8,7 +8,7 @@ from rag_contracts import config
 from rag_contracts.domain.retrieval import LOG_MATERIAL, MaterialPassage
 from rag_contracts.domain.textutil import bigrams
 
-from ..indexing.ingest import load_material_meta
+from ..indexing.ingest import load_material_meta, valid_doc_id
 
 __all__ = ["load_materials", "search_materials"]
 
@@ -30,6 +30,8 @@ def _norm(text: str) -> str:
 def load_materials(doc_ids: Sequence[str]) -> tuple[MaterialPassage, ...]:
     out: list[MaterialPassage] = []
     for doc_id in doc_ids:
+        if not valid_doc_id(doc_id):
+            continue
         directory = config.upload_dir(doc_id)
         meta_path = directory / "meta.json"
         chunks_path = directory / "chunks.jsonl"

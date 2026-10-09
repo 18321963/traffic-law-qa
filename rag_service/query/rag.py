@@ -137,6 +137,9 @@ class LegalRAG(RagService):
     def llm_ready(self) -> bool:
         return bool(getattr(self._generator, "available", False))
 
+    def milvus_live(self) -> bool:
+        return self._retriever.milvus_live()
+
     @property
     def parents(self) -> dict[str, ParentChunk]:
         return self._retriever.parents

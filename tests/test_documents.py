@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -23,7 +24,14 @@ from rag_service.adapters.sqlite import (  # noqa: E402
 )
 from rag_service.api import app as server  # noqa: E402
 from rag_service.api.runtime import Runtime  # noqa: E402
-from rag_service.indexing.ingest import dry_run, read_material  # noqa: E402
+from rag_service.indexing.ingest import (  # noqa: E402
+    MAX_BYTES,
+    IngestPlan,
+    dry_run,
+    load_material_meta,
+    promote,
+    read_material,
+)
 from rag_service.indexing.parser import LawLibrary, ParseStage  # noqa: E402
 from rag_service.indexing.readiness import ReadyState  # noqa: E402
 from rag_service.prompts import MATERIAL_HEADER  # noqa: E402
@@ -58,6 +66,16 @@ NOT_A_LAW_MD = """# 会议纪要
 
 散会。
 """
+
+POISON_LAW_NAME = "../docx/中华人民共和国道路交通安全法"
+POISON_MD = f"""\
+{POISON_LAW_NAME}
+
+第一条 为了维护道路交通秩序，预防和减少交通事故，保护人身安全，制定本法。
+
+第二条 中华人民共和国境内的车辆驾驶人、行人、乘车人以及与道路交通活动有关的单位和个人，都应当遵守本法。
+"""
+POISON_MD_DOT = POISON_MD.replace("../docx/", "./", 1)
 
 
 @pytest.fixture
@@ -137,6 +155,17 @@ def test_a_file_with_no_paragraphs_is_refused_with_the_ingest_receipt(client) ->
     assert not config.upload_dir(body["doc_id"]).exists()
 
 
+def test_an_oversized_upload_is_refused_before_it_is_read(client) -> None:
+    too_big = "x" * (MAX_BYTES + 1)
+
+    for mode in ("session", "permanent"):
+        resp = _upload(client, too_big, "超限.md", mode)
+        assert resp.status_code == 400
+        assert "超过" in resp.json()["detail"], mode
+
+    assert client.get("/documents").json()["count"] == 0
+
+
 def test_permanent_rejection_never_lands_in_the_source_dir(client) -> None:
     resp = _upload(client, NOT_A_LAW_MD, "会议纪要.md", "permanent")
 
@@ -171,6 +200,45 @@ def test_same_bytes_are_refused_the_second_time(client) -> None:
     assert again.status_code == 400
     assert "已经以" in again.json()["note"]
     assert len(config.source_files()) == 1
+
+
+def test_a_law_name_with_a_path_prefix_is_refused_before_it_touches_the_source_dir(client) -> None:
+    for text in (POISON_MD, POISON_MD_DOT):
+        resp = _upload(client, text, "_20210429.md", "permanent")
+        assert resp.status_code == 400, resp.text
+        assert "落盘文件名不安全" in resp.json()["note"]
+        assert config.source_files() == []
+
+
+def test_promote_refuses_a_plan_whose_filename_escapes_the_source_dir(store) -> None:
+    plan = IngestPlan(
+        filename="../escaped.md",
+        display_name="escaped.md",
+        suffix=".md",
+        sha1="0" * 40,
+        size=1,
+        law_id="law_escaped",
+        law_name="越界",
+        version="2021-04-29",
+        citation="《越界》(2021-04-29)",
+        articles=1,
+        chapters=0,
+        sections=0,
+        leftovers=0,
+        paragraphs=1,
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        promote(b"x", plan)
+
+    assert "落盘路径越界" in str(excinfo.value)
+    assert not (store / "escaped.md").exists()
+    assert config.source_files() == []
+
+    written = promote(b"x", replace(plan, filename="越界_20210429.md"))
+
+    assert written.parent.resolve() == config.SOURCE_DIR.resolve()
+    assert written.read_bytes() == b"x"
 
 
 def test_permanent_rows_refuse_deletion(client) -> None:
@@ -348,7 +416,7 @@ def _generator_citing_materials(monkeypatch, generator: AnswerGenerator) -> None
     monkeypatch.setattr(generator, "_call_llm", fake_call_llm)
 
 
-def _write_material(text: str, doc_id: str = "d0", name: str = "车辆管理规定.md") -> str:
+def _write_material(text: str, doc_id: str = "d0d0d0d0d0d0", name: str = "车辆管理规定.md") -> str:
     directory = config.upload_dir(doc_id)
     directory.mkdir(parents=True, exist_ok=True)
     rows = [{"index": i, "text": block} for i, block in enumerate(text.split("\n\n")) if block.strip()]
@@ -406,6 +474,23 @@ def test_the_material_section_reaches_the_generation_prompt(store, monkeypatch) 
     assert "[材料3]" in answer.text, (
         "假生成器只在这两样都在 prompt 里时才吐 [材料3] —— 这句在，材料段就进了 prompt"
     )
+
+
+def test_load_materials_skips_doc_ids_that_are_not_twelve_hex(store) -> None:
+    _write_material(MATERIAL_MD, doc_id="../escaped")
+    assert (store / "data" / "escaped" / "chunks.jsonl").exists()
+
+    assert load_materials(["../escaped"]) == ()
+    assert load_material_meta("../escaped") == {}
+    valid = _write_material(MATERIAL_MD, doc_id="d0d0d0d0d0d0")
+    assert len(load_materials([valid])) == 3
+
+
+def test_materials_search_refuses_doc_ids_that_are_not_twelve_hex(client) -> None:
+    for bad in ("../escaped", "..\\escaped", "d0", "", "D0D0D0D0D0D0"):
+        resp = client.post("/materials/search", json={"query": "培训费", "doc_ids": [bad]})
+        assert resp.status_code == 400, bad
+        assert "doc_id 形状不对" in resp.json()["detail"]
 
 
 def test_the_generation_prompt_has_no_material_section_without_passages() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,15 @@ from ..adapters.sqlite import (
     save_document,
     utc_now,
 )
-from ..indexing.ingest import dry_run, promote, read_material, store_material
+from ..indexing.ingest import (
+    MAX_BYTES,
+    TOO_BIG_NOTE,
+    dry_run,
+    promote,
+    read_material,
+    store_material,
+    valid_doc_id,
+)
 from ..query.articles import build_article_index, lookup_text
 from .gate import QUEUE_TIMEOUT_DETAIL, RagQueueTimeout, gate
 from .runtime import boot_runtime
@@ -55,6 +64,9 @@ PERMANENT_DELETE_NOTE = (
 )
 UNKNOWN_MODE_NOTE = "mode 只能是 {modes}"
 MISSING_DOC_NOTE = "没有这个 doc_id：{doc_id}"
+INVALID_DOC_ID_NOTE = "doc_id 形状不对：{doc_id}；只能是 POST /documents 返回的 12 位十六进制"
+
+_REINDEX_LOCK = threading.Lock()
 
 
 def runtime_of(request: Request) -> Any:
@@ -64,6 +76,10 @@ def runtime_of(request: Request) -> Any:
             status_code=503, detail=getattr(request.app.state, "boot_error", None) or "服务未就绪"
         )
     return rt
+
+
+def _too_big(size: int) -> HTTPException:
+    return HTTPException(status_code=400, detail=TOO_BIG_NOTE.format(size=size, limit=MAX_BYTES))
 
 
 def _rejected(doc_id: str, mode: str, display_name: str, note: str) -> JSONResponse:
@@ -80,7 +96,7 @@ def _rejected(doc_id: str, mode: str, display_name: str, note: str) -> JSONRespo
 
 
 @router.post("/documents")
-async def upload(
+def upload(
     request: Request,
     file: UploadFile = File(..., description="docx / md / txt / pdf"),
     mode: str = Form(MODE_SESSION, description="session=仅本次会话；permanent=入知识库"),
@@ -90,7 +106,11 @@ async def upload(
         raise HTTPException(status_code=400, detail=UNKNOWN_MODE_NOTE.format(modes="、".join(MODE_LABELS)))
 
     display_name = Path(file.filename or "未命名").name
-    data = await file.read()
+    if file.size is not None and file.size > MAX_BYTES:
+        raise _too_big(file.size)
+    data = file.file.read()
+    if len(data) > MAX_BYTES:
+        raise _too_big(len(data))
     suffix = Path(display_name).suffix.lower()
     doc_id = new_doc_id()
 
@@ -160,7 +180,7 @@ async def upload(
         "version": plan.version,
         "citation": plan.citation,
         "articles": plan.articles,
-        "note": MODE_NOTE[mode] + "；POST /reindex 立刻生效，不点则下次问答时自动重建",
+        "note": MODE_NOTE[mode] + "；POST /reindex 立刻生效，不点则下次服务启动时自动重建",
     }
 
 
@@ -229,12 +249,13 @@ def remove(request: Request, doc_id: str) -> dict:
 @router.post("/reindex")
 def reindex(request: Request) -> dict:
     started = time.perf_counter()
-    try:
-        rt = boot_runtime(rebuild=True)
-    except QaError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from None
-    request.app.state.rt = rt
-    request.app.state.boot_error = None
+    with _REINDEX_LOCK:
+        try:
+            rt = boot_runtime(rebuild=True)
+        except QaError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+        request.app.state.rt = rt
+        request.app.state.boot_error = None
     return {
         "ok": True,
         "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -307,6 +328,9 @@ class MaterialSearch(BaseModel):
 @router.post("/materials/search")
 def materials_search(request: Request, req: MaterialSearch) -> dict:
     rt = runtime_of(request)
+    for doc_id in req.doc_ids:
+        if not valid_doc_id(doc_id):
+            raise HTTPException(status_code=400, detail=INVALID_DOC_ID_NOTE.format(doc_id=doc_id))
     with gate() as ok:
         if not ok:
             raise RagQueueTimeout(QUEUE_TIMEOUT_DETAIL)

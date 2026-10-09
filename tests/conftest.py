@@ -97,6 +97,9 @@ class AgentStubService:
     def laws(self):
         return laws_of(self.parents.values())
 
+    def milvus_live(self) -> bool:
+        return True
+
     def search(
         self,
         question: str,

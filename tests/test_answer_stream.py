@@ -433,6 +433,31 @@ def test_answer_and_answer_stream_return_the_same_payload(service) -> None:
     assert streamed == plain
 
 
+MALFORMED_RETRIEVAL = {"query": "醉驾怎么处罚", "articles": [{"score": 0.9}]}
+
+
+def test_a_malformed_retrieval_is_refused_by_answer_before_any_generation(service) -> None:
+    client, rt = service
+    body = dict(_body(), retrieval=MALFORMED_RETRIEVAL)
+
+    resp = client.post("/answer", json=body)
+
+    assert resp.status_code == 422
+    assert "article" in resp.json()["detail"]
+    assert rt.rag.answers == 0
+
+
+def test_a_malformed_retrieval_is_refused_by_answer_stream_before_the_stream_starts(service) -> None:
+    client, rt = service
+    body = dict(_body(), retrieval=MALFORMED_RETRIEVAL)
+
+    resp = client.post("/answer/stream", json=body)
+
+    assert resp.status_code == 422
+    assert "article" in resp.json()["detail"]
+    assert rt.rag.streamed == [] and rt.rag.answers == 0
+
+
 def test_the_stream_endpoint_parses_the_same_request_as_answer(service) -> None:
     client, rt = service
     body = _body(

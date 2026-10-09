@@ -8,6 +8,7 @@ pytest.importorskip("httpx", reason="TestClient 要 httpx（dev extra）")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from agent_service.api import app as server  # noqa: E402
+from agent_service.api.auth import keys_match  # noqa: E402
 
 QUESTION = "在深圳，醉酒驾驶机动车怎么处罚？"
 
@@ -133,3 +134,22 @@ def test_the_stream_is_guarded_before_its_generator_starts(wire, monkeypatch):
     )
     assert allowed.status_code == 200
     assert runner.stream_calls == 1
+
+
+def test_a_non_ascii_presented_key_is_a_clean_mismatch() -> None:
+    assert keys_match("秘钥", ("alpha-key",)) is False
+    assert keys_match("秘钥", ("秘钥",)) is True
+
+
+def test_a_non_ascii_key_header_is_refused_not_a_crash(wire, monkeypatch):
+    http, _runner = wire
+    monkeypatch.setenv("AGENT_API_KEYS", "alpha-key")
+
+    resp = http.post(
+        "/qa",
+        json={"question": QUESTION},
+        headers={"X-API-Key": b"\xe7\xa7\x98\xe9\x92\xa5"},
+    )
+
+    assert resp.status_code == 401
+    assert resp.json() == {"detail": "API key 缺失或无效"}

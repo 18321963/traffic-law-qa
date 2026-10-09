@@ -186,9 +186,11 @@ def test_the_session_materials_travel_from_the_endpoint_into_the_tool(agent_wire
     remote, rt, _rag_app = agent_wire
     http = _agent_http(_runner(remote, plan=list(MATERIAL_THEN_ANSWER)))
 
-    payload = http.post("/qa", json={"question": QUESTION, "doc_ids": ["d7", "d8"]}).json()
+    payload = http.post(
+        "/qa", json={"question": QUESTION, "doc_ids": ["d7d7d7d7d7d7", "d8d8d8d8d8d8"]}
+    ).json()
 
-    assert rt.rag.material_calls == [("培训费", ("d7", "d8"), 5)]
+    assert rt.rag.material_calls == [("培训费", ("d7d7d7d7d7d7", "d8d8d8d8d8d8"), 5)]
     assert len(rt.rag.answers[0]["materials"]) == 1
     assert [item["doc_id"] for item in payload["materials"]] == ["d0"]
     assert any("材料检索" in note for note in payload["notes"])
