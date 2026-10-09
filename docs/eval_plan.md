@@ -7,7 +7,7 @@
 
 - 各流新用例见 `prompt_plan.md` 卡片「测试」节；枪数 ≥2。
 - 全量回归基线：`_tlq_prod_<流>.log` 里 0 F/0 E 且 rc=0。
-- 特别项：S2 的 uuid6 探针、W0 的 worktree 隔离探针——探针失败即停、报告，不许带病并行。
+- 特别项：S2 的 uuid6/`delete_thread`/计数三验、W0 的 worktree 两问探针（import 解析 + pytest 真跑在 worktree 代码上）——探针失败即停、报告，不许带病并行。
 
 ## 2. L2 服务级验收（W3 集成时逐条跑，窗口内起栈）
 
@@ -24,8 +24,10 @@
 | 7 | 预算关（0）重跑 | 不再 429；usage 行仍在累积 |
 | 8 | `RAG_MAX_CONCURRENCY=1` + 慢问题并发 2 路 | 一路 200、一路排队或 503（带 `Retry-After: 5`）；无 500 |
 | 9 | `docker compose -f 生产面 config` 渲染 | 输出无 19530/9000/8000 映射 |
-| 10 | S2 清理：`session_cleanup --dry-run` 记数 → `--apply` → 再看行数 | 差值 = dry-run 报的可删数；未过期线程仍在 |
-| 11 | `docker compose exec agent python -m agent_service.agents.session_cleanup` | 可执行（镜像已含新代码） |
+| 10 | S2 清理：`session_cleanup` dry-run（在线 exec）记数 → 停机 `--apply`（stop → run --rm → start）→ 再看行数 | 差值 = dry-run 报的可删数；未过期线程仍在 |
+| 11 | `docker compose exec agent python -m agent_service.agents.session_cleanup`（dry-run）与 `docker compose run --rm agent ... --apply`（停机） | 均可执行（镜像已含新代码） |
+| 12 | 流式面排队：占满 `RAG_MAX_CONCURRENCY=1` 后打 `/answer/stream` | HTTP 200 + `event: error` 帧（不是 503） |
+| 13 | `budget>0` 时走一次 clarify 中断（interrupt 帧后不发 resume） | usage.db 当日行已累加（中断也记账） |
 
 ## 3. 端到端冒烟（部署后固定三问）
 

@@ -33,14 +33,17 @@
 
 ### R3 成本闸（全局日额度）
 - `AGENT_DAILY_TOKEN_BUDGET`（默认 0 = 关）。>0 时：进入 run 前查当日已用 tokens，已达 → 429（detail 含预算与已用量）+ `Retry-After`（到次日 UTC 0 点）。
-- 账本：`data/usage.db`，表 `usage_daily(day TEXT PRIMARY KEY, tokens INTEGER, calls INTEGER)`，day = UTC 日期；run 终态按 `usage` 通道求和累加。
-- 写库失败只打 stderr、不拦请求（可用性优先）。全局额度不按 key（决策 D3，按 key 留到有计费需求时）。
+- 账本：`data/usage.db`，表 `usage_daily(day TEXT PRIMARY KEY, tokens INTEGER, calls INTEGER)`，day = UTC 日期。
+- **记账点写死**：run 出口统一记——正常 done / HITL 中断 / 异常三路都记，取出口时最新状态快照的 `usage` 通道**全部事件求和**（一轮 run 里 region→agent→tools→finalize→review 每次 LLM 调用都累计在通道里；不是取最后一次调用）；异常出口可能少记未回写的最后一步，此口径进手册。
+- usage.db 连接：`PRAGMA journal_mode=WAL` + `busy_timeout=3000`，短事务。写库失败只打 stderr（固定前缀 `[usage.db] 记账失败`）、不拦请求；S5 另给 `--show`（打印当日行，读失败非零退出）供 watchdog/手册巡检——这个静默失效面要靠它被看见。
+- 全局额度不按 key（决策 D3，按 key 留到有计费需求时）。
 - 文件面：S5 卡片。
 
 ### R4 检索并发闸（rag 侧）
-- `RAG_MAX_CONCURRENCY`（默认 4；0 = 关）信号量包住重活段：`/qa`、`/answer`、`/answer/stream`、`/materials/search`。
-- `RAG_QUEUE_TIMEOUT`（默认 30.0 秒）：等信号量超时 → 503 + `Retry-After: 5` + 中文 detail。
-- `/health`、`/laws`、`/articles/lookup` 不进闸。503 到 agent 侧走既有链路（QaError → 「检索失败」回执），agent 不改。
+- `RAG_MAX_CONCURRENCY`（默认 4；0 = 关）信号量包住重活段：`/qa`、`/qa/stream`、`/answer`、`/answer/stream`、`/materials/search`。
+- `RAG_QUEUE_TIMEOUT`（默认 30.0 秒）：等信号量超时 → sync 面 503 + `Retry-After: 5` + 中文 detail。
+- **释放点写死**：sync 端点包住整个处理函数；流式端点**在生成器内部 acquire、finally release**（不许在返回 StreamingResponse 之前 acquire——客户端不消费会漏槽）。闸的语义 = 「处理中请求数」上限，不分流式与否；流式面的排队超时以 `event: error` 帧表达（HTTP 层仍是 200，沿用现有帧语义）。
+- `/health`、`/laws`、`/articles/lookup` 不进闸。503/`error` 帧到 agent 侧走既有链路（QaError →「检索失败」回执），agent 不改。
 - 文件面：S3 卡片。
 
 ### R5 暴露面收缩
@@ -52,8 +55,9 @@
 
 ### R6 会话保留清理
 - `AGENT_SESSION_TTL_DAYS`（默认 30；0 = 不清理）。判活 = 该 thread 最新 checkpoint 的 `checkpoint_id` 时间（langgraph 用 uuid6，时间有序；先用真 saver 的探针测试证实，不成立就停下报告）。
-- CLI 跑在 agent 容器内（命名卷宿主不可直接访问，决策 D6）：`docker compose exec agent python -m agent_service.agents.session_cleanup [--ttl N] [--apply]`；默认 dry-run 打印（线程总数/可删数/最老与最新时间/预计行数），`--apply` 走 `delete_thread` 后 VACUUM，收尾打一行机器可读汇总。
-- 定时由宿主计划任务调 exec（手册草稿由 S2 交、W3 落笔）。
+- CLI 跑在 agent 容器内（命名卷宿主不可直接访问，决策 D6）。dry-run 可在线：`docker compose exec agent python -m agent_service.agents.session_cleanup`，打印线程总数/可删数/最老与最新时间/预计行数。
+- `--apply` **必须停机**（SQLite 写者假设 + VACUUM 要独占）：`docker compose stop agent && docker compose run --rm agent python -m agent_service.agents.session_cleanup --apply && docker compose start agent`；收尾打一行机器可读汇总。
+- 定时由宿主计划任务调停机流程（手册草稿由 S2 交、W3 落笔）。
 - 文件面：S2 卡片。
 
 ### R7 探活告警
@@ -75,7 +79,7 @@
 - `deploy/build.sh`：固化直连 buildx 配方（两条 `docker buildx build --load`）+ `compose up -d --force-recreate --no-deps app agent`；头注释写明禁用 `compose up --build` 且不得 prune。
 
 ### R11 口径落文（W3 统一写）
-- `deploy/运维手册.md`：部署（build.sh/dev 覆盖）、日常（ps/logs/healthcheck 看什么）、告警（watchdog/计划任务/Kuma）、会话清理、备份恢复、以及四条口径：单副本（SQLite 会话库写者假设，横向扩先换 Postgres checkpointer）、复核是辅助（检测力边界）、web_search 不可见但盲猜可达的 egress 说明、SSE 过场流无补发（done 帧才是权威）。
+- `deploy/运维手册.md`：部署（build.sh/dev 覆盖）、日常（ps/logs/healthcheck 看什么；应用日志一律 stdout/stderr 走容器轮转，不进容器内文件）、告警（watchdog/计划任务/Kuma；预算开启时 watchdog 折上 `budget --show` 巡检）、会话清理（停机口径）、备份恢复、密钥轮换（加新 key 重启 → 通知使用者换 → 移除旧 key 重启），以及五条口径：单副本（SQLite 会话库写者假设，横向扩先换 Postgres checkpointer）、异常 run 可能少记最后一步、复核是辅助（检测力边界）、web_search 不可见但盲猜可达的 egress 说明、SSE 过场流无补发（done 帧才是权威）。
 - `接口文档.md`：按 §4 清单落。
 - README：仅当启动命令变化时最小同步内容；**不动小节标题**（先 `grep -rn "README「"`）。
 
