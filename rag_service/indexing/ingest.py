@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ from .parser import LawParser, reader_for
 __all__ = [
     "IngestPlan",
     "canonical_name",
+    "valid_doc_id",
     "dry_run",
     "promote",
     "read_paragraphs",
@@ -46,6 +48,8 @@ LAW_ID_NOTE = (
     "库内已有同一部法规（文件 {name}）；同 law_id 不同内容会让条文翻倍，"
     "换版本先在 docx/ 里替换同名文件。"
 )
+NAME_NOTE = "落盘文件名不安全：{name}（含路径分隔符）；把法规名里的 / 与 \\ 去掉再传。"
+OUT_OF_ROOT_NOTE = "落盘路径越界：{target} 不在 {root} 内"
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,13 @@ class IngestPlan:
 
 def canonical_name(law_name: str, version: str, suffix: str) -> str:
     return f"{law_name}_{version.replace('-', '')}{suffix}"
+
+
+_DOC_ID = re.compile(r"[0-9a-f]{12}")
+
+
+def valid_doc_id(doc_id: str) -> bool:
+    return _DOC_ID.fullmatch(doc_id) is not None
 
 
 def _sha1(data: bytes) -> str:
@@ -144,6 +155,8 @@ def dry_run(
     try:
         first = parser.parse(paragraphs, source_file=name)
         filename = canonical_name(first.law_name, version, suffix)
+        if "/" in filename or "\\" in filename or Path(filename).name != filename:
+            return None, NAME_NOTE.format(name=filename)
         law = parser.parse(
             paragraphs, source_file=filename, law_name=first.law_name, version=version
         )
@@ -191,7 +204,10 @@ def dry_run(
 def promote(data: bytes, plan: IngestPlan, *, source_dir: Path | None = None) -> Path:
     root = Path(source_dir or config.SOURCE_DIR)
     root.mkdir(parents=True, exist_ok=True)
-    target = root / plan.filename
+    base = root.resolve()
+    target = (root / plan.filename).resolve()
+    if not target.is_relative_to(base):
+        raise RuntimeError(OUT_OF_ROOT_NOTE.format(target=target, root=base))
     target.write_bytes(data)
     return target
 
@@ -220,6 +236,8 @@ def store_material(
 
 
 def load_material_meta(doc_id: str) -> dict:
+    if not valid_doc_id(doc_id):
+        return {}
     path = config.upload_dir(doc_id) / "meta.json"
     if not path.exists():
         return {}

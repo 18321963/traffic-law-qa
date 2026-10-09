@@ -34,7 +34,7 @@ from ..adapters.sqlite import (
     save_document,
     utc_now,
 )
-from ..indexing.ingest import dry_run, promote, read_material, store_material
+from ..indexing.ingest import dry_run, promote, read_material, store_material, valid_doc_id
 from ..query.articles import build_article_index, lookup_text
 from .gate import QUEUE_TIMEOUT_DETAIL, RagQueueTimeout, gate
 from .runtime import boot_runtime
@@ -55,6 +55,7 @@ PERMANENT_DELETE_NOTE = (
 )
 UNKNOWN_MODE_NOTE = "mode 只能是 {modes}"
 MISSING_DOC_NOTE = "没有这个 doc_id：{doc_id}"
+INVALID_DOC_ID_NOTE = "doc_id 形状不对：{doc_id}；只能是 POST /documents 返回的 12 位十六进制"
 
 
 def runtime_of(request: Request) -> Any:
@@ -307,6 +308,9 @@ class MaterialSearch(BaseModel):
 @router.post("/materials/search")
 def materials_search(request: Request, req: MaterialSearch) -> dict:
     rt = runtime_of(request)
+    for doc_id in req.doc_ids:
+        if not valid_doc_id(doc_id):
+            raise HTTPException(status_code=400, detail=INVALID_DOC_ID_NOTE.format(doc_id=doc_id))
     with gate() as ok:
         if not ok:
             raise RagQueueTimeout(QUEUE_TIMEOUT_DETAIL)

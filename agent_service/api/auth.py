@@ -19,7 +19,8 @@ UNAUTHORIZED_DETAIL = "API key 缺失或无效"
 
 
 def keys_match(presented: str, keys: tuple[str, ...]) -> bool:
-    return any(hmac.compare_digest(presented, key) for key in keys)
+    candidate = presented.encode("utf-8")
+    return any(hmac.compare_digest(candidate, key.encode("utf-8")) for key in keys)
 
 
 def rate_limit_detail(rpm: int) -> str:

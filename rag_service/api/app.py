@@ -6,11 +6,11 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 from rag_contracts import config
 from rag_contracts.domain.answer import Answer, Question, drain
@@ -77,8 +77,20 @@ def _runtime_error(request: Request, exc: RuntimeError) -> JSONResponse:
     return JSONResponse(status_code=500, content={"detail": f"服务内部错误：{exc}"})
 
 
+BLANK_QUESTION_NOTE = "问题不能只有空白字符"
+
+
+def _not_blank_question(value: str) -> str:
+    if not value.strip():
+        raise ValueError(BLANK_QUESTION_NOTE)
+    return value
+
+
+QuestionText = Annotated[str, AfterValidator(_not_blank_question)]
+
+
 class QuestionBody(BaseModel):
-    text: str = Field(..., min_length=1, description="用户问题")
+    text: QuestionText = Field(..., min_length=1, description="用户问题")
     history: list[tuple[str, str]] = Field(
         default_factory=list, description="多轮历史 (role, content)，原样进生成提示词"
     )
@@ -95,7 +107,7 @@ class AnswerRequest(BaseModel):
 
 
 class QaRequest(BaseModel):
-    question: str = Field(..., min_length=1, description="用户问题")
+    question: QuestionText = Field(..., min_length=1, description="用户问题")
     mode: Literal["ask", "search"] = Field(
         "ask", description="ask=检索+生成（默认）；search=只检索不花钱"
     )

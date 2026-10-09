@@ -143,10 +143,10 @@ def test_get_article_text_matches_the_text_frozen_before_the_split(parity):
 
 def test_material_text_matches_the_text_frozen_before_the_split(parity):
     _, remote, _rt = parity
-    call = _call(query="培训费", doc_ids=("d0",))
+    call = _call(query="培训费", doc_ids=("d0d0d0d0d0d0",))
 
     outcome = handlers.search_materials(_env(remote), call)
-    payload = remote.materials("培训费", ["d0"])
+    payload = remote.materials("培训费", ["d0d0d0d0d0d0"])
 
     assert outcome.text == FROZEN_MATERIALS, (
         "工具渲染文本与 2026-09-28 出包前冻结的那份不一致：要么迁移引入了差异，要么渲染口径变了"
@@ -213,7 +213,7 @@ def test_the_answer_endpoint_generates_from_the_retrieval_it_was_handed(parity):
     _, remote, rt = parity
     question = Question(text="醉驾怎么处罚", history=(("user", "上一轮问的是疲劳驾驶"),))
     retrieval = remote.search(question.text, 3)
-    passages, _ = remote.search_materials("培训费", ["d0"])
+    passages, _ = remote.search_materials("培训费", ["d0d0d0d0d0d0"])
 
     searches_before = len(rt.rag.searches)
     answer = remote.answer(question, retrieval, materials=passages)

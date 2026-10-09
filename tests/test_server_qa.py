@@ -139,6 +139,30 @@ def test_the_rag_service_no_longer_runs_the_agent_loop(service):
     assert client.post("/qa/stream", json={"question": "q", "mode": "agent"}).status_code == 422
 
 
+def test_a_blank_question_is_refused_before_any_work(service):
+    client, rt = service
+    for path in ("/qa", "/qa/stream"):
+        resp = client.post(path, json={"question": " "})
+        assert resp.status_code == 422, path
+        assert "空白" in resp.text, path
+    blank_answer = client.post(
+        "/answer",
+        json={
+            "question": {"text": "\n\t"},
+            "retrieval": {
+                "query": "q",
+                "articles": [],
+                "used_vector": False,
+                "used_bm25": False,
+                "elapsed_ms": 1.0,
+            },
+        },
+    )
+    assert blank_answer.status_code == 422
+    assert "空白" in blank_answer.text
+    assert rt.rag.searches == [] and rt.rag.streams == [] and rt.rag.answers == 0
+
+
 def test_stream_reports_a_truncated_linear_answer(service):
     client, rt = service
     rt.rag.finish = TRUNCATED_FINISH_REASON
