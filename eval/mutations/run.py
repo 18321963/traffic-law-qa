@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import subprocess
 import sys
@@ -18,6 +19,8 @@ USAGE = """变异自检：把一处规则改坏，跑对应测试，看它是否
     python -m eval.mutations.run all                  # 四张表全跑
     python -m eval.mutations.run retrieval            # 只跑一张（retrieval / contract / gates / mcp）
     python -m eval.mutations.run gates --only 装配    # 按名字片段挑几条
+
+需要开发环境（pytest 在 dev 装组里；服务镜像没有——缺了会把每条都误记成翻红，所以直接停）。
 
 **为什么是「改坏再看红」。** 测试全绿不等于覆盖：接线断、断言打歪、夹具与默认值撞车，
 都能让一份没用的测试保持绿（本仓已经栽过五次）。验收标准是「把被测的那条规则改坏，
@@ -51,6 +54,9 @@ def _pytest(tests: list[str]) -> subprocess.CompletedProcess:
 
 
 def run_table(name: str, *, only: str | None = None) -> int:
+    if importlib.util.find_spec("pytest") is None:
+        print("没有 pytest（服务镜像的装组不含 dev）：缺了它每条都会误记成翻红，已停，请到开发环境跑。")
+        return 1
     rows = [row for row in TABLES[name] if not only or only in row[0]]
     if not rows:
         print(f"[{name}] 没有匹配的变异（--only {only}）")
