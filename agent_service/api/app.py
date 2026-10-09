@@ -15,7 +15,7 @@ from rag_contracts.domain.retrieval import TOP_K_MAX, TOP_K_MIN
 
 from .. import container
 from ..agents.errors import ResumeConflict, SessionUnsupported
-from . import auth
+from . import auth, budget
 
 __all__ = ["app"]
 
@@ -91,6 +91,18 @@ def runner_of(request: Request):
     return runner
 
 
+def deny_if_over_budget() -> None:
+    blocked = budget.exhausted(config.agent_config().daily_token_budget)
+    if blocked is None:
+        return
+    limit, used = blocked
+    raise HTTPException(
+        status_code=429,
+        detail=budget.BLOCKED_DETAIL.format(budget=limit, used=used),
+        headers={"Retry-After": str(budget.retry_after_seconds())},
+    )
+
+
 class AgentRequest(BaseModel):
     question: str = Field(..., min_length=1, description="用户问题")
     top_k: int | None = Field(
@@ -130,6 +142,7 @@ async def health(request: Request) -> dict:
 @app.post("/qa")
 def ask(request: Request, req: AgentRequest) -> dict:
     runner = runner_of(request)
+    deny_if_over_budget()
     started = time.perf_counter()
     status, payload = runner.ask_payload(
         Question(text=req.question, top_k=req.top_k),
@@ -142,6 +155,7 @@ def ask(request: Request, req: AgentRequest) -> dict:
 @app.post("/qa/resume")
 def resume(request: Request, req: ResumeRequest) -> dict:
     runner = runner_of(request)
+    deny_if_over_budget()
     started = time.perf_counter()
     status, payload = runner.resume(req.session_id, {"region": req.value.region})
     return {"status": status, **payload, "request_ms": round((time.perf_counter() - started) * 1000, 2)}
@@ -150,6 +164,7 @@ def resume(request: Request, req: ResumeRequest) -> dict:
 @app.post("/qa/stream")
 def ask_stream(request: Request, req: AgentRequest) -> StreamingResponse:
     runner = runner_of(request)
+    deny_if_over_budget()
     return _streaming(
         _events(
             runner.stream(
@@ -164,6 +179,7 @@ def ask_stream(request: Request, req: AgentRequest) -> StreamingResponse:
 @app.post("/qa/resume/stream")
 def resume_stream(request: Request, req: ResumeRequest) -> StreamingResponse:
     runner = runner_of(request)
+    deny_if_over_budget()
     return _streaming(_events(runner.resume_stream(req.session_id, {"region": req.value.region})))
 
 

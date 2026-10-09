@@ -11,6 +11,7 @@ from rag_contracts.domain.laws import LawInfo
 from rag_contracts.observability.tracer import Tracer, traced
 from rag_contracts.ports import LLM
 
+from ..api import budget
 from .clarify import make_clarify_node
 from .errors import ResumeConflict, SessionUnsupported
 from .nodes import TOOLS, make_agent_node, make_finalize_node, make_tools_node
@@ -253,10 +254,21 @@ class AgentRunner:
         kwargs["config"] = config_dict
         return kwargs, (config_dict.get("configurable") or {}).get("thread_id")
 
+    def _latest_state(self, kwargs: dict) -> AgentState | None:
+        try:
+            snapshot = self.graph().get_state(kwargs["config"])
+        except Exception:  # noqa: BLE001
+            return None
+        return getattr(snapshot, "values", None)
+
     def _run(self, run_input, kwargs: dict, *, request=None) -> AgentState:
-        with self.tracer.span("invoke", root=True) as span:
-            final = self.graph().invoke(run_input, **kwargs)
-            span.record(request if request is not None else run_input, final)
+        final: AgentState | None = None
+        try:
+            with self.tracer.span("invoke", root=True) as span:
+                final = self.graph().invoke(run_input, **kwargs)
+                span.record(request if request is not None else run_input, final)
+        finally:
+            budget.record_state(final if final is not None else self._latest_state(kwargs))
         return final
 
     def invoke(
@@ -278,28 +290,31 @@ class AgentRunner:
         turn = 0
         paused = False
         with self.tracer.span("invoke", root=True) as span:
-            for mode, chunk in self.graph().stream(
-                run_input, **kwargs, stream_mode=["updates", "values", "custom"]
-            ):
-                if mode == "values":
-                    final = chunk
-                    continue
-                if mode == "custom":
-                    yield "delta", chunk
-                    continue
-                if "__interrupt__" in chunk:
-                    paused = True
-                    yield "interrupt", {
-                        "session_id": sid,
-                        "interrupt": _interrupt_payload(chunk.get("__interrupt__")),
-                    }
-                    continue
-                for node, update in chunk.items():
-                    detail = _step_detail(node, update)
-                    if node == "agent":
-                        turn += 1
-                        detail = {"turn": turn, "max_steps": self.cfg.max_steps, **detail}
-                    yield "step", {"node": node, **detail}
+            try:
+                for mode, chunk in self.graph().stream(
+                    run_input, **kwargs, stream_mode=["updates", "values", "custom"]
+                ):
+                    if mode == "values":
+                        final = chunk
+                        continue
+                    if mode == "custom":
+                        yield "delta", chunk
+                        continue
+                    if "__interrupt__" in chunk:
+                        paused = True
+                        yield "interrupt", {
+                            "session_id": sid,
+                            "interrupt": _interrupt_payload(chunk.get("__interrupt__")),
+                        }
+                        continue
+                    for node, update in chunk.items():
+                        detail = _step_detail(node, update)
+                        if node == "agent":
+                            turn += 1
+                            detail = {"turn": turn, "max_steps": self.cfg.max_steps, **detail}
+                        yield "step", {"node": node, **detail}
+            finally:
+                budget.record_state(final)
             span.record(request if request is not None else run_input, final)
         if paused:
             return
