@@ -65,6 +65,33 @@ class _LockedSaver(BaseCheckpointSaver):
         with self._lock:
             self._inner.delete_thread(thread_id)
 
+    def thread_stats(self) -> list[tuple[str, str, int]]:
+        with self._lock:
+            latest = self._conn.execute(
+                "SELECT thread_id, MAX(checkpoint_id) FROM checkpoints GROUP BY thread_id"
+            ).fetchall()
+            checkpoints = dict(
+                self._conn.execute(
+                    "SELECT thread_id, COUNT(*) FROM checkpoints GROUP BY thread_id"
+                ).fetchall()
+            )
+            writes = dict(
+                self._conn.execute("SELECT thread_id, COUNT(*) FROM writes GROUP BY thread_id").fetchall()
+            )
+        return [
+            (
+                str(thread_id),
+                str(checkpoint_id),
+                int(checkpoints.get(thread_id, 0)) + int(writes.get(thread_id, 0)),
+            )
+            for thread_id, checkpoint_id in latest
+        ]
+
+    def vacuum(self) -> None:
+        with self._lock:
+            self._conn.commit()
+            self._conn.execute("VACUUM")
+
     def get_next_version(self, current: Any, channel: Any) -> Any:
         return self._inner.get_next_version(current, channel)
 
