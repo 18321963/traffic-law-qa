@@ -101,7 +101,7 @@
 ├── eval/                  评测与变异自检（顶层包，`python -m eval`）
 ├── mcp_server/            MCP 适配层：stdio → HTTP，薄客户端，不载模型
 ├── deploy/                docker-compose.yml + reinstall.sh
-├── tests/                 179 条离线用例，不碰 Milvus 也不调模型
+├── tests/                 266 条离线用例，不碰 Milvus 也不调模型
 ├── 法规知识库/            docx + pdf（公开法规原文，建库真源）→ text → parsed → chunks → index；models/ 放本地权重
 ├── data/                  题集源语料 + 四份桶文件 + 上传台账（documents.db）（跑批轨迹不进版本库）
 └── pyproject.toml         依赖与打包的唯一真源
@@ -261,7 +261,7 @@ print(qa("深圳 行人在机动车道 罚款多少", mode="search").render())  
 ### 测试
 
 ```powershell
-python -m pytest                # 263 条离线用例，约 24 秒；不碰 Milvus、不调模型
+python -m pytest                # 266 条离线用例，约 24 秒；不碰 Milvus、不调模型
 ruff check .
 ```
 
@@ -392,7 +392,7 @@ ruff check .
 ├── mcp_server/              MCP 适配层：tools.py（工具表，不 import SDK）· main.py（stdio 装配）
 ├── api_contracts/           openapi.json · client.py（薄 httpx 客户端）· regen.py
 ├── deploy/                  docker-compose.yml · reinstall.sh
-├── tests/                   22 个测试文件 / 263 条离线用例
+├── tests/                   22 个测试文件 / 266 条离线用例
 ├── 法规知识库/              docx + pdf（建库真源）· text · parsed · chunks · index · models
 ├── data/                    题集与桶文件 · documents.db · uploads/ · traces/
 ├── volumes/                 etcd / MinIO / Milvus 的运行时数据（compose 挂载，可重建）
@@ -408,7 +408,7 @@ ruff check .
 | `rag_service/Dockerfile` | 服务镜像：python:3.11-slim → CUDA 版 torch（独立一层，改源码重建不重下）→ `.[api,local,milvus,pdf]` → 把五个包（`rag_contracts/` `rag_service/` `eval/` `mcp_server/` `api_contracts/`）与 `法规知识库/`、`data/` 一起烤进镜像 → 非 root 用户 → `uvicorn rag_service.api.app:app` |
 | `agent_service/Dockerfile` | agent 服务镜像：同一个底（python:3.11-slim、非 root uid 1000、`EXPOSE 8000`），装 `.[agent,api,langfuse]`，只 COPY 三个包（`rag_contracts/` `api_contracts/` `agent_service/`）—— 没有 torch、没有 Milvus 客户端、也没有 `法规知识库/` 与 `data/`：它不载模型；自己的会话记忆写在挂载卷上（镜像里先把 `/app/data` 的属主铺好） |
 | `deploy/docker-compose.yml` | 五个服务：etcd / MinIO / Milvus standalone / app（rag）/ agent。app 挂 GPU、四个命名卷、健康检查打 `/health`；agent 只发布 8001、不挂 GPU，挂一卷 `tlr_sessions:/app/data`（会话记忆）并置 `AGENT_CLARIFY=1`，healthcheck 读 `/health` 的 body（要 `rag.status=ok`，不是只看 200）。顶层 `name: agent` 钉住项目名（否则项目名随目录走，挪文件会换一组空卷）；`build.context` / `env_file` / 卷路径都相对本文件解析，**但 `build.dockerfile` 相对 `context` 解析**（`context: ..` 时写 `rag_service/Dockerfile`，写成 `../rag_service/Dockerfile` 会跑去找仓库外那一层、且 `config` 不报错）—— 固定用 `docker compose -f deploy/docker-compose.yml` 起 |
-| `deploy/reinstall.sh` | 重装 editable 包：探 Clash 代理 → `pip install -e ".[all,mcp]"` → 换到仓外验证六个包 import 装没装上 |
+| `deploy/reinstall.sh` | 重装 editable 包：探 Clash 代理 → `pip install -e ".[all]"`（依赖组可用第一个参数换，默认 `all`）→ 换到仓外验证六个包 import 装没装上 |
 | `pyproject.toml` | 依赖与打包的唯一真源：基础三依赖 + `agent` / `api` / `langfuse` / `local` / `mcp` / `milvus` / `pdf` / `dev` / `all` 可选组、四个短命令、pytest 与 ruff 配置；`packages.find` 覆盖 `rag_contracts*` / `rag_service*` / `agent_service*` / `eval*` / `mcp_server*` / `api_contracts*`（顶层包与模式双向比对由 `tests/test_contracts_architecture.py` 盯着） |
 | `requirements.txt` | 只镜像基础三依赖，给「不装整包、只装依赖」的场景（`pymilvus` 已移到 `milvus` 组，不在这里）；依赖的真源仍是 `pyproject.toml` |
 | `.env.example` | 配置模板：三段模型端点、`RAG_*` 检索参数、`AGENT_*`、Langfuse、博查 |
