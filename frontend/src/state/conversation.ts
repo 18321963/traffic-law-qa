@@ -158,18 +158,24 @@ export function useConversations(transport: Transport, settings: Settings): Conv
   }, []);
 
   const finish = useCallback(
-    (convId: string, turnId: string, patch: (turn: Turn) => Turn) => {
+    (convId: string, turnId: string, controller: AbortController, patch: (turn: Turn) => Turn) => {
       patchTurn(convId, turnId, (turn) => ({ ...patch(turn), elapsedMs: Date.now() - turn.startedAt }));
-      setBusy(false);
-      abortRef.current = null;
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        setBusy(false);
+      }
     },
     [patchTurn],
   );
 
   const run = useCallback(
-    async (convId: string, turnId: string, stream: AsyncGenerator<StreamEvent>, sessionId: string | null) => {
-      const controller = new AbortController();
-      abortRef.current = controller;
+    async (
+      convId: string,
+      turnId: string,
+      stream: AsyncGenerator<StreamEvent>,
+      sessionId: string | null,
+      controller: AbortController,
+    ) => {
       let terminal = false;
       try {
         for await (const event of stream) {
@@ -245,10 +251,7 @@ export function useConversations(transport: Transport, settings: Settings): Conv
           patchTurn(convId, turnId, (turn) => ({ ...turn, status: "error", error: turnErrorOf(exc) }));
         }
       } finally {
-        if (abortRef.current === controller) {
-          finish(convId, turnId, (turn) => turn);
-        }
-        setBusy(false);
+        finish(convId, turnId, controller, (turn) => turn);
       }
     },
     [finish, patchConversation, patchTurn],
@@ -282,15 +285,29 @@ export function useConversations(transport: Transport, settings: Settings): Conv
       setBusy(true);
       const settings = settingsRef.current;
       const sessionId = conv.sessionId;
+      const controller = new AbortController();
+      abortRef.current = controller;
       const generator =
         kind === "ask"
           ? settings.answerMode === "stream"
-            ? transport.ask({ question, top_k: settings.topK, doc_ids: conv.docIds, session_id: sessionId })
-            : onceAsStream(transport, { question, top_k: settings.topK, doc_ids: conv.docIds, session_id: sessionId }, region)
+            ? transport.ask(
+                { question, top_k: settings.topK, doc_ids: conv.docIds, session_id: sessionId },
+                controller.signal,
+              )
+            : onceAsStream(
+                transport,
+                { question, top_k: settings.topK, doc_ids: conv.docIds, session_id: sessionId },
+                region,
+                "",
+                controller.signal,
+              )
           : settings.answerMode === "stream"
-            ? transport.resume({ session_id: sessionId ?? "", value: { region: region ?? "national" } })
-            : onceAsStream(transport, null, region, sessionId ?? "");
-      void run(conv.id, turn.id, generator, sessionId);
+            ? transport.resume(
+                { session_id: sessionId ?? "", value: { region: region ?? "national" } },
+                controller.signal,
+              )
+            : onceAsStream(transport, null, region, sessionId ?? "", controller.signal);
+      void run(conv.id, turn.id, generator, sessionId, controller);
     },
     [active, busy, patchConversation, run, transport],
   );
@@ -376,9 +393,10 @@ async function* onceAsStream(
   askBody: { question: string; top_k: number | null; doc_ids: string[]; session_id: string | null } | null,
   region?: string,
   sessionId = "",
+  signal?: AbortSignal,
 ): AsyncGenerator<StreamEvent> {
   if (askBody) {
-    const response = await transport.askOnce(askBody);
+    const response = await transport.askOnce(askBody, signal);
     if (response.status === "interrupted") {
       yield {
         type: "interrupt",
@@ -390,7 +408,10 @@ async function* onceAsStream(
     yield { type: "done", data: payload };
     return;
   }
-  const response = await transport.resumeOnce({ session_id: sessionId, value: { region: region ?? "national" } });
+  const response = await transport.resumeOnce(
+    { session_id: sessionId, value: { region: region ?? "national" } },
+    signal,
+  );
   const { status: _ok, ...payload } = response;
   yield { type: "done", data: payload };
 }
