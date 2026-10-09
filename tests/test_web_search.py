@@ -106,6 +106,10 @@ def test_empty_result_is_a_receipt_not_a_failure(monkeypatch) -> None:
     assert findings == []
     assert text.startswith(f"网搜#1「{QUERY}」｜命中 0 条")
     assert "没有命中任何网页" in text
+    assert "再空就停下作答" in text
+    assert "没有公开的新规定" not in text, (
+        "一次空结果只能说明这组说法没命中，推不出「没有公开的新规定」"
+    )
 
 
 def test_missing_key_never_calls_out(monkeypatch) -> None:
@@ -122,10 +126,11 @@ def test_missing_key_never_calls_out(monkeypatch) -> None:
     ("kwargs", "expected"),
     [
         ({"status": 500, "payload": {"error": "boom"}}, "联网检索服务返回 500"),
-        ({"status": 200, "payload": None}, "联网检索服务返回 非 JSON"),
+        ({"status": 200, "payload": None}, "联网检索服务返回的内容不是 JSON"),
+        ({"error": httpx.ConnectError("拒了")}, "联网检索请求出错（ConnectError）"),
         ({"error": httpx.ConnectTimeout("打不通")}, "联网检索超时"),
     ],
-    ids=["http-500", "non-json", "timeout"],
+    ids=["http-500", "non-json", "connect-error", "timeout"],
 )
 def test_transport_failures_return_a_note_instead_of_raising(monkeypatch, kwargs, expected) -> None:
     _install_bocha(monkeypatch, **kwargs)
@@ -135,3 +140,23 @@ def test_transport_failures_return_a_note_instead_of_raising(monkeypatch, kwargs
     assert findings == []
     assert text.startswith(expected)
     assert "本次没取到结果" in text
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"status": 500, "payload": {"error": "boom"}},
+        {"status": 200, "payload": None},
+        {"error": httpx.ConnectError("拒了")},
+    ],
+    ids=["http-500", "non-json", "connect-error"],
+)
+def test_http_failure_note_speaks_to_the_planner_not_the_answer(monkeypatch, kwargs) -> None:
+    _install_bocha(monkeypatch, **kwargs)
+
+    _findings, text = search_web(QUERY)
+
+    assert "「是否有最新规定」按未确认处理" in text
+    assert "在答案里" not in text, (
+        "这条回执的读者是规划模型，它的正文不进最终答案 —— 不能对它下「在答案里说明」的指令"
+    )

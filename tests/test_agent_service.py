@@ -242,7 +242,12 @@ def test_a_repeated_material_call_says_nothing_is_new() -> None:
     update = _tools_node(client)(_state(call, material_ids=["d0"], materials=list(MATERIALS)))
 
     assert update["materials"] == []
-    assert update["messages"][0]["content"].startswith("注意：这些段上一轮已经给过你了")
+    text = update["messages"][0]["content"]
+    assert text.startswith("注意：这些段上一轮已经给过你了")
+    assert "本轮没有新增材料段" in text
+    assert "材料里没有别的相关内容" not in text, (
+        "fresh 为空只说明这一查没带出未见过的新段，推不出「材料里没有别的相关内容」"
+    )
 
 
 def test_an_empty_search_gets_the_retry_note_not_the_already_given_note() -> None:
