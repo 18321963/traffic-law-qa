@@ -18,16 +18,18 @@ services:
       interval: 30s
       timeout: 20s
       retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   minio:
     container_name: milvus-minio
     image: minio/minio:RELEASE.2024-05-28T17-19-04Z
     environment:
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-    ports:
-      - "9001:9001"
-      - "9000:9000"
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in deploy/.env or shell}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in deploy/.env or shell}
     volumes:
       - ${DOCKER_VOLUME_DIRECTORY:-..}/volumes/minio:/minio_data
     command: minio server /minio_data --console-address ":9001"
@@ -36,6 +38,11 @@ services:
       interval: 30s
       timeout: 20s
       retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   standalone:
     container_name: milvus-standalone
@@ -47,6 +54,8 @@ services:
       MINIO_REGION: us-east-1
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in deploy/.env or shell}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in deploy/.env or shell}
     volumes:
       - ${DOCKER_VOLUME_DIRECTORY:-..}/volumes/milvus:/var/lib/milvus
     healthcheck:
@@ -55,12 +64,14 @@ services:
       start_period: 90s
       timeout: 20s
       retries: 3
-    ports:
-      - "19530:19530"
-      - "9091:9091"
     depends_on:
       - etcd
       - minio
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   app:
     container_name: tlq-app
@@ -75,8 +86,6 @@ services:
     gpus: all
     environment:
       MILVUS_URI: http://standalone:19530
-    ports:
-      - "8000:8000"
     volumes:
       - tlr_chunks:/app/法规知识库/chunks
       - tlr_index:/app/法规知识库/index
@@ -93,6 +102,11 @@ services:
       timeout: 10s
       retries: 3
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   agent:
     container_name: tlq-agent
@@ -120,6 +134,11 @@ services:
       timeout: 10s
       retries: 3
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
 volumes:
   tlr_chunks:
