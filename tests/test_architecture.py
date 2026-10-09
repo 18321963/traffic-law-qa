@@ -331,6 +331,37 @@ def test_the_prompt_teaches_exactly_the_tools_the_model_gets() -> None:
     assert "最多 3 轮" in rendered and "- 示例法规" in rendered, "提示词是 % 模板，改文本别引入裸 %"
 
 
+def test_the_prompt_quotes_the_material_receipt_verbatim() -> None:
+    pytest.importorskip("langgraph", reason="agent extra 没装：只跑结构检查")
+    from agent_service import prompts
+    from agent_service.tools import schemas
+    from rag_service.query.materials import NO_MATERIALS_NOTE
+
+    quoted = "「本次会话没有上传材料」"
+    assert quoted in prompts.AGENT_SYSTEM_PROMPT, (
+        "系统提示词里对材料回执的引文失真了：模型会照着一个不存在的回执认情况"
+    )
+    assert quoted in schemas.SEARCH_MATERIALS_TOOL["function"]["description"], (
+        "工具描述里对材料回执的引文失真了：模型会照着一个不存在的回执认情况"
+    )
+    assert "本次会话没有上传材料" in NO_MATERIALS_NOTE, (
+        "真回执改了词：上面两处引文没跟着改 —— 引文必须逐字引自 rag_service/query/materials.py"
+    )
+
+
+def test_the_reviewed_prompt_fixes_stay_fixed() -> None:
+    pytest.importorskip("langgraph", reason="agent extra 没装：只跑结构检查")
+    from agent_service import prompts
+
+    text = prompts.AGENT_SYSTEM_PROMPT
+    assert "不要复述你「已命中」了什么。**要引用就引工具返回的原文**" in text, (
+        "防幻觉句又被粘回一句：两个分句之间必须有句号断开，否则「已命中」会被读成允许复述的内容"
+    )
+    assert "续查时，查询里带上法规名片段" in text, (
+        "规则 5 少了「续查时」限定，与规则 2「第一次检索一字不改用原话」字面冲突"
+    )
+
+
 def test_every_offered_tool_has_something_to_run_it() -> None:
     pytest.importorskip("langgraph", reason="agent extra 没装：只跑结构检查")
     from agent_service.agents import nodes
