@@ -27,6 +27,7 @@ from rag_contracts.ports import TRUNCATED_FINISH_REASON
 
 from ..adapters.sqlite import init_database
 from ..query.dispatch import run
+from .gate import QUEUE_TIMEOUT_DETAIL, RETRY_AFTER_SECONDS, RagQueueTimeout, gate
 from .routes import router, runtime_of
 from .runtime import Runtime, boot_runtime
 
@@ -60,6 +61,15 @@ app.include_router(router)
 @app.exception_handler(QaError)
 def _qa_error(request: Request, exc: QaError) -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+@app.exception_handler(RagQueueTimeout)
+def _queue_timeout(request: Request, exc: RagQueueTimeout) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"detail": str(exc)},
+        headers={"Retry-After": RETRY_AFTER_SECONDS},
+    )
 
 
 @app.exception_handler(RuntimeError)
@@ -136,44 +146,50 @@ async def health(request: Request) -> dict:
 @app.post("/qa")
 def ask(request: Request, req: QaRequest) -> dict:
     rt = runtime_of(request)
-    started = time.perf_counter()
-    result = run(
-        rt.rag,
-        req.question,
-        mode=req.mode,
-        top_k=req.pool or req.top_k,
-        channel_debug=req.debug,
-        law_filter=tuple(req.law_filter),
-        candidates=req.pool,
-    )
-    payload = result.to_dict()
-    retrieval = result.retrieval if isinstance(result, Answer) else result
-    if retrieval is not None:
-        rt.dense_live = retrieval.used_vector
-    payload["mode"] = req.mode
-    payload["request_ms"] = round((time.perf_counter() - started) * 1000, 2)
-    return payload
+    with gate() as ok:
+        if not ok:
+            raise RagQueueTimeout(QUEUE_TIMEOUT_DETAIL)
+        started = time.perf_counter()
+        result = run(
+            rt.rag,
+            req.question,
+            mode=req.mode,
+            top_k=req.pool or req.top_k,
+            channel_debug=req.debug,
+            law_filter=tuple(req.law_filter),
+            candidates=req.pool,
+        )
+        payload = result.to_dict()
+        retrieval = result.retrieval if isinstance(result, Answer) else result
+        if retrieval is not None:
+            rt.dense_live = retrieval.used_vector
+        payload["mode"] = req.mode
+        payload["request_ms"] = round((time.perf_counter() - started) * 1000, 2)
+        return payload
 
 
 @app.post("/answer")
 def generate(request: Request, req: AnswerRequest) -> dict:
     rt = runtime_of(request)
-    started = time.perf_counter()
-    question = Question(
-        text=req.question.text,
-        history=tuple((str(role), str(content)) for role, content in req.question.history),
-    )
-    retrieval = RetrievalResult.from_dict(req.retrieval)
-    answer = rt.rag.answer(
-        question,
-        retrieval,
-        timeliness=tuple(WebFinding.from_dict(item) for item in req.timeliness),
-        materials=tuple(MaterialPassage.from_dict(item) for item in req.materials),
-    )
-    rt.dense_live = retrieval.used_vector
-    payload = answer.to_dict()
-    payload["request_ms"] = round((time.perf_counter() - started) * 1000, 2)
-    return payload
+    with gate() as ok:
+        if not ok:
+            raise RagQueueTimeout(QUEUE_TIMEOUT_DETAIL)
+        started = time.perf_counter()
+        question = Question(
+            text=req.question.text,
+            history=tuple((str(role), str(content)) for role, content in req.question.history),
+        )
+        retrieval = RetrievalResult.from_dict(req.retrieval)
+        answer = rt.rag.answer(
+            question,
+            retrieval,
+            timeliness=tuple(WebFinding.from_dict(item) for item in req.timeliness),
+            materials=tuple(MaterialPassage.from_dict(item) for item in req.materials),
+        )
+        rt.dense_live = retrieval.used_vector
+        payload = answer.to_dict()
+        payload["request_ms"] = round((time.perf_counter() - started) * 1000, 2)
+        return payload
 
 
 @app.post("/answer/stream")
@@ -199,88 +215,96 @@ def _streaming(events) -> StreamingResponse:
 
 def _sse_events(rt: Runtime, req: QaRequest):
     started = time.perf_counter()
-    try:
-        retrieval = rt.rag.search(
-            req.question,
-            top_k=req.pool or req.top_k,
-            channel_debug=req.debug,
-            law_filter=tuple(req.law_filter),
-            candidates=req.pool,
+    with gate() as ok:
+        if not ok:
+            yield _sse("error", {"message": QUEUE_TIMEOUT_DETAIL})
+            return
+        try:
+            retrieval = rt.rag.search(
+                req.question,
+                top_k=req.pool or req.top_k,
+                channel_debug=req.debug,
+                law_filter=tuple(req.law_filter),
+                candidates=req.pool,
+            )
+        except Exception as exc:  # noqa: BLE001
+            yield _sse("error", {"message": f"检索失败：{exc}"})
+            return
+        rt.dense_live = retrieval.used_vector
+
+        yield _sse("evidence", retrieval.to_dict())
+
+        question = Question(text=req.question, top_k=req.top_k)
+        parts: list[str] = []
+        usage: dict = {}
+        truncated = False
+        try:
+            for kind, payload in rt.rag.stream(question, retrieval):
+                if kind == "delta":
+                    parts.append(payload)
+                    yield _sse("delta", {"text": payload})
+                elif kind == "usage":
+                    usage = payload
+                elif kind == "finish_reason":
+                    truncated = payload == TRUNCATED_FINISH_REASON
+        except Exception as exc:  # noqa: BLE001
+            yield _sse("error", {"message": str(exc), "partial": "".join(parts)})
+            return
+
+        yield _sse(
+            "done",
+            {
+                "question": req.question,
+                "answer": "".join(parts),
+                "model": rt.rag.model_name,
+                "usage": usage,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+                "citations": [hit.citation for hit in retrieval.articles],
+                "truncated": truncated,
+            },
         )
-    except Exception as exc:  # noqa: BLE001
-        yield _sse("error", {"message": f"检索失败：{exc}"})
-        return
-    rt.dense_live = retrieval.used_vector
-
-    yield _sse("evidence", retrieval.to_dict())
-
-    question = Question(text=req.question, top_k=req.top_k)
-    parts: list[str] = []
-    usage: dict = {}
-    truncated = False
-    try:
-        for kind, payload in rt.rag.stream(question, retrieval):
-            if kind == "delta":
-                parts.append(payload)
-                yield _sse("delta", {"text": payload})
-            elif kind == "usage":
-                usage = payload
-            elif kind == "finish_reason":
-                truncated = payload == TRUNCATED_FINISH_REASON
-    except Exception as exc:  # noqa: BLE001
-        yield _sse("error", {"message": str(exc), "partial": "".join(parts)})
-        return
-
-    yield _sse(
-        "done",
-        {
-            "question": req.question,
-            "answer": "".join(parts),
-            "model": rt.rag.model_name,
-            "usage": usage,
-            "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
-            "citations": [hit.citation for hit in retrieval.articles],
-            "truncated": truncated,
-        },
-    )
 
 
 def _answer_events(rt: Runtime, req: AnswerRequest):
     started = time.perf_counter()
-    question = Question(
-        text=req.question.text,
-        history=tuple((str(role), str(content)) for role, content in req.question.history),
-    )
-    retrieval = RetrievalResult.from_dict(req.retrieval)
-    timeliness = tuple(WebFinding.from_dict(item) for item in req.timeliness)
-    materials = tuple(MaterialPassage.from_dict(item) for item in req.materials)
-    rt.dense_live = retrieval.used_vector
-
-    out: queue.Queue = queue.Queue()
-
-    def worker() -> None:
-        try:
-            frames = rt.rag.stream(question, retrieval, timeliness=timeliness, materials=materials)
-            answer = drain(frames, on_delta=lambda text: out.put(("delta", text)))
-            payload = answer.to_dict()
-            payload["request_ms"] = round((time.perf_counter() - started) * 1000, 2)
-            out.put(("done", payload))
-        except Exception as exc:  # noqa: BLE001
-            out.put(("error", {"message": str(exc)}))
-        finally:
-            out.put(None)
-
-    threading.Thread(target=worker, daemon=True).start()
-
-    while True:
-        item = out.get()
-        if item is None:
+    with gate() as ok:
+        if not ok:
+            yield _sse("error", {"message": QUEUE_TIMEOUT_DETAIL})
             return
-        kind, payload = item
-        if kind == "delta":
-            yield _sse("delta", {"text": payload})
-        else:
-            yield _sse(kind, payload)
+        question = Question(
+            text=req.question.text,
+            history=tuple((str(role), str(content)) for role, content in req.question.history),
+        )
+        retrieval = RetrievalResult.from_dict(req.retrieval)
+        timeliness = tuple(WebFinding.from_dict(item) for item in req.timeliness)
+        materials = tuple(MaterialPassage.from_dict(item) for item in req.materials)
+        rt.dense_live = retrieval.used_vector
+
+        out: queue.Queue = queue.Queue()
+
+        def worker() -> None:
+            try:
+                frames = rt.rag.stream(question, retrieval, timeliness=timeliness, materials=materials)
+                answer = drain(frames, on_delta=lambda text: out.put(("delta", text)))
+                payload = answer.to_dict()
+                payload["request_ms"] = round((time.perf_counter() - started) * 1000, 2)
+                out.put(("done", payload))
+            except Exception as exc:  # noqa: BLE001
+                out.put(("error", {"message": str(exc)}))
+            finally:
+                out.put(None)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        while True:
+            item = out.get()
+            if item is None:
+                return
+            kind, payload = item
+            if kind == "delta":
+                yield _sse("delta", {"text": payload})
+            else:
+                yield _sse(kind, payload)
 
 
 def _sse(event: str, payload: dict) -> str:
