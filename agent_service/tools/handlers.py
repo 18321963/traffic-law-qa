@@ -27,7 +27,7 @@ from .render import render_tool_result
 __all__ = ["ToolCall", "ToolEnv", "ToolOutcome", "retrieval_digest"]
 
 NO_FRESH_MATERIAL = (
-    "注意：这些段上一轮已经给过你了，材料里没有别的相关内容。就此停下作答，或换个说法再试一次。\n"
+    "注意：这些段上一轮已经给过你了，本轮没有新增材料段。就此停下作答，或换个说法再试一次。\n"
 )
 
 _BAD_ARGUMENTS = "参数不合法：{}。请修正后重试。"

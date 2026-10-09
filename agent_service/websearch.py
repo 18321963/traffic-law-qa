@@ -15,8 +15,8 @@ NO_KEY_NOTE = (
     "不要再调用 web_search。"
 )
 HTTP_FAILED_NOTE = (
-    "联网检索服务返回 {status}，本次没取到结果 —— 先按库内法条作答，"
-    "并在答案里说明「是否有最新规定」未能确认。"
+    "联网检索{reason}，本次没取到结果 —— 先按库内法条作答，"
+    "「是否有最新规定」按未确认处理。"
 )
 TIMEOUT_NOTE = (
     "联网检索超时（{timeout:g} 秒），本次没取到结果 —— 先按库内法条作答，"
@@ -24,7 +24,7 @@ TIMEOUT_NOTE = (
 )
 EMPTY_NOTE = (
     "联网检索没有命中任何网页。换一组更具体的说法再试一次（补上地区、年份、文件名）；"
-    "再空就说明没有公开的新规定，就此停下作答。"
+    "再空就停下作答。"
 )
 """四种回执文案。分开写是因为模型**据此能做不同的事**：无 key 不必再试、超时不要重试、
 服务端错先按库内作答、真空结果才值得换个说法再搜一次。四种都不抛异常 —— 工具回执必须
@@ -83,15 +83,15 @@ def search_web(
     except httpx.TimeoutException:
         return [], TIMEOUT_NOTE.format(timeout=cfg.timeout)
     except httpx.HTTPError as exc:
-        return [], HTTP_FAILED_NOTE.format(status=type(exc).__name__)
+        return [], HTTP_FAILED_NOTE.format(reason=f"请求出错（{type(exc).__name__}）")
 
     if response.status_code != 200:
-        return [], HTTP_FAILED_NOTE.format(status=response.status_code)
+        return [], HTTP_FAILED_NOTE.format(reason=f"服务返回 {response.status_code}")
 
     try:
         pages = _pages(response.json())
     except ValueError:
-        return [], HTTP_FAILED_NOTE.format(status="非 JSON")
+        return [], HTTP_FAILED_NOTE.format(reason="服务返回的内容不是 JSON")
 
     findings: list[WebFinding] = []
     for page in pages:
