@@ -362,6 +362,16 @@ def test_the_reviewed_prompt_fixes_stay_fixed() -> None:
     )
 
 
+def test_the_law_tool_description_hardcodes_no_corpus_counts() -> None:
+    pytest.importorskip("langgraph", reason="agent extra 没装：只跑结构检查")
+    from agent_service.tools import schemas
+
+    description = schemas.SEARCH_LAW_TOOL["function"]["description"]
+    assert "8 部" not in description and "656" not in description, (
+        "工具描述里写死法规部数/条数，语料一变就是假话 —— 数字以 GET /health 为准"
+    )
+
+
 def test_every_offered_tool_has_something_to_run_it() -> None:
     pytest.importorskip("langgraph", reason="agent extra 没装：只跑结构检查")
     from agent_service.agents import nodes

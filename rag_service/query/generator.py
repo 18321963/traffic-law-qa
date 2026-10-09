@@ -12,7 +12,7 @@ from ..prompts import ANSWER_SYSTEM_PROMPT, ANSWER_USER_TEMPLATE, MATERIAL_HEADE
 
 EMPTY_RETRIEVAL_ANSWER = (
     "现有法规库中未检索到与问题相关的条文，无法给出有依据的回答。"
-    "建议补充更具体的违法情形、地点，或确认是否属于本知识库覆盖的 8 部法规范围。"
+    "建议补充更具体的违法情形、地点，或确认是否属于本知识库覆盖的法规范围。"
 )
 UNAVAILABLE_ANSWER = "（未配置大模型，下面只给出召回的法条）"
 
@@ -150,7 +150,7 @@ class AnswerGenerator:
         started = time.perf_counter()
         notes = list(retrieval.notes)
 
-        if retrieval.is_empty:
+        if retrieval.is_empty and not timeliness and not materials:
             return self._assemble(
                 question,
                 retrieval,
@@ -206,7 +206,7 @@ class AnswerGenerator:
         evidences = self.build_evidence(retrieval)
         notes = list(retrieval.notes)
 
-        if retrieval.is_empty:
+        if retrieval.is_empty and not timeliness and not materials:
             yield "delta", EMPTY_RETRIEVAL_ANSWER
             yield "usage", {}
             yield "answer", self._assemble(

@@ -28,7 +28,8 @@ from rag_contracts.ports import TRUNCATED_FINISH_REASON  # noqa: E402
 from rag_service.api import app as server  # noqa: E402
 from rag_service.api.runtime import Runtime  # noqa: E402
 from rag_service.indexing.readiness import ReadyState  # noqa: E402
-from rag_service.query.generator import AnswerGenerator  # noqa: E402
+from rag_service.prompts import ANSWER_SYSTEM_PROMPT, MATERIAL_HEADER, TIMELINESS_HEADER  # noqa: E402
+from rag_service.query.generator import EMPTY_RETRIEVAL_ANSWER, AnswerGenerator  # noqa: E402
 
 LAW_NAME = "中华人民共和国道路交通安全法"
 ARTICLE_TEXT = "醉酒驾驶机动车的，由公安机关交通管理部门约束至酒醒，吊销机动车驾驶证。"
@@ -207,6 +208,64 @@ def test_stream_tail_matches_generate_on_the_empty_retrieval_route() -> None:
     assert tail.model == "(skip)" and tail.usage == {}
     assert _zeroed(tail) == _zeroed(generator.generate(question, retrieval))
     assert llm.chats == 0 and llm.streams == 0, "空检索这条路不该碰模型"
+    assert "未检索到与问题相关的条文" in tail.text
+    assert "8 部" not in tail.text and "656" not in tail.text, (
+        "常量里不写死法规部数/条数 —— 语料一变数字就是假的（数字以 GET /health 为准）"
+    )
+
+
+def test_an_empty_retrieval_with_materials_still_reaches_the_model() -> None:
+    retrieval = _retrieval("我们公司培训费怎么算", empty=True)
+    question = Question(text="我们公司培训费怎么算")
+    llm = FakeLLM(["材料里写的是包干。"])
+    generator = _generator(llm)
+
+    answer = generator.generate(question, retrieval, materials=(MATERIAL,))
+
+    assert llm.chats == 1, "材料非空时不该走空检索短路 —— 常量回答会把材料整块吞掉"
+    assert answer.text == "材料里写的是包干。"
+    prompt = llm.prompts[0][-1]["content"]
+    assert MATERIAL_HEADER in prompt and MATERIAL.label in prompt
+    assert "依据（共 0 条）" in prompt
+    assert all("检索结果为空" not in note for note in answer.notes)
+
+
+def test_an_empty_retrieval_with_timeliness_still_reaches_the_model() -> None:
+    retrieval = _retrieval("深圳电动自行车新规", empty=True)
+    question = Question(text="深圳电动自行车新规")
+    llm = FakeLLM(["按时效提示作答。"])
+    generator = _generator(llm)
+
+    answer = generator.generate(question, retrieval, timeliness=(WEB_FINDING,))
+
+    assert llm.chats == 1, "时效非空时不该走空检索短路 —— 常量回答会把时效块整块吞掉"
+    assert answer.text == "按时效提示作答。"
+    prompt = llm.prompts[0][-1]["content"]
+    assert TIMELINESS_HEADER in prompt and WEB_FINDING.label in prompt
+    assert all("检索结果为空" not in note for note in answer.notes)
+
+
+def test_the_stream_route_also_lets_materials_through_an_empty_retrieval() -> None:
+    retrieval = _retrieval("我们公司培训费怎么算", empty=True)
+    question = Question(text="我们公司培训费怎么算")
+    llm = FakeLLM(["材料里", "写的是包干。"])
+    generator = _generator(llm)
+
+    frames = list(generator.stream(question, retrieval, materials=(MATERIAL,)))
+
+    assert [kind for kind, _ in frames] == ["delta", "delta", "finish_reason", "usage", "answer"]
+    tail = frames[-1][1]
+    assert tail.text == "材料里写的是包干。"
+    assert tail.model == "内存模型"
+    assert llm.streams == 1 and llm.chats == 0, "材料在，流式也不该被空检索短路吃掉"
+
+
+def test_the_insufficient_evidence_wording_stays_in_one_family() -> None:
+    assert "现有依据中没有与问题相关的条文" in ANSWER_SYSTEM_PROMPT
+    assert "未收录" not in ANSWER_SYSTEM_PROMPT, (
+        "「库未收录」超出可证范围（这次没检索到 ≠ 库里没有）—— 统一用「没有与问题相关的条文」"
+    )
+    assert "未检索到与问题相关的条文" in EMPTY_RETRIEVAL_ANSWER
 
 
 def test_stream_tail_matches_generate_when_the_llm_is_not_configured() -> None:
