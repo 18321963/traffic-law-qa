@@ -4,10 +4,11 @@ import json
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from api_contracts import RagClient
 from rag_contracts import config
 from rag_contracts.domain.answer import Question
 from rag_contracts.domain.errors import QaError
@@ -22,15 +23,17 @@ __all__ = ["app"]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    app.state.client = container.build_client()
     app.state.runner = None
     app.state.boot_error = None
     try:
-        app.state.runner = container.boot_agent_runner(container.build_client())
+        app.state.runner = container.boot_agent_runner(app.state.client)
     except QaError as exc:
         app.state.boot_error = str(exc)
         print(f"[agent] 启动失败：{exc}")
     yield
     app.state.runner = None
+    app.state.client.close()
 
 
 app = FastAPI(
@@ -91,6 +94,13 @@ def runner_of(request: Request):
     return runner
 
 
+def client_of(request: Request) -> RagClient:
+    client = getattr(request.app.state, "client", None)
+    if client is None:
+        raise HTTPException(status_code=503, detail="服务未就绪")
+    return client
+
+
 def deny_if_over_budget() -> None:
     blocked = budget.exhausted(config.agent_config().daily_token_budget)
     if blocked is None:
@@ -110,7 +120,7 @@ class AgentRequest(BaseModel):
     )
     doc_ids: list[str] = Field(
         default_factory=list,
-        description="本次会话材料的 doc_id（rag 服务 POST /documents mode=session 的返回）",
+        description="本次会话材料的 doc_id（POST /documents mode=session 的返回）",
     )
     session_id: str | None = Field(
         None, min_length=1, description="会话 id：带上才有跨轮记忆；响应会把同一个值回传"
@@ -181,6 +191,28 @@ def resume_stream(request: Request, req: ResumeRequest) -> StreamingResponse:
     runner = runner_of(request)
     deny_if_over_budget()
     return _streaming(_events(runner.resume_stream(req.session_id, {"region": req.value.region})))
+
+
+@app.post("/documents")
+def upload_document(
+    request: Request, file: UploadFile = File(...), mode: str | None = Form(None)
+) -> JSONResponse:
+    status, payload = client_of(request).upload_document(
+        file.filename or "未命名", file.file.read(), mode=mode
+    )
+    return JSONResponse(status_code=status, content=payload)
+
+
+@app.get("/documents")
+def list_documents(request: Request, mode: str | None = None) -> JSONResponse:
+    status, payload = client_of(request).list_documents(mode=mode)
+    return JSONResponse(status_code=status, content=payload)
+
+
+@app.delete("/documents/{doc_id}")
+def delete_document(request: Request, doc_id: str) -> JSONResponse:
+    status, payload = client_of(request).delete_document(doc_id)
+    return JSONResponse(status_code=status, content=payload)
 
 
 def _streaming(events) -> StreamingResponse:

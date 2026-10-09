@@ -302,7 +302,7 @@ ruff check .
 | `python -m rag_service.cli.build <子命令>` | 建库：`build` / `status` / `layers` / `docx` / `parse` / `chunk` / `index` |
 | `python -m rag_service.cli.serve [--host H] [--port P]` | 起知识库服务 |
 | `python -m agent_service "问题" [--trace] [--timing] [--json]` | 提问：完整 Agent 循环（判地区 → 规划 → 工具调用 → 复核 → 生成），打的是 rag 服务的 HTTP 面 |
-| `python -m uvicorn agent_service.api.app:app --port 8001` | 把 agent 立成服务（`/qa` · `/qa/stream` · `/qa/resume` · `/qa/resume/stream` · `/health`）；compose 里已常驻一个（宿主 :8001），这条是裸跑用 |
+| `python -m uvicorn agent_service.api.app:app --port 8001` | 把 agent 立成服务（`/qa` · `/qa/stream` · `/qa/resume` · `/qa/resume/stream` · `/documents` 材料台账 · `/health`）；compose 里已常驻一个（宿主 :8001），这条是裸跑用 |
 | `python -m eval [--reference] [--pool N] [--http asgi\|URL]` | 评测：域内 池子召回 / hit@k / 单通道召回 ｜ 点名桶取条。`--http` 把同一套题发到服务端点（跨进程那条臂；不给默认走 asgi，等于在本进程里起一个真 app 过真 HTTP） |
 | `python -m eval.singlehop` | 单跳两臂对照 |
 | `python -m eval.multihop` | 跨法多跳 |
@@ -335,7 +335,7 @@ ruff check .
 
 `POST /qa` 另有三个诊断参数（`ask` / `search` 生效）：`pool` 覆盖候选池深度并按它放行超过 `top_k` 上限的返回条数（上限 `RAG_POOL_MAX`，与 eval 的 `--pool` 同口径）、`debug` 回传两路通道各自的名次与原始分、`law_filter` 只在给定 `law_id` 内检索。
 
-上表的机器可读版本是 `api_contracts/openapi.json`（由 `app.openapi()` 生成，`python -m api_contracts.regen` 重出），`tests/test_openapi_contract.py` 逐字节盯着它与应用是否一致；配套的薄客户端 `api_contracts/client.py` 进出一律 dict、4xx/5xx 一律抛 `QaError`，MCP 适配层、eval 的 HTTP 臂与 agent 服务共用它。
+上表的机器可读版本是 `api_contracts/openapi.json`（由 `app.openapi()` 生成，`python -m api_contracts.regen` 重出），`tests/test_openapi_contract.py` 逐字节盯着它与应用是否一致；配套的薄客户端 `api_contracts/client.py` 进出一律 dict、4xx/5xx 一律抛 `QaError`（材料台账的三个透传方法例外——状态码原样带回，见下节 agent 表），MCP 适配层、eval 的 HTTP 臂与 agent 服务共用它。
 
 ### agent 服务（agent_service，宿主 :8001 → 容器 :8000）
 
@@ -345,6 +345,7 @@ ruff check .
 | `POST /qa` | **完整 Agent 循环**：判地区 → 规划 → 工具调用（可多轮）→ 复核 → 生成。与 rag 的 `/qa?mode=ask\|search` 语义不同、**不是它的代理**：模型自己决定查几轮、查什么，末端还要逐条复核引用是否被原文支撑，支撑不住的整篇降级。body：`question` · `top_k` · `doc_ids`（本次会话材料的 doc_id）· `session_id`（跨轮记忆句柄）。开了澄清且问题沾到地方时返回 `status=interrupted`（拿 `session_id` 去 resume），答完是 `status=ok`——两种都是 200 |
 | `POST /qa/stream` | 同上，SSE 推：步骤流 `step`（每个节点一步）+ 逐字 `delta`（**草稿**）+ `done`（复核之后的权威整篇）+ `interrupt`（等澄清回复，出了它就是这一轮的终点）；中途任何一步出错收成 `error` 帧 |
 | `POST /qa/resume` · `/qa/resume/stream` | 把澄清回复交回去：body `{session_id, value: {region}}` —— `region` 给地区名就按该地法规 + 全国法答，给 `national` 只按全国法。前者普通 JSON（没有等待中的澄清 → 409），后者 SSE（同类冲突收成 `error` 帧）；细节在接口文档 §3.2 |
+| `POST /documents` · `GET /documents` · `DELETE /documents/{id}` | 材料台账的**代理面**，字段与返回同 rag 面同名端点（上传 multipart `file` + 可选 `mode`，列表可 `?mode=` 过滤，按 id 撤一份）。**生产面宿主只有这一条路能传材料**——上传会话材料拿 `doc_id` 走这里；拒收 400 与无此件 404 原样透传（不翻 503），不依赖 agent 图就绪、不进日额度闸；过鉴权与限流 |
 
 带 `session_id` 的请求共用一张会话；会话记忆落 SQLite（`AGENT_SESSION_DB`，默认 `data/sessions.db`）。流式面上 `delta` 是草稿、`done` 才是权威 —— 末端复核可能整篇降级替换。
 

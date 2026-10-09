@@ -107,6 +107,38 @@ class RagClient:
             return detail
         return json.dumps(detail, ensure_ascii=False)[:MAX_DETAIL_CHARS]
 
+    def _relay(
+        self,
+        method: str,
+        path: str,
+        *,
+        files: dict | None = None,
+        data: dict | None = None,
+        params: dict | None = None,
+        timeout: float | None = None,
+    ) -> tuple[int, dict]:
+        kwargs: dict = {"params": params}
+        if files is not None:
+            kwargs["files"] = files
+        if data is not None:
+            kwargs["data"] = data
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        try:
+            resp = self._client.request(method, path, **kwargs)
+        except httpx.TimeoutException as exc:
+            effective = self.timeout if timeout is None else timeout
+            raise QaTimeout(f"{method} {path} 超时（{effective:g} 秒）：{exc}") from None
+        except httpx.HTTPError as exc:
+            raise QaError(f"{method} {path} 连不上 {self.base_url}：{exc}") from None
+        try:
+            payload = resp.json()
+        except ValueError:
+            raise QaError(
+                f"{method} {path} 返回的不是 JSON：{resp.text[:MAX_DETAIL_CHARS]}"
+            ) from None
+        return resp.status_code, payload
+
     def health(self) -> dict:
         return self.request("GET", "/health")
 
@@ -161,6 +193,28 @@ class RagClient:
         if top_k is not None:
             body["top_k"] = top_k
         return self.request("POST", "/materials/search", body=body, timeout=timeout)
+
+    def upload_document(
+        self,
+        filename: str,
+        content: bytes,
+        *,
+        mode: str | None = None,
+        timeout: float | None = None,
+    ) -> tuple[int, dict]:
+        data = {"mode": mode} if mode else None
+        return self._relay(
+            "POST", "/documents", files={"file": (filename, content)}, data=data, timeout=timeout
+        )
+
+    def list_documents(
+        self, *, mode: str | None = None, timeout: float | None = None
+    ) -> tuple[int, dict]:
+        params = {"mode": mode} if mode else None
+        return self._relay("GET", "/documents", params=params, timeout=timeout)
+
+    def delete_document(self, doc_id: str, *, timeout: float | None = None) -> tuple[int, dict]:
+        return self._relay("DELETE", f"/documents/{doc_id}", timeout=timeout)
 
     def laws(self) -> tuple[LawInfo, ...]:
         payload = self.request("GET", "/laws")
