@@ -8,12 +8,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from rag_contracts import config
 from rag_contracts.domain.answer import Question
 from rag_contracts.domain.errors import QaError
 from rag_contracts.domain.retrieval import TOP_K_MAX, TOP_K_MIN
 
 from .. import container
 from ..agents.errors import ResumeConflict, SessionUnsupported
+from . import auth
 
 __all__ = ["app"]
 
@@ -37,6 +39,27 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+_limiter = auth.MinuteWindowLimiter()
+
+
+@app.middleware("http")
+async def _guard(request: Request, call_next):
+    if request.url.path not in auth.EXEMPT_PATHS:
+        cfg = config.agent_config()
+        if cfg.api_keys:
+            presented = request.headers.get(auth.API_KEY_HEADER, "")
+            if not auth.keys_match(presented, cfg.api_keys):
+                return JSONResponse(status_code=401, content={"detail": auth.UNAUTHORIZED_DETAIL})
+            if cfg.rate_limit_rpm > 0:
+                retry_after = _limiter.hit(presented, cfg.rate_limit_rpm, time.time())
+                if retry_after:
+                    return JSONResponse(
+                        status_code=429,
+                        content={"detail": auth.rate_limit_detail(cfg.rate_limit_rpm)},
+                        headers={"Retry-After": str(retry_after)},
+                    )
+    return await call_next(request)
 
 
 @app.exception_handler(QaError)
