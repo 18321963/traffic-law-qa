@@ -34,7 +34,15 @@ from ..adapters.sqlite import (
     save_document,
     utc_now,
 )
-from ..indexing.ingest import dry_run, promote, read_material, store_material, valid_doc_id
+from ..indexing.ingest import (
+    MAX_BYTES,
+    TOO_BIG_NOTE,
+    dry_run,
+    promote,
+    read_material,
+    store_material,
+    valid_doc_id,
+)
 from ..query.articles import build_article_index, lookup_text
 from .gate import QUEUE_TIMEOUT_DETAIL, RagQueueTimeout, gate
 from .runtime import boot_runtime
@@ -67,6 +75,10 @@ def runtime_of(request: Request) -> Any:
     return rt
 
 
+def _too_big(size: int) -> HTTPException:
+    return HTTPException(status_code=400, detail=TOO_BIG_NOTE.format(size=size, limit=MAX_BYTES))
+
+
 def _rejected(doc_id: str, mode: str, display_name: str, note: str) -> JSONResponse:
     return JSONResponse(
         status_code=400,
@@ -81,7 +93,7 @@ def _rejected(doc_id: str, mode: str, display_name: str, note: str) -> JSONRespo
 
 
 @router.post("/documents")
-async def upload(
+def upload(
     request: Request,
     file: UploadFile = File(..., description="docx / md / txt / pdf"),
     mode: str = Form(MODE_SESSION, description="session=仅本次会话；permanent=入知识库"),
@@ -91,7 +103,11 @@ async def upload(
         raise HTTPException(status_code=400, detail=UNKNOWN_MODE_NOTE.format(modes="、".join(MODE_LABELS)))
 
     display_name = Path(file.filename or "未命名").name
-    data = await file.read()
+    if file.size is not None and file.size > MAX_BYTES:
+        raise _too_big(file.size)
+    data = file.file.read()
+    if len(data) > MAX_BYTES:
+        raise _too_big(len(data))
     suffix = Path(display_name).suffix.lower()
     doc_id = new_doc_id()
 
@@ -161,7 +177,7 @@ async def upload(
         "version": plan.version,
         "citation": plan.citation,
         "articles": plan.articles,
-        "note": MODE_NOTE[mode] + "；POST /reindex 立刻生效，不点则下次问答时自动重建",
+        "note": MODE_NOTE[mode] + "；POST /reindex 立刻生效，不点则下次服务启动时自动重建",
     }
 
 

@@ -25,6 +25,7 @@ from rag_service.adapters.sqlite import (  # noqa: E402
 from rag_service.api import app as server  # noqa: E402
 from rag_service.api.runtime import Runtime  # noqa: E402
 from rag_service.indexing.ingest import (  # noqa: E402
+    MAX_BYTES,
     IngestPlan,
     dry_run,
     load_material_meta,
@@ -152,6 +153,17 @@ def test_a_file_with_no_paragraphs_is_refused_with_the_ingest_receipt(client) ->
     rows = client.get("/documents", params={"mode": "session"}).json()["documents"]
     assert [row["status"] for row in rows] == [STATUS_REJECTED]
     assert not config.upload_dir(body["doc_id"]).exists()
+
+
+def test_an_oversized_upload_is_refused_before_it_is_read(client) -> None:
+    too_big = "x" * (MAX_BYTES + 1)
+
+    for mode in ("session", "permanent"):
+        resp = _upload(client, too_big, "超限.md", mode)
+        assert resp.status_code == 400
+        assert "超过" in resp.json()["detail"], mode
+
+    assert client.get("/documents").json()["count"] == 0
 
 
 def test_permanent_rejection_never_lands_in_the_source_dir(client) -> None:

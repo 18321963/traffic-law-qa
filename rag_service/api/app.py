@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import AfterValidator, BaseModel, Field
 
@@ -78,6 +78,7 @@ def _runtime_error(request: Request, exc: RuntimeError) -> JSONResponse:
 
 
 BLANK_QUESTION_NOTE = "问题不能只有空白字符"
+BAD_RETRIEVAL_NOTE = "retrieval 解析不了：{error}"
 
 
 def _not_blank_question(value: str) -> str:
@@ -87,6 +88,13 @@ def _not_blank_question(value: str) -> str:
 
 
 QuestionText = Annotated[str, AfterValidator(_not_blank_question)]
+
+
+def _parsed_retrieval(payload: dict) -> RetrievalResult:
+    try:
+        return RetrievalResult.from_dict(payload)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=BAD_RETRIEVAL_NOTE.format(error=exc)) from None
 
 
 class QuestionBody(BaseModel):
@@ -191,6 +199,7 @@ def generate(request: Request, req: AnswerRequest) -> dict:
             text=req.question.text,
             history=tuple((str(role), str(content)) for role, content in req.question.history),
         )
+        _parsed_retrieval(req.retrieval)
         retrieval = RetrievalResult.from_dict(req.retrieval)
         answer = rt.rag.answer(
             question,
@@ -206,7 +215,15 @@ def generate(request: Request, req: AnswerRequest) -> dict:
 
 @app.post("/answer/stream")
 def generate_stream(request: Request, req: AnswerRequest) -> StreamingResponse:
-    return _streaming(_answer_events(runtime_of(request), req))
+    rt = runtime_of(request)
+    question = Question(
+        text=req.question.text,
+        history=tuple((str(role), str(content)) for role, content in req.question.history),
+    )
+    retrieval = _parsed_retrieval(req.retrieval)
+    timeliness = tuple(WebFinding.from_dict(item) for item in req.timeliness)
+    materials = tuple(MaterialPassage.from_dict(item) for item in req.materials)
+    return _streaming(_answer_events(rt, question, retrieval, timeliness, materials))
 
 
 @app.post("/qa/stream")
@@ -277,19 +294,18 @@ def _sse_events(rt: Runtime, req: QaRequest):
         )
 
 
-def _answer_events(rt: Runtime, req: AnswerRequest):
+def _answer_events(
+    rt: Runtime,
+    question: Question,
+    retrieval: RetrievalResult,
+    timeliness: tuple[WebFinding, ...],
+    materials: tuple[MaterialPassage, ...],
+):
     started = time.perf_counter()
     with gate() as ok:
         if not ok:
             yield _sse("error", {"message": QUEUE_TIMEOUT_DETAIL})
             return
-        question = Question(
-            text=req.question.text,
-            history=tuple((str(role), str(content)) for role, content in req.question.history),
-        )
-        retrieval = RetrievalResult.from_dict(req.retrieval)
-        timeliness = tuple(WebFinding.from_dict(item) for item in req.timeliness)
-        materials = tuple(MaterialPassage.from_dict(item) for item in req.materials)
         rt.dense_live = retrieval.used_vector
 
         out: queue.Queue = queue.Queue()
