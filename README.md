@@ -286,7 +286,7 @@ print(qa("深圳 行人在机动车道 罚款多少", mode="search").render())  
 ### 测试
 
 ```powershell
-python -m pytest                # 266 条离线用例，约 24 秒；不碰 Milvus、不调模型
+python -m pytest                # 360 条离线用例，约 26 秒；不碰 Milvus、不调模型
 ruff check .
 ```
 
