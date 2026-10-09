@@ -36,6 +36,7 @@ from ..adapters.sqlite import (
 )
 from ..indexing.ingest import dry_run, promote, read_material, store_material
 from ..query.articles import build_article_index, lookup_text
+from .gate import QUEUE_TIMEOUT_DETAIL, RagQueueTimeout, gate
 from .runtime import boot_runtime
 
 __all__ = ["router", "runtime_of"]
@@ -306,7 +307,10 @@ class MaterialSearch(BaseModel):
 @router.post("/materials/search")
 def materials_search(request: Request, req: MaterialSearch) -> dict:
     rt = runtime_of(request)
-    hits, text = rt.rag.search_materials(req.query, req.doc_ids, top_k=req.top_k)
+    with gate() as ok:
+        if not ok:
+            raise RagQueueTimeout(QUEUE_TIMEOUT_DETAIL)
+        hits, text = rt.rag.search_materials(req.query, req.doc_ids, top_k=req.top_k)
     return {
         "query": req.query,
         "count": len(hits),
