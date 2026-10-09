@@ -25,6 +25,7 @@ class AgentState(TypedDict, total=False):
     steps: Annotated[int, operator.add]
     usage: Annotated[list[dict], operator.add]
     truncated: Annotated[int, operator.add]
+    call_keys: Annotated[list[str], operator.add]
 
     region: str
     region_scope: tuple[str, ...]

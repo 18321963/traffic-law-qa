@@ -5,6 +5,7 @@ from typing import Any
 
 from api_contracts import RagClient
 from rag_contracts import config
+from rag_contracts.domain.errors import QaTimeout
 from rag_contracts.domain.laws import resolve_law
 from rag_contracts.domain.retrieval import (
     MATERIAL_TOP_K_DEFAULT,
@@ -36,6 +37,11 @@ NO_FRESH_MATERIAL = (
 
 _BAD_ARGUMENTS = "参数不合法：{}。请修正后重试。"
 
+_TIMEOUT_RECEIPT = (
+    "检索超时（超过 {budget:g} 秒仍未返回），本次没取到结果。"
+    "可以换一组关键词再试，或用更通用的说法。"
+)
+
 
 @dataclass(frozen=True)
 class ToolEnv:
@@ -62,6 +68,15 @@ class ToolOutcome:
     retrieval: RetrievalResult | None = None
     findings: tuple[WebFinding, ...] = ()
     passages: tuple[MaterialPassage, ...] = ()
+    error: str = ""
+
+
+def _search_failure(exc: Exception, budget: float) -> ToolOutcome:
+    if isinstance(exc, QaTimeout):
+        return ToolOutcome(_TIMEOUT_RECEIPT.format(budget=budget), error="检索超时")
+    return ToolOutcome(
+        f"检索失败：{exc}。可以换一组关键词再试，或用更通用的说法。", error="检索失败"
+    )
 
 
 def retrieval_digest(result: RetrievalResult) -> dict:
@@ -80,7 +95,7 @@ def search_law(env: ToolEnv, call: ToolCall) -> ToolOutcome:
             call.arguments, default_top_k=call.default_top_k
         )
     except ValueError as exc:
-        return ToolOutcome(_BAD_ARGUMENTS.format(exc))
+        return ToolOutcome(_BAD_ARGUMENTS.format(exc), error="参数不合法")
 
     kwargs: dict[str, Any] = {}
     if law_name:
@@ -88,7 +103,8 @@ def search_law(env: ToolEnv, call: ToolCall) -> ToolOutcome:
         if law_id is None:
             return ToolOutcome(
                 f"无法确定法规「{law_name}」。库内只有这几部，请从中选一个"
-                f"（或省略 law_name 检索全部）：{'；'.join(known_names)}"
+                f"（或省略 law_name 检索全部）：{'；'.join(known_names)}",
+                error="法规无法确定",
             )
         kwargs["law_filter"] = (law_id,)
     elif call.region_scope:
@@ -104,11 +120,11 @@ def search_law(env: ToolEnv, call: ToolCall) -> ToolOutcome:
                 "law_filter": kwargs.get("law_filter"),
             },
         ) as span:
-            result = env.rag.search(query, top_k=top_k, **kwargs)
+            result = env.rag.search(query, top_k=top_k, timeout=env.cfg.tool_timeout, **kwargs)
             match_text = result.matched_text
             span.update(output=retrieval_digest(result))
     except Exception as exc:  # noqa: BLE001
-        return ToolOutcome(f"检索失败：{exc}。可以换一组关键词再试，或用更通用的说法。")
+        return _search_failure(exc, env.cfg.tool_timeout)
 
     text = render_tool_result(
         result,
@@ -126,16 +142,21 @@ def get_article(env: ToolEnv, call: ToolCall) -> ToolOutcome:
     try:
         article_no, law_name = parse_article_arguments(call.arguments)
     except ValueError as exc:
-        return ToolOutcome(_BAD_ARGUMENTS.format(exc))
+        return ToolOutcome(_BAD_ARGUMENTS.format(exc), error="参数不合法")
 
-    with env.observer.observation(
-        "精确取条",
-        "retriever",
-        input={"article_no": article_no, "law_name": law_name},
-    ) as span:
-        result, error = env.rag.get_article(article_no, law_name)
-        if result is not None:
-            span.update(output=retrieval_digest(result))
+    try:
+        with env.observer.observation(
+            "精确取条",
+            "retriever",
+            input={"article_no": article_no, "law_name": law_name},
+        ) as span:
+            result, error = env.rag.get_article(
+                article_no, law_name, timeout=env.cfg.tool_timeout
+            )
+            if result is not None:
+                span.update(output=retrieval_digest(result))
+    except Exception as exc:  # noqa: BLE001
+        return _search_failure(exc, env.cfg.tool_timeout)
     if result is None:
         return ToolOutcome(error)
     return ToolOutcome(
@@ -156,7 +177,7 @@ def web_search(env: ToolEnv, call: ToolCall) -> ToolOutcome:
             call.arguments, default_count=config.bocha_config().count
         )
     except ValueError as exc:
-        return ToolOutcome(_BAD_ARGUMENTS.format(exc))
+        return ToolOutcome(_BAD_ARGUMENTS.format(exc), error="参数不合法")
 
     with env.observer.observation(
         "联网检索",
@@ -174,19 +195,24 @@ def search_materials(env: ToolEnv, call: ToolCall) -> ToolOutcome:
             call.arguments, default_top_k=MATERIAL_TOP_K_DEFAULT
         )
     except ValueError as exc:
-        return ToolOutcome(_BAD_ARGUMENTS.format(exc))
+        return ToolOutcome(_BAD_ARGUMENTS.format(exc), error="参数不合法")
 
-    with env.observer.observation(
-        "材料检索", "retriever", input={"query": query, "top_k": top_k}
-    ) as span:
-        hits, text = env.rag.search_materials(query, call.doc_ids, top_k=top_k)
-        span.update(
-            output={
-                "命中": len(hits),
-                "材料份数": len({hit.doc_id for hit in hits}),
-                "段": [hit.citation for hit in hits[:3]],
-            }
-        )
+    try:
+        with env.observer.observation(
+            "材料检索", "retriever", input={"query": query, "top_k": top_k}
+        ) as span:
+            hits, text = env.rag.search_materials(
+                query, call.doc_ids, top_k=top_k, timeout=env.cfg.tool_timeout
+            )
+            span.update(
+                output={
+                    "命中": len(hits),
+                    "材料份数": len({hit.doc_id for hit in hits}),
+                    "段": [hit.citation for hit in hits[:3]],
+                }
+            )
+    except Exception as exc:  # noqa: BLE001
+        return _search_failure(exc, env.cfg.tool_timeout)
     fresh = tuple(hit for hit in hits if hit.label not in call.seen_labels)
     if hits and not fresh:
         text = NO_FRESH_MATERIAL + text

@@ -8,7 +8,7 @@ import httpx
 
 from rag_contracts import config
 from rag_contracts.domain.answer import Answer, Question
-from rag_contracts.domain.errors import QaError
+from rag_contracts.domain.errors import QaError, QaTimeout
 from rag_contracts.domain.laws import LawInfo
 from rag_contracts.domain.retrieval import (
     MATERIAL_TOP_K_DEFAULT,
@@ -55,6 +55,7 @@ class RagClient:
         top_k: int | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
         self._client = client or httpx.Client(base_url=self.base_url, timeout=timeout)
         self.top_k = _clamp_top_k(top_k)
 
@@ -81,6 +82,9 @@ class RagClient:
             kwargs["timeout"] = timeout
         try:
             resp = self._client.request(method, path, **kwargs)
+        except httpx.TimeoutException as exc:
+            effective = self.timeout if timeout is None else timeout
+            raise QaTimeout(f"{method} {path} 超时（{effective:g} 秒）：{exc}") from None
         except httpx.HTTPError as exc:
             raise QaError(f"{method} {path} 连不上 {self.base_url}：{exc}") from None
         if resp.status_code >= 400:

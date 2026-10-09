@@ -92,6 +92,7 @@ class AgentStubService:
         self.streams: list[dict] = []
         self.lookups: list[tuple[str, str | None]] = []
         self.material_calls: list[tuple[str, tuple[str, ...], int]] = []
+        self.tool_timeouts: list[tuple[str, float | None]] = []
 
     def laws(self):
         return laws_of(self.parents.values())
@@ -104,7 +105,9 @@ class AgentStubService:
         channel_debug: bool = False,
         law_filter: tuple[str, ...] = (),
         candidates: int | None = None,
+        timeout: float | None = None,
     ) -> RetrievalResult:
+        self.tool_timeouts.append(("search", timeout))
         self.searches.append(
             {
                 "question": question,
@@ -136,9 +139,10 @@ class AgentStubService:
             matched_text=f"{question} 醉酒驾驶",
         )
 
-    def get_article(self, article_no: str, law_name: str | None = None):
+    def get_article(self, article_no: str, law_name: str | None = None, *, timeout=None):
         from rag_service.query.articles import build_article_index, lookup_article
 
+        self.tool_timeouts.append(("get_article", timeout))
         self.lookups.append((article_no, law_name))
         return lookup_article(
             article_no, law_name, parents=self.parents, index=build_article_index(self.parents)
@@ -147,9 +151,10 @@ class AgentStubService:
     def materials(self, doc_ids):
         return MATERIALS if doc_ids else ()
 
-    def search_materials(self, query: str, doc_ids, *, top_k: int = 5):
+    def search_materials(self, query: str, doc_ids, *, top_k: int = 5, timeout=None):
         from rag_service.query.materials import search_materials as score_materials
 
+        self.tool_timeouts.append(("search_materials", timeout))
         self.material_calls.append((query, tuple(doc_ids), top_k))
         return score_materials(query, self.materials(doc_ids), top_k=top_k)
 

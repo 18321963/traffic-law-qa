@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import replace
 
@@ -36,6 +37,30 @@ _NO_EVIDENCE_STOP_NUDGE = (
     "循环只会把它读成「模型说够了」直接去作答。请调用 search_law 查一次"
     "（规则 2 的问法：一字不改地用用户的问题原文）。"
 )
+
+_SKIP_DUPLICATE = (
+    "这次调用的参数与前面某一轮完全相同，已跳过执行 —— 检索层没有采样，"
+    "同一句话重发必然返回同一份结果。上一轮的结果就在上面的对话里："
+    "要新证据就换问法（缺哪个要素就问哪个），或就此停下作答。"
+)
+
+
+def _call_key(name: str, raw: str) -> str:
+    try:
+        arguments = json.loads(raw or "{}")
+    except ValueError:
+        return f"{name}::{raw}"
+    packed = json.dumps(arguments, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return f"{name}::{packed}"
+
+
+def _record_tool_event(
+    observer: Tracer, kind: str, name: str, arguments: str, text: str
+) -> None:
+    with observer.observation(
+        kind, "span", input={"tool": name, "arguments": arguments}
+    ) as span:
+        span.update(output={"回执": text}, level="WARNING")
 
 
 def _sum_usage(first: dict, second: dict) -> dict:
@@ -111,6 +136,8 @@ def make_tools_node(
         out_materials: list[MaterialPassage] = []
         seen_labels = {m.label for m in state.get("materials") or ()}
         doc_ids = tuple(state.get("material_ids") or ())
+        keys = set(state.get("call_keys") or ())
+        fresh_keys: list[str] = []
 
         def position() -> int:
             return len(state.get("search_log") or ()) + len(out_logs) + 1
@@ -124,21 +151,25 @@ def make_tools_node(
             call_id = call.get("id", "")
             function = call.get("function") or {}
             name = function.get("name", "")
+            raw = function.get("arguments") or ""
 
             handler = HANDLERS.get(name)
             if handler is None:
-                out_messages.append(
-                    tool_message(
-                        call_id,
-                        f"未知工具：{name}（本图挂了 {'、'.join(sorted(HANDLERS))}）",
-                    )
-                )
+                text = f"未知工具：{name}（本图挂了 {'、'.join(sorted(HANDLERS))}）"
+                out_messages.append(tool_message(call_id, text))
+                _record_tool_event(observer, "未知工具", name, raw, text)
+                continue
+
+            key = _call_key(name, raw)
+            if name != WEB_SEARCH_NAME and key in keys:
+                out_messages.append(tool_message(call_id, _SKIP_DUPLICATE))
+                _record_tool_event(observer, "重复调用已跳过", name, raw, _SKIP_DUPLICATE)
                 continue
 
             outcome = handler(
                 env,
                 ToolCall(
-                    arguments=function.get("arguments") or "",
+                    arguments=raw,
                     retrieval_no=position(),
                     web_no=web_position(),
                     seen=frozenset(seen),
@@ -149,6 +180,11 @@ def make_tools_node(
                 ),
             )
             out_messages.append(tool_message(call_id, outcome.text))
+            if outcome.error:
+                _record_tool_event(observer, outcome.error, name, raw, outcome.text)
+            elif name != WEB_SEARCH_NAME:
+                keys.add(key)
+                fresh_keys.append(key)
             if outcome.retrieval is not None:
                 row = outcome.retrieval.to_dict()
                 out_logs.append(row)
@@ -162,6 +198,7 @@ def make_tools_node(
             "search_log": out_logs,
             "external": out_web,
             "materials": out_materials,
+            "call_keys": fresh_keys,
         }
 
     return tools_node
