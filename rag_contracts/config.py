@@ -95,6 +95,10 @@ def _env_bool(name: str, default: bool) -> bool:
     return _env(name, "1" if default else "0").lower() not in {"0", "false", "no", "off"}
 
 
+def _env_list(name: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in _env(name).split(",") if item.strip())
+
+
 def _weights_ready(model: str) -> bool:
     if not model:
         return False
@@ -127,6 +131,14 @@ def allow_rebuild() -> bool:
 
 def pool_max() -> int:
     return _env_int("RAG_POOL_MAX", 50)
+
+
+def rag_max_concurrency() -> int:
+    return _env_int("RAG_MAX_CONCURRENCY", 4)
+
+
+def rag_queue_timeout() -> float:
+    return _env_float("RAG_QUEUE_TIMEOUT", 30.0)
 
 
 @dataclass(frozen=True)
@@ -262,6 +274,10 @@ class AgentConfig:
     clarify: bool = False
     history_turns: int = 5
     tool_timeout: float = 15.0
+    api_keys: tuple[str, ...] = ()
+    rate_limit_rpm: int = 30
+    daily_token_budget: int = 0
+    session_ttl_days: int = 30
 
 
 def agent_config() -> AgentConfig:
@@ -277,6 +293,10 @@ def agent_config() -> AgentConfig:
         clarify=_env_bool("AGENT_CLARIFY", False),
         history_turns=_env_int("AGENT_HISTORY_TURNS", 5),
         tool_timeout=_env_float("AGENT_TOOL_TIMEOUT", 15.0),
+        api_keys=_env_list("AGENT_API_KEYS"),
+        rate_limit_rpm=_env_int("AGENT_RATE_LIMIT_RPM", 30),
+        daily_token_budget=_env_int("AGENT_DAILY_TOKEN_BUDGET", 0),
+        session_ttl_days=_env_int("AGENT_SESSION_TTL_DAYS", 30),
     )
 
 
