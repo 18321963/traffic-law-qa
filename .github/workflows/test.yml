@@ -1,0 +1,29 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: pip freeze
+        run: pip freeze
+
+      - name: install
+        run: pip install -e ".[all]"
+
+      - name: pytest
+        run: python -m pytest -q
+
+      - name: ruff
+        run: ruff check .
