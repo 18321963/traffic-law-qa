@@ -47,6 +47,8 @@ export function TurnView({ turn, busy, onResume, onRetry, onDismissInterrupt }: 
         ? "cancelled"
         : "stopped";
   const showFinal = turn.status === "done" && turn.answer !== null;
+  const original = turn.answer?.review?.original_text;
+  const originalText = original && original !== turn.answer?.answer ? original : null;
 
   return (
     <article className={`turn turn--${turn.status}`}>
@@ -76,8 +78,18 @@ export function TurnView({ turn, busy, onResume, onRetry, onDismissInterrupt }: 
             review={review}
             onCite={cite}
           />
-          {turn.replaced ? (
+          {review.tier === "failed" ? (
+            <p className="turn__downgrade">
+              复核未过：服务没给结论，下面是降级答复与未经复核确认的候选法条，需人工复审。
+            </p>
+          ) : turn.replaced ? (
             <p className="turn__swap">复核后的答案与草稿不一致，界面已整篇换成权威版本。</p>
+          ) : null}
+          {originalText ? (
+            <details className="turn__original">
+              <summary>复核前的草稿（模型原稿）</summary>
+              <div className="turn__original-body">{originalText}</div>
+            </details>
           ) : null}
           <EvidenceList answer={turn.answer} anchorPrefix={anchor} highlight={highlight} />
         </>

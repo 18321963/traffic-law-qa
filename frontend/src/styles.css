@@ -340,6 +340,40 @@ h4 {
   color: var(--amber);
 }
 
+.turn__downgrade {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  background: var(--amber-wash);
+  border-left: 3px solid var(--amber);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  color: var(--amber);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.turn__original {
+  margin: 10px 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.turn__original summary {
+  padding: 7px 12px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.turn__original-body {
+  padding: 2px 12px 12px;
+  color: var(--ink-soft);
+  font-size: 14.5px;
+  line-height: 1.8;
+  max-width: 72ch;
+  white-space: pre-wrap;
+}
+
 .answer {
   border-left: 3px solid var(--line-strong);
   padding: 4px 0 4px 14px;

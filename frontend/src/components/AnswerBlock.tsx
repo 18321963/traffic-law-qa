@@ -51,7 +51,7 @@ export function AnswerBlock({ text, answer, draftState, review, onCite }: Props)
           </>
         ) : (
           <>
-            <span className={`tag tag--${review.tier}`}>{review.tier === "passed" ? "已复核" : review.label}</span>
+            <span className={`tag tag--${review.tier}`}>{review.label}</span>
             <span className="answer__headline">答复</span>
           </>
         )}

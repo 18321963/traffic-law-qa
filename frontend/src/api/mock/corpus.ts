@@ -135,7 +135,16 @@ export type CaseContent = {
   final: string;
   evidences: Evidence[];
   articles: RetrievedArticle[];
-  review: null | { passed: boolean; score: number; total: number; supported: number; unsupported: string[] };
+  review: null | {
+    passed: boolean;
+    score: number;
+    threshold: number;
+    total: number;
+    supported: number;
+    unsupported: string[];
+    model: string;
+    original_text: string;
+  };
   model: string;
   notes: string[];
   fallback: boolean;
@@ -187,6 +196,21 @@ function articleHits(specs: ArticleSpec[]): RetrievedArticle[] {
   return specs.map((spec, index) => hitOf(spec, 0.032 - index * 0.004, index + 1, index + 2));
 }
 
+const REVIEW_MODEL = "qwen-flash";
+
+function reviewPassed(total: number, original: string): CaseContent["review"] {
+  return {
+    passed: true,
+    score: 1,
+    threshold: 0.6,
+    total,
+    supported: total,
+    unsupported: [],
+    model: REVIEW_MODEL,
+    original_text: original,
+  };
+}
+
 export function contentOf(caseId: CaseId): CaseContent {
   if (caseId === "red_light") {
     const specs = [ARTICLES.demerit10, ARTICLES.law26, ARTICLES.law90, ARTICLES.law91, ARTICLES.demerit8, ARTICLES.reg71];
@@ -200,7 +224,7 @@ export function contentOf(caseId: CaseId): CaseContent {
         evidence("依据3", ARTICLES.law90, 0.021),
       ],
       articles: articleHits(specs),
-      review: { passed: true, score: 1, total: 3, supported: 3, unsupported: [] },
+      review: reviewPassed(3, RED_LIGHT_ANSWER),
       model: "qwen-flash",
       notes: [NOTE_MOCK],
       fallback: false,
@@ -217,7 +241,7 @@ export function contentOf(caseId: CaseId): CaseContent {
         evidence("依据3", ARTICLES.reg71, 0.019),
       ],
       articles: articleHits([ARTICLES.sz10, ARTICLES.sz9, ARTICLES.reg71, ARTICLES.reg55, ARTICLES.law90, ARTICLES.law26]),
-      review: { passed: true, score: 1, total: 3, supported: 3, unsupported: [] },
+      review: reviewPassed(3, SHENZHEN_ANSWER),
       model: "qwen-flash",
       notes: [NOTE_MOCK],
       fallback: false,
@@ -230,7 +254,7 @@ export function contentOf(caseId: CaseId): CaseContent {
       final: NATIONAL_ONLY_ANSWER,
       evidences: [evidence("依据1", ARTICLES.reg71, 0.026), evidence("依据2", ARTICLES.reg55, 0.022)],
       articles: articleHits([ARTICLES.reg71, ARTICLES.reg55, ARTICLES.law90, ARTICLES.law26]),
-      review: { passed: true, score: 1, total: 2, supported: 2, unsupported: [] },
+      review: reviewPassed(2, NATIONAL_ONLY_ANSWER),
       model: "qwen-flash",
       notes: [NOTE_MOCK, "按「只按全国法」作答：本次未纳入地方性法规"],
       fallback: false,
@@ -246,7 +270,7 @@ export function contentOf(caseId: CaseId): CaseContent {
         evidence("依据2", ARTICLES.demerit8, 0.03),
       ],
       articles: articleHits([ARTICLES.law91, ARTICLES.demerit8, ARTICLES.law90, ARTICLES.reg55, ARTICLES.law26, ARTICLES.demerit10]),
-      review: { passed: true, score: 1, total: 2, supported: 2, unsupported: [] },
+      review: reviewPassed(2, DRUNK_ANSWER),
       model: "qwen-flash",
       notes: [NOTE_MOCK],
       fallback: false,
@@ -269,22 +293,40 @@ export function contentOf(caseId: CaseId): CaseContent {
     const draft = [
       "驾驶机动车不按交通信号灯指示通行的，一次记 3 分[依据1]。",
       "",
-      "另外，路口未设非机动车信号灯时，非机动车按机动车信号灯通行。",
+      "路口未设非机动车信号灯时，非机动车按机动车信号灯通行。",
     ].join("\n");
     const final = [
-      "驾驶机动车不按交通信号灯指示通行的，一次记 6 分[依据1]。",
+      "本次回答未通过依据复核，暂不给出结论 —— 现有依据不足以支撑它，需人工复审。",
       "",
-      "复核把草稿里「记 3 分」的说法整篇替换为「记 6 分」——记分管理办法第十条第（八）项把这条列在「一次记6分」的情形里。",
+      "复核结果：支撑 1/3（阈值 0.6），需人工复审。",
+      "",
+      "候选法条（未经复核确认，仅供人工核对）：",
+      "  【依据1】 《道路交通安全违法行为记分管理办法》(2021-12-27)第十条",
+      "  【依据2】 《中华人民共和国道路交通安全法》第九十条",
+      "  【依据3】 《中华人民共和国道路交通安全法实施条例》第七十一条",
     ].join("\n");
     return {
       question: "",
       draft,
       final,
-      evidences: [evidence("依据1", ARTICLES.demerit10, 0.032)],
-      articles: articleHits([ARTICLES.demerit10, ARTICLES.law26, ARTICLES.law90]),
-      review: { passed: false, score: 0.4, total: 1, supported: 1, unsupported: ["草稿中的「一次记3分」在依据中无支撑"] },
+      evidences: [
+        evidence("依据1", ARTICLES.demerit10, 0.032),
+        evidence("依据2", ARTICLES.law90, 0.024),
+        evidence("依据3", ARTICLES.reg71, 0.019),
+      ],
+      articles: articleHits([ARTICLES.demerit10, ARTICLES.law90, ARTICLES.reg71, ARTICLES.law26]),
+      review: {
+        passed: false,
+        score: 0.333,
+        threshold: 0.6,
+        total: 3,
+        supported: 1,
+        unsupported: ["依据2", "依据3"],
+        model: REVIEW_MODEL,
+        original_text: draft,
+      },
       model: "qwen-flash",
-      notes: [NOTE_MOCK, "复核未通过：草稿的记分结论被替换"],
+      notes: [NOTE_MOCK, "复核未通过：支撑 1/3 < 阈值 0.6 —— 已降级为「依据不足」，需人工复审"],
       fallback: false,
     };
   }

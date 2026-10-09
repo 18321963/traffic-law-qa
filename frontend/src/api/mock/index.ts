@@ -59,7 +59,12 @@ export const SCENARIOS: Scenario[] = [
     clarify: true,
   },
   { id: "long", label: "长答案流式", hint: "醉驾处罚：连续 delta，done 帧整篇替换", caseId: "drunk", pace: 0.75 },
-  { id: "mismatch", label: "复核降级替换", hint: "草稿结论被复核整篇替换", caseId: "mismatch" },
+  {
+    id: "mismatch",
+    label: "复核未过降级",
+    hint: "复核判「依据不足」：草稿被整篇换成降级答复，原稿收在可展开的详情里",
+    caseId: "mismatch",
+  },
   { id: "empty", label: "检索为空", hint: "没有命中法条：无依据、不生成、无复核", caseId: "empty" },
   {
     id: "degraded",

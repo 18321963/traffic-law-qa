@@ -5,15 +5,17 @@ export const USAGE =
 
 export type Segment = { kind: "text"; text: string } | { kind: "ref"; label: string; group: string; index: number };
 
-const REF_PATTERN = /\[(依据|时效|材料)(\d+)\]/g;
+const REF_PATTERN = /(\[|【)(依据|时效|材料)(\d+)(\]|】)/g;
 
 export function segmentsOf(text: string): Segment[] {
   const segments: Segment[] = [];
   let cursor = 0;
   for (const match of text.matchAll(REF_PATTERN)) {
+    const [open, group, digits, close] = [match[1], match[2], match[3], match[4]];
+    if ((open === "[" && close !== "]") || (open === "【" && close !== "】")) continue;
     const start = match.index ?? 0;
     if (start > cursor) segments.push({ kind: "text", text: text.slice(cursor, start) });
-    segments.push({ kind: "ref", label: match[0], group: match[1], index: Number(match[2]) });
+    segments.push({ kind: "ref", label: `[${group}${digits}]`, group, index: Number(digits) });
     cursor = start + match[0].length;
   }
   if (cursor < text.length) segments.push({ kind: "text", text: text.slice(cursor) });
@@ -36,15 +38,17 @@ export function reviewStateOf(answer: DonePayload | null): ReviewState {
   if (review) {
     const score = typeof review.score === "number" ? review.score.toFixed(2) : "—";
     const threshold = typeof review.threshold === "number" ? review.threshold.toFixed(2) : "—";
+    const head = `复核 ${score} / 阈值 ${threshold}`;
     if (review.passed === false) {
       const unsupported = review.unsupported ?? [];
-      const detail = unsupported.length > 0 ? `复核指出的问题：${unsupported.join("；")}` : "复核给了否定结论";
-      return { tier: "failed", label: `复核未通过 · ${score}（阈值 ${threshold}）`, detail };
+      const detail =
+        unsupported.length > 0 ? `${head} · 复核指出的问题：${unsupported.join("；")}` : `${head} · 复核给了否定结论`;
+      return { tier: "failed", label: "复核未过", detail };
     }
     return {
       tier: "passed",
-      label: `复核通过 · ${score}（阈值 ${threshold}）`,
-      detail: `${review.supported ?? 0}/${review.total ?? 0} 条依据在答案里有支撑`,
+      label: "已复核",
+      detail: `${head} · ${review.supported ?? 0}/${review.total ?? 0} 条依据在答案里有支撑`,
     };
   }
   const notes = answer.notes ?? [];
@@ -52,7 +56,7 @@ export function reviewStateOf(answer: DonePayload | null): ReviewState {
   if (unfinished) return { tier: "unfinished", label: "本次未复核", detail: unfinished };
   const unscored = notes.find((row) => row.startsWith("复核未打分"));
   if (unscored) return { tier: "unscored", label: "本次未打分", detail: unscored };
-  return { tier: "none", label: "本次未复核", detail: "答案里没有引用依据，复核没有可判的据" };
+  return { tier: "none", label: "未复核", detail: "答案里没有引用依据，复核没有可判的据" };
 }
 
 const NODE_LABELS: Record<string, string> = {
