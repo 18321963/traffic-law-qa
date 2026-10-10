@@ -4,7 +4,7 @@
 
 ## 架构
 
-- 六包拓扑（rag_contracts / rag_service / agent_service / api_contracts / eval / tests）已冻结；加文件可以，别重组目录或换框架。
+- 六包拓扑（rag_contracts / rag_service / agent_service / api_contracts / eval / mcp_server）+ tests / frontend / deploy 已冻结；加文件可以，别重组目录或换框架。
 - 代码内不写注释、不写 docstring（全仓刻意为之）；用法文本放模块级 USAGE 常量。
 
 ## 文档
@@ -30,6 +30,6 @@
 - 提交形状：特性分支 → 中文提交信息（`-F` 落盘，不塞 argv）→ `merge: 合入 <分支>（中文摘要）` 进 main；推送等用户明说。
 
 ## 并行工作流
-- 单写者：`rag_contracts/config.py`、`.env.example` 只由 W0 改；`deploy/docker-compose*.yml` 只由 S4 改；`docs/04_接口文档.md`、`README.md`、`deploy/运维手册.md` 只由集成流（W3）改；CLAUDE.md 与 docs 三件套谁都不改。
+- 单写者：`rag_contracts/config.py`、`.env.example` 只由 W0 改；`deploy/docker-compose*.yml` 只由 S4 改；`docs/04_接口文档.md`、`README.md`、`deploy/运维手册.md` 只由集成流（W3）改；CLAUDE.md 谁都不改。
 - worktree 里跑测试：`cd <worktree> && D:\projects\交通法规问答agent\.venv\Scripts\python.exe -m pytest`（`-m` 把 cwd 置顶，测的是 worktree 代码；直接调 `.venv` 里的 pytest 会把测试跑回主仓）。
 - 每流收工 = 全量 pytest 落盘（rc + 点阵）+ 改行为面配变异枪 + `git status` 面核对；合并统一由 W3 按序执行，推送等用户明说。
