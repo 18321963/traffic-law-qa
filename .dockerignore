@@ -42,6 +42,10 @@ volumes/
 # 评测轨迹：本地跑出来的，服务层用不到（Dockerfile 的 COPY data/ 本来会带上它，所以在这里挡掉）。
 data/traces/
 
+# --- 前端：node_modules 绝不进上下文；dist 要留给 web 镜像 COPY ---
+frontend/node_modules/
+!frontend/dist/
+
 # --- 个人与编辑器 ---
 .vscode/
 .idea/
