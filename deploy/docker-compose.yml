@@ -140,6 +140,26 @@ services:
         max-size: 10m
         max-file: "3"
 
+  web:
+    container_name: tlq-web
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+    image: traffic-law-qa-web:0.1.0
+    ports:
+      - "3000:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
 volumes:
   tlr_chunks:
   tlr_index:
