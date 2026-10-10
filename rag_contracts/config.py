@@ -276,12 +276,12 @@ class AgentConfig:
     article_chars: int = 400
     temperature: float = 0.0
     retries: int = 2
-    review_min_score: float = 0.6
+    review_min_score: float = 0.35
     """末端复核的拦截阈值。`< 0` 关掉复核节点、`0` 只打分不拦截、`> 0` 才拦（`score < 阈值`）。
 
-    **0.6 是占位值，不是标定值** —— 「正确率 / 拒答率」两条曲线还没跑（要跑批，烧 LLM 额度）。
-    今天能说的是它的量级：120 条真答案里引用编号个数 ≤3 的占 70%，也就是多数答案只需要
-    3 条判据里错 1 条就会被拦下来。真跑完标定再回来改这个数。
+    0.35 系 2026-10-10 判官批标定：63 条里拦 6 条（3 条真错 + 3 条误杀，交付正确率 77.8%）；
+    旧占位值 0.6 拦 16 条（5 真错、11 误杀）。口径：该批复核分由 kimi-k2.6 打出、现役复核
+    模型未重采样；复核分度量「引用标签卫生」不度量「结论正确性」，高分区结构性漏放。
     """
 
     session_db: str = str(DATA_DIR / "sessions.db")
@@ -302,7 +302,7 @@ def agent_config() -> AgentConfig:
         article_chars=_env_int("AGENT_ARTICLE_CHARS", 400),
         temperature=_env_float("AGENT_TEMPERATURE", 0.0),
         retries=_env_int("AGENT_RETRIES", 2),
-        review_min_score=_env_float("AGENT_REVIEW_MIN_SCORE", 0.6),
+        review_min_score=_env_float("AGENT_REVIEW_MIN_SCORE", 0.35),
         session_db=_env("AGENT_SESSION_DB", str(DATA_DIR / "sessions.db")),
         clarify=_env_bool("AGENT_CLARIFY", False),
         history_turns=_env_int("AGENT_HISTORY_TURNS", 5),
