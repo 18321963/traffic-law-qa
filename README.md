@@ -144,12 +144,11 @@ flowchart LR
 ├── mcp_server/            MCP 适配层：stdio → HTTP，薄客户端，不载模型
 ├── deploy/                docker-compose.yml + dev 覆盖 + build/watchdog/backup 脚本 + 运维手册
 ├── frontend/              浏览器界面（React + Vite）：src 源码 + nginx.conf + Dockerfile → web 镜像
-├── docs/                  项目文档：00 导读 · 01 需求 · 02 设计 · 03 功能（索引见 docs/README.md）
+├── docs/                  项目文档：00 导读 · 01 需求 · 02 设计 · 03 功能 · 04 接口文档（索引见 docs/README.md）
 ├── tests/                 离线用例，不碰 Milvus 也不调模型
 ├── 法规知识库/            docx + pdf（公开法规原文，建库真源）→ text → parsed → chunks → index；models/ 放本地权重
 ├── data/                  题集源语料 + 四份桶文件 + 上传台账（documents.db）（跑批轨迹不进版本库）
 ├── pyproject.toml         依赖与打包的唯一真源
-├── 接口文档.md            签名级接口契约（CLI / HTTP / 配置 / 产物）
 └── CLAUDE.md              仓内协作规则（agent 面）
 
 rag_contracts/
@@ -458,7 +457,7 @@ ruff check .
 ├── volumes/                 etcd / MinIO / Milvus 的运行时数据（compose 挂载，可重建）
 ├── pyproject.toml · requirements.txt · langgraph.json
 ├── .env.example · .gitignore · .gitattributes · .dockerignore
-└── README.md · 接口文档.md · CLAUDE.md
+└── README.md · CLAUDE.md
 ```
 
 ### 仓库根
@@ -478,10 +477,9 @@ ruff check .
 | `.gitattributes` | 仓库内一律存 LF；docx / pdf / db 等声明为二进制，不做换行转换 |
 | `.dockerignore` | 构建上下文排除 `.git`、`.venv`、`volumes/`、`法规知识库/{parsed,text,chunks,index,models}`、`data/traces/` —— 镜像只带真源（docx + pdf），顺带保证密钥不进镜像层 |
 | `README.md` | 本文件 |
-| `接口文档.md` | 签名级契约：CLI / HTTP / 配置 / 产物 / 不变式（README「入口」是清单，这一份是契约） |
 | `CLAUDE.md` | 仓内协作规则（面向 coding agent） |
 | `frontend/` | 浏览器界面：`src/`（React + Vite 源码）· `nginx.conf`（同源反代）· `Dockerfile`（nginx:alpine）· `dist/`（构建产物，不进版本库）；界面走 agent 的 HTTP 面，没有独立后端 |
-| `docs/` | 项目文档：00 导读 / 01 需求 / 02 设计 / 03 功能（索引见 docs/README.md） |
+| `docs/` | 项目文档：00 导读 / 01 需求 / 02 设计 / 03 功能 / 04 接口文档 —— 04 是签名级契约：CLI / HTTP / 配置 / 产物 / 不变式（README「入口」是清单，这一份是契约）；索引见 docs/README.md |
 | `法规知识库/` | `docx/` 与 `pdf/` 是建库真源（公开法规原文）；`text/` `parsed/` `chunks/` `index/` 是管线产物；`models/` 本地权重（约 4.6GB） |
 | `data/` | 题集源语料 + 四份桶文件（`eval_*.json`）+ `documents.db` 上传台账 + `uploads/` + `traces/` 跑批轨迹 |
 | `volumes/` | compose 挂载的运行时数据（etcd / MinIO / Milvus），可重建 |
