@@ -22,6 +22,7 @@
 | 会话记忆（短期） | ✅ | 请求带 `session_id` = 同一张会话跨轮记得住（LangGraph checkpointer，SQLite 落 `data/sessions.db`）；提示词里带最近 N 轮（每轮已定地区随行标出），不带则每问独立；整条可删（`DELETE /sessions/{session_id}`，thread 与挂起澄清一起物理清掉） |
 | 地区澄清（人在环） | ✅ | 判不出该按哪里的规定时（题面没点出地区、或点出的地名不是适用地，如产地题）先中断问一句「按该地法规还是只按全国法」再作答；判出地区直接答。回复经 resume 端点交回（服务里默认开，`AGENT_CLARIFY` 控制） |
 | 流式输出 | ✅ | rag `/qa/stream` 推检索结果与逐字 token；agent `/qa/stream` 推步骤流 + 逐字草稿；**草稿是草稿** —— `done` 才是复核之后的权威 |
+| 浏览器界面 | ✅ | web 镜像（nginx 静态托管，宿主 :3000）：问答流 · 依据/轨迹/材料三栏 · 材料上传 · 删会话 · 澄清回复；同源反代到 agent（源码 `frontend/`，React + Vite） |
 | 末端复核 | ✅ | 逐条判「被原文支撑？」→ 低分整篇降级（阈值 0.35；标定账见文末台账） |
 | 就绪门 | ✅ | 启动时比对 docx／本地产物／集合三者，不一致自动重建；也能 `--rebuild` 或 `POST /reindex` 手动触发 |
 | 权重门禁 | ✅ | 索引快照里记着嵌入权重的指纹（文件名 + 大小 + mtime）：换了权重就拒绝服务并说明差在哪，`POST /reindex` / `RAG_ALLOW_REBUILD=1` 显式放行；老快照没指纹不拦，只标 `degraded`。启发式，防误换不防篡改 |
@@ -245,9 +246,12 @@ rag 那条路只剩两档；agent 循环搬走之后，它有自己的端点（�
 
 - Python 3.10+
 - Docker Desktop —— 跑 Milvus 用（只想裸跑也得起它一个：`docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up -d --wait standalone`）
+- Node `^20.19` 或 `>=22.12` —— 建 web 镜像要用：`frontend/dist` 不入库，`deploy/build.sh` 会先在宿主机 `npm ci && npm run build` 出 dist；不要浏览器界面就不用装
 - GPU 可选：有 CUDA 就用 GPU 跑嵌入与重排；没有也能跑，只是慢
 
 ### 安装
+
+只用 Docker 起全栈（下面「启动」第一条）的话，这节整段跳过 —— 依赖都烤在镜像里。
 
 ```powershell
 pip install -e ".[all]"
@@ -272,6 +276,8 @@ Copy-Item .env.example .env     # 填 LLM_API_KEY
 
 ### 启动
 
+首次起全栈前：先在 `deploy/.env` 里写两键 `MINIO_ROOT_USER=` 与 `MINIO_ROOT_PASSWORD=`（值自定，该文件已 gitignore；缺了 `docker compose` 直接报错退出）。不想建它就走下面的 dev 覆盖 —— 凭据由字面默认值提供。
+
 ```powershell
 # 一路起全（Docker）：Milvus + 知识库服务 + agent + 浏览器界面（compose 文件在 deploy/ 下）
 deploy/build.sh                                  # 建三个镜像并上线（直连 buildx；禁用 compose up --build；前端源码比 dist 新时脚本自己先重建 dist）
@@ -281,7 +287,7 @@ curl.exe localhost:8001/health  # 必须带 .exe：PowerShell 的 curl 是 IWR �
 # 界面在 localhost:3000（nginx 静态托管 + 同源反代到 agent），8001 是 API 直连
 ```
 
-生产面（base compose）宿主见两个入口：**8001**（agent，API 直连）与 **3000**（web，浏览器界面）；MinIO 凭据由 `deploy/.env` 两键必填提供。本地开发用覆盖文件恢复全部端口与默认凭据：
+生产面（base compose）宿主见两个入口：**8001**（agent，API 直连）与 **3000**（web，浏览器界面）。本地开发用覆盖文件恢复全部端口与默认凭据：
 
 ```powershell
 docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up -d
@@ -289,7 +295,7 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up 
 
 镜像里三个服务都在 compose 里：`app`（rag 服务，生产面不占宿主端口、dev 覆盖暴露 :8000；挂 GPU、四个命名卷、模型只读挂载）、`agent`（agent 服务，宿主 :8001 → 容器内 :8000；不挂 GPU，挂一卷 `tlr_sessions` 存会话记忆、不载模型，rag 地址由 `RAG_BASE_URL=http://app:8000` 给，地区澄清默认开）与 `web`（界面，宿主 :3000 → 容器 :80；nginx:alpine，只放前端构建产物，把 `/health` `/qa` `/laws` `/documents` `/sessions` 同源反代到 agent，上传限 10MB）。agent 的 healthcheck 读的是 `/health` 的 body：自己 `status=ok` 且内嵌的 `rag.status=ok` 才算健康，所以 rag 断掉它就会变 unhealthy。
 
-改了代码要重建：跑 `deploy/build.sh`（等价直连 buildx 三条 + 把 app/agent/web 滚动上线）。镜像把源码烤进去了，不重建跑的还是上一版，且不报任何错；**也别用 `docker compose up --build`**（本机 compose v5.4.0 内嵌 bake 出错，报错表面像网络问题）或 `docker builder prune`。web 镜像 COPY 的是 `frontend/dist`，`build.sh` 会拿 `frontend/src`、`index.html`、`package*.json`、`tsconfig.json`、`vite.config.ts` 跟 `dist/index.html` 比 mtime：源码更新就先 `npm ci && npm run build` 再建镜像，dist 不比源码旧就跳过（要强制重建就先删 `frontend/dist`）。首次构建要下 CUDA 版 torch（约 2.8GB），之后有缓存就快。构建中途别 Ctrl-C：torch 下到一半断了不落缓存，下次还得重下。三个镜像构建完的体量：rag 6.03GB（大头就是 CUDA 版 torch），agent 266MB，web 63.2MB。
+改了代码要重建：跑 `deploy/build.sh`（等价直连 buildx 三条 + 把 app/agent/web 滚动上线）。镜像把源码烤进去了，不重建跑的还是上一版，且不报任何错；**也别用 `docker compose up --build`**（本机 compose v5.4.0 内嵌 bake 出错，报错表面像网络问题）或 `docker builder prune`。web 镜像 COPY 的是 `frontend/dist`，`build.sh` 会拿 `frontend/src`、`index.html`、`package*.json`、`tsconfig.json`、`vite.config.ts` 跟 `dist/index.html` 比 mtime：源码更新就先 `npm ci && npm run build` 再建镜像，dist 不比源码旧就跳过（要强制重建就先删 `frontend/dist`）。首次构建要下 CUDA 版 torch（约 2.8GB），之后有缓存就快。构建中途别 Ctrl-C：torch 下到一半断了不落缓存，下次还得重下。三个镜像构建完的体量：rag 6.03GB（大头就是 CUDA 版 torch），agent 266MB，web 63.9MB。
 
 agent 一直 `unhealthy` 怎么办 —— 两种成因，修法同一条。① 启动时就探不到 rag（`boot_error`）：agent 进程本身是活的，`restart: unless-stopped` 不会触发（Docker 没有「unhealthy 就重启」这回事），而 lifespan 只跑一次，所以它不会自愈；② 起来之后 rag 又断了：healthcheck 变红，进程同样不重启。**先修好 rag，再 `docker compose -f deploy/docker-compose.yml restart agent`** —— 重启才会重跑一次 lifespan、重新探一遍 rag。
 
