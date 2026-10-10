@@ -34,7 +34,7 @@
 | 共享内核出包 | ✅ | `rag_contracts/`（域类型 + 端口 + 配置 + LLM 客户端 + 埋点）：两端共用，依赖方向单向，import 它不拉起重依赖 |
 | 架构门禁 | ✅ | 用 AST 加子进程逐条检查：import 方向、装配只准在哪发生、重依赖不许被 `import rag_service` 顺手拉起、退役包名不许复活、同一句文案只许写一遍、提示词教的工具与真给模型的工具必须一致；契约包侧另查反向 import、轻依赖、打包面覆盖 |
 | 可观测 | ✅ | 终端决策链渲染（`--trace` / `--timing`），可选 Langfuse 上报；分数/排名/通道留在 `search_log`，进不进提示词由渲染层定 |
-| 联网检索 | ⚠️ 未接线 | `agent_service/websearch.py`（博查 API）已实现、有 8 条离线单测，但当前没挂进工具面 —— 要恢复就把 `agent_service/tools/registry.py` 里 web_search 那行的 `llm_visible` 改成 `True` |
+| 联网检索 | ⚠️ 未接线 | `agent_service/websearch.py`（博查 API）已实现、有离线单测，但当前没挂进工具面 —— 要恢复就把 `agent_service/tools/registry.py` 里 web_search 那行的 `llm_visible` 改成 `True` |
 | 降级可跑 | ✅ | 没有 LLM key：生成层拒答、检索照常；`法规知识库/models/` 里没有权重：退化成一套可用的纯 BM25 |
 
 ## 效果
@@ -75,6 +75,31 @@
 
 ## 架构
 
+两个进程、一条 HTTP 缝，外加一个纯静态的界面服务：
+
+```mermaid
+flowchart LR
+    LIN["python -m rag_service<br/>线性问答（评测基线）"]
+    CLI["python -m agent_service<br/>命令行"]
+    WEB["web :3000（nginx）<br/>静态界面 + 同源反代"]
+    MCP["mcp_server<br/>MCP 客户端走 stdio"]
+    AGENT["agent_service（:8001）<br/>LangGraph：判地区 → 工具循环 → 收尾 → 复核"]
+    RAG["rag_service（:8000）<br/>检索 · 生成 · 建库"]
+    MV[(Milvus traffic_law<br/>稠密 + BM25 + RRF 融合)]
+    MODELS["本地权重（进程内）<br/>bge-m3 + bge-reranker-v2-m3"]
+    SQL[(SQLite<br/>sessions.db · documents.db)]
+
+    LIN --> RAG
+    CLI --> AGENT
+    WEB -->|"/qa /health /laws /documents"| AGENT
+    MCP -->|RagClient 走 HTTP| RAG
+    AGENT -->|RagClient 走 HTTP| RAG
+    RAG --> MV
+    RAG --> MODELS
+    RAG --> SQL
+    AGENT --> SQL
+```
+
 ### 分层
 
 | 包 | 职责 |
@@ -85,7 +110,7 @@
 | `agent_service/` | Agent 这一侧（另一个进程，下面单列）：`agents/` 图与节点 · `tools/` 工具面 · `merge.py` / `websearch.py` / `trace.py` / `prompts.py` · `api/` 自己的 HTTP 面 · `container.py` ★ agent 侧唯一装配点（只造 `RagClient`） |
 | `eval/` | 评测与变异自检：`harness.py` / `singlehop.py` / `multihop.py` / `corpus.py` ＋ `mutations/` 四张表 |
 | `mcp_server/` | MCP 适配层：stdio → HTTP，薄客户端，不载模型 |
-| `deploy/` | `docker-compose.yml`（etcd / MinIO / Milvus / rag 服务 / agent 服务）· `docker-compose.dev.yml`（开发覆盖）· `build.sh` · `watchdog.sh` · `backup.sh` · `reinstall.sh` · `运维手册.md` |
+| `deploy/` | `docker-compose.yml`（etcd / MinIO / Milvus / rag 服务 / agent 服务 / web 界面）· `docker-compose.dev.yml`（开发覆盖）· `build.sh` · `watchdog.sh` · `backup.sh` · `reinstall.sh` · `运维手册.md` |
 
 两个进程之间只有 HTTP：`agent_service ──RagClient──▶ rag_service`。agent 侧不 import `rag_service`（AST 门 + 子进程拦截门都盯着），rag 侧也不 import `agent_service` —— 反向那条同样是门禁。
 
@@ -118,10 +143,14 @@
 ├── eval/                  评测与变异自检（顶层包，`python -m eval`）
 ├── mcp_server/            MCP 适配层：stdio → HTTP，薄客户端，不载模型
 ├── deploy/                docker-compose.yml + dev 覆盖 + build/watchdog/backup 脚本 + 运维手册
+├── frontend/              浏览器界面（React + Vite）：src 源码 + nginx.conf + Dockerfile → web 镜像
+├── docs/                  项目文档：00 导读 · 01 需求 · 02 设计 · 03 功能（索引见 docs/README.md）
 ├── tests/                 离线用例，不碰 Milvus 也不调模型
 ├── 法规知识库/            docx + pdf（公开法规原文，建库真源）→ text → parsed → chunks → index；models/ 放本地权重
 ├── data/                  题集源语料 + 四份桶文件 + 上传台账（documents.db）（跑批轨迹不进版本库）
-└── pyproject.toml         依赖与打包的唯一真源
+├── pyproject.toml         依赖与打包的唯一真源
+├── 接口文档.md            签名级接口契约（CLI / HTTP / 配置 / 产物）
+└── CLAUDE.md              仓内协作规则（agent 面）
 
 rag_contracts/
 ├── domain/        报文 · 回答 · 磁盘产物 · 报告 · 错误 · 法名
@@ -143,7 +172,7 @@ rag_service/
 agent_service/
 ├── agents/        AgentRunner 与图：判地区 · 单节点循环 · 收尾 · 末端复核
 ├── tools/         工具面：schema · 参数规整 · 回执渲染 · 四个工具的实现
-├── api/           自己的 HTTP 面：/qa · /qa/stream · /health
+├── api/           自己的 HTTP 面：/qa · /qa/stream · /qa/resume（含流式）· /documents 代理 · /health
 ├── merge.py       多轮检索结果按 parent_id 合并去重
 ├── websearch.py   博查联网检索（已实现、当前未挂进工具面）
 ├── trace.py       终端决策链与分段耗时渲染（--trace / --timing）
@@ -227,7 +256,7 @@ pip install -e ".[all]"
 
 基础依赖只有三个包（`openai` · `python-dotenv` · `httpx`）；`pymilvus` 在 `milvus` 组，不装只是连不上 Milvus；`torch` + `transformers` 在 `local` 可选组里，不装也能跑 —— 退化成纯 BM25；`langgraph` 在 `agent` 组，不装只是起不了 agent 服务；`fastapi` + `uvicorn` 在 `api` 组，不装只是不能起服务；MCP SDK 在 `mcp` 组，不装只是不能 `python -m mcp_server`。`.[all]` 把这些组全带上（Langfuse 不在内，要上报单装 `.[langfuse]`；Studio 演示台在 `studio` 组，也不进 `all`）。
 
-两个镜像各取所需，都不装对方的：rag 服务镜像装 `api,local,milvus`；agent 镜像装 `agent,api,langfuse`（不装 `pymilvus`、也不装 `torch` —— 它两条都不需要）。
+两个 Python 镜像各取所需，都不装对方的：rag 服务镜像装 `api,local,milvus,pdf`；agent 镜像装 `agent,api,langfuse`（不装 `pymilvus`、也不装 `torch` —— 它两条都不需要）。web 镜像只放 nginx 与前端构建产物。
 
 ### 配置
 
@@ -245,22 +274,23 @@ Copy-Item .env.example .env     # 填 LLM_API_KEY
 ### 启动
 
 ```powershell
-# 一路起全（Docker）：Milvus + 知识库服务 + agent（compose 文件在 deploy/ 下）
-deploy/build.sh                                  # 建两个镜像并上线（直连 buildx；禁用 compose up --build）
+# 一路起全（Docker）：Milvus + 知识库服务 + agent + 浏览器界面（compose 文件在 deploy/ 下）
+deploy/build.sh                                  # 建三个镜像并上线（直连 buildx；禁用 compose up --build；web 镜像要先有 frontend/dist）
 docker compose -f deploy/docker-compose.yml up -d
-docker compose -f deploy/docker-compose.yml ps   # 等五个容器 healthy
+docker compose -f deploy/docker-compose.yml ps   # 等六个容器 healthy
 curl.exe localhost:8001/health  # 必须带 .exe：PowerShell 的 curl 是 IWR 别名
+# 界面在 localhost:3000（nginx 静态托管 + 同源反代到 agent），8001 是 API 直连
 ```
 
-生产面（base compose）**宿主只见 8001**（agent 是唯一入口；MinIO 凭据由 `deploy/.env` 两键必填提供）。本地开发用覆盖文件恢复全部端口与默认凭据：
+生产面（base compose）宿主见两个入口：**8001**（agent，API 直连）与 **3000**（web，浏览器界面）；MinIO 凭据由 `deploy/.env` 两键必填提供。本地开发用覆盖文件恢复全部端口与默认凭据：
 
 ```powershell
 docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up -d
 ```
 
-镜像里两个服务都在 compose 里：`app`（rag 服务，生产面不占宿主端口、dev 覆盖暴露 :8000；挂 GPU、四个命名卷、模型只读挂载）与 `agent`（agent 服务，宿主 :8001 → 容器内 :8000；不挂 GPU，挂一卷 `tlr_sessions` 存会话记忆、不载模型，rag 地址由 `RAG_BASE_URL=http://app:8000` 给，地区澄清默认开）。agent 的 healthcheck 读的是 `/health` 的 body：自己 `status=ok` 且内嵌的 `rag.status=ok` 才算健康，所以 rag 断掉它就会变 unhealthy。
+镜像里三个服务都在 compose 里：`app`（rag 服务，生产面不占宿主端口、dev 覆盖暴露 :8000；挂 GPU、四个命名卷、模型只读挂载）、`agent`（agent 服务，宿主 :8001 → 容器内 :8000；不挂 GPU，挂一卷 `tlr_sessions` 存会话记忆、不载模型，rag 地址由 `RAG_BASE_URL=http://app:8000` 给，地区澄清默认开）与 `web`（界面，宿主 :3000 → 容器 :80；nginx:alpine，只放前端构建产物，把 `/health` `/qa` `/laws` `/documents` 同源反代到 agent，上传限 10MB）。agent 的 healthcheck 读的是 `/health` 的 body：自己 `status=ok` 且内嵌的 `rag.status=ok` 才算健康，所以 rag 断掉它就会变 unhealthy。
 
-改了代码要重建：跑 `deploy/build.sh`（等价直连 buildx 两条 + 把 app/agent 滚动上线）。镜像把源码烤进去了，不重建跑的还是上一版，且不报任何错；**也别用 `docker compose up --build`**（本机 compose v5.4.0 内嵌 bake 出错，报错表面像网络问题）或 `docker builder prune`。首次构建要下 CUDA 版 torch（约 2.8GB），之后有缓存就快。构建中途别 Ctrl-C：torch 下到一半断了不落缓存，下次还得重下。两个镜像构建完的体量：rag 6.03GB（大头就是 CUDA 版 torch），agent 263MB。
+改了代码要重建：跑 `deploy/build.sh`（等价直连 buildx 三条 + 把 app/agent/web 滚动上线）。镜像把源码烤进去了，不重建跑的还是上一版，且不报任何错；**也别用 `docker compose up --build`**（本机 compose v5.4.0 内嵌 bake 出错，报错表面像网络问题）或 `docker builder prune`。web 镜像 COPY 的是 `frontend/dist`，所以重建前先 `cd frontend && npm ci && npm run build`（缺 dist 时 `build.sh` 会直接提示这一句）。首次构建要下 CUDA 版 torch（约 2.8GB），之后有缓存就快。构建中途别 Ctrl-C：torch 下到一半断了不落缓存，下次还得重下。三个镜像构建完的体量：rag 6.03GB（大头就是 CUDA 版 torch），agent 266MB，web 63.2MB。
 
 agent 一直 `unhealthy` 怎么办 —— 两种成因，修法同一条。① 启动时就探不到 rag（`boot_error`）：agent 进程本身是活的，`restart: unless-stopped` 不会触发（Docker 没有「unhealthy 就重启」这回事），而 lifespan 只跑一次，所以它不会自愈；② 起来之后 rag 又断了：healthcheck 变红，进程同样不重启。**先修好 rag，再 `docker compose -f deploy/docker-compose.yml restart agent`** —— 重启才会重跑一次 lifespan、重新探一遍 rag。
 
@@ -420,13 +450,15 @@ ruff check .
 ├── mcp_server/              MCP 适配层：tools.py（工具表，不 import SDK）· main.py（stdio 装配）
 ├── api_contracts/           openapi.json · client.py（薄 httpx 客户端）· regen.py
 ├── deploy/                  docker-compose.yml · docker-compose.dev.yml · build.sh · watchdog.sh · backup.sh · reinstall.sh · 运维手册.md
+├── frontend/                浏览器界面（React + Vite）：src · nginx.conf · Dockerfile（web 镜像）；dist/ 是构建产物
+├── docs/                    项目文档（索引见 docs/README.md）
 ├── tests/                   离线用例（不碰 Milvus、不调模型）
 ├── 法规知识库/              docx + pdf（建库真源）· text · parsed · chunks · index · models
 ├── data/                    题集与桶文件 · documents.db · uploads/ · traces/
 ├── volumes/                 etcd / MinIO / Milvus 的运行时数据（compose 挂载，可重建）
 ├── pyproject.toml · requirements.txt · langgraph.json
 ├── .env.example · .gitignore · .gitattributes · .dockerignore
-└── README.md
+└── README.md · 接口文档.md · CLAUDE.md
 ```
 
 ### 仓库根
@@ -435,7 +467,7 @@ ruff check .
 |---|---|
 | `rag_service/Dockerfile` | 服务镜像：python:3.11-slim → CUDA 版 torch（独立一层，改源码重建不重下）→ `.[api,local,milvus,pdf]` → 把五个包（`rag_contracts/` `rag_service/` `eval/` `mcp_server/` `api_contracts/`）与 `法规知识库/`、`data/` 一起烤进镜像 → 非 root 用户 → `uvicorn rag_service.api.app:app` |
 | `agent_service/Dockerfile` | agent 服务镜像：同一个底（python:3.11-slim、非 root uid 1000、`EXPOSE 8000`），装 `.[agent,api,langfuse]`，只 COPY 三个包（`rag_contracts/` `api_contracts/` `agent_service/`）—— 没有 torch、没有 Milvus 客户端、也没有 `法规知识库/` 与 `data/`：它不载模型；自己的会话记忆写在挂载卷上（镜像里先把 `/app/data` 的属主铺好） |
-| `deploy/docker-compose.yml` | 五个服务：etcd / MinIO / Milvus standalone / app（rag）/ agent。app 挂 GPU、四个命名卷、健康检查打 `/health`；agent 只发布 8001、不挂 GPU，挂一卷 `tlr_sessions:/app/data`（会话记忆）并置 `AGENT_CLARIFY=1`，healthcheck 读 `/health` 的 body（要 `rag.status=ok`，不是只看 200）。顶层 `name: agent` 钉住项目名（否则项目名随目录走，挪文件会换一组空卷）；`build.context` / `env_file` / 卷路径都相对本文件解析，**但 `build.dockerfile` 相对 `context` 解析**（`context: ..` 时写 `rag_service/Dockerfile`，写成 `../rag_service/Dockerfile` 会跑去找仓库外那一层、且 `config` 不报错）—— 固定用 `docker compose -f deploy/docker-compose.yml` 起 |
+| `deploy/docker-compose.yml` | 六个服务：etcd / MinIO / Milvus standalone / app（rag）/ agent / web。app 挂 GPU、四个命名卷、健康检查打 `/health`；agent 只发布 8001、不挂 GPU，挂一卷 `tlr_sessions:/app/data`（会话记忆）并置 `AGENT_CLARIFY=1`，healthcheck 读 `/health` 的 body（要 `rag.status=ok`，不是只看 200）；web 只发布 3000（nginx:alpine，只放前端构建产物，`/health` `/qa` `/laws` `/documents` 同源反代到 agent）。顶层 `name: agent` 钉住项目名（否则项目名随目录走，挪文件会换一组空卷）；`build.context` / `env_file` / 卷路径都相对本文件解析，**但 `build.dockerfile` 相对 `context` 解析**（`context: ..` 时写 `rag_service/Dockerfile`，写成 `../rag_service/Dockerfile` 会跑去找仓库外那一层、且 `config` 不报错）—— 固定用 `docker compose -f deploy/docker-compose.yml` 起 |
 | `deploy/reinstall.sh` | 重装 editable 包：探 Clash 代理 → `pip install -e ".[all]"`（依赖组可用第一个参数换，默认 `all`）→ 换到仓外验证六个包 import 装没装上 |
 | `deploy/docker-compose.dev.yml` | 开发覆盖：恢复 8000/9000/9001/19530/9091 宿主端口与默认 MinIO 凭据（字面值优先于 base 的必填插值） |
 | `deploy/build.sh` · `watchdog.sh` · `backup.sh` · `运维手册.md` | 重建镜像（直连 buildx，禁用 `up --build`）· 探活告警（单次/`--loop`，可 POST webhook）· 冷备与恢复（`--keep`/`--restore`）· 部署/巡检/告警/并发闸/成本/会话清理/备份恢复/密钥轮换/口径五条的作业面 |
@@ -446,6 +478,10 @@ ruff check .
 | `.gitattributes` | 仓库内一律存 LF；docx / pdf / db 等声明为二进制，不做换行转换 |
 | `.dockerignore` | 构建上下文排除 `.git`、`.venv`、`volumes/`、`法规知识库/{parsed,text,chunks,index,models}`、`data/traces/` —— 镜像只带真源（docx + pdf），顺带保证密钥不进镜像层 |
 | `README.md` | 本文件 |
+| `接口文档.md` | 签名级契约：CLI / HTTP / 配置 / 产物 / 不变式（README「入口」是清单，这一份是契约） |
+| `CLAUDE.md` | 仓内协作规则（面向 coding agent） |
+| `frontend/` | 浏览器界面：`src/`（React + Vite 源码）· `nginx.conf`（同源反代）· `Dockerfile`（nginx:alpine）· `dist/`（构建产物，不进版本库）；界面走 agent 的 HTTP 面，没有独立后端 |
+| `docs/` | 项目文档：01 需求 / 02 设计 / 03 功能 / 00 导读 / frontend_plan（索引见 docs/README.md） |
 | `法规知识库/` | `docx/` 与 `pdf/` 是建库真源（公开法规原文）；`text/` `parsed/` `chunks/` `index/` 是管线产物；`models/` 本地权重（约 4.6GB） |
 | `data/` | 题集源语料 + 四份桶文件（`eval_*.json`）+ `documents.db` 上传台账 + `uploads/` + `traces/` 跑批轨迹 |
 | `volumes/` | compose 挂载的运行时数据（etcd / MinIO / Milvus），可重建 |
@@ -517,7 +553,7 @@ ruff check .
 
 | 文件 | 作用 |
 |---|---|
-| `indexing/sources.py` | 三种读者（docx 直读 zip + ElementTree、txt、md）与 `reader_for` 按后缀挑 |
+| `indexing/sources.py` | 读者按后缀挑：docx（直读 zip + ElementTree）· pdf（pypdf，缺包显式报错）· txt / md；`reader_for` 是唯一入口 |
 | `indexing/parser.py` | 段落 → 法→章→节→条；`LawParser` / `LawLibrary` / `ParseStage`；中文数字、目录页、零宽字符清洗、sha1 门控 |
 | `indexing/chunker.py` | 条 = 父块、段 = 子块（966 个可检索块） |
 | `indexing/indexer.py` | 写 Milvus（稠密 + 稀疏）与磁盘产物 |
@@ -579,11 +615,20 @@ ruff check .
 | `tests/test_laws.py` | 法规清单与法名归一：条数统计、先精确后宽松的解析、未知或歧义时说清为什么 |
 | `tests/test_agent_assembly.py` | agent 装配顺序：探 rag 就绪 → 装配 → 门（缺 langgraph / 没 key 各给一条 503） |
 | `tests/test_agent_boundary.py` | 出包门禁：agent 侧依赖白名单、不许出现 `rag_service`、只准 `container.py` 造 `RagClient`，外加子进程拦截门（拦掉 `rag_service` 后 import agent app 仍要成功，配正向探针） |
+| `tests/test_agent_auth.py` | agent 鉴权与限流：缺 key / 错 key 拒、`/health` 豁免、按 key 分钟窗限流、0 关闸 |
+| `tests/test_agent_budget.py` | 日额度台账：UTC 天一行、闸拦全部 run 端点（流式在内）、澄清中断与 resume 不重复计数 |
+| `tests/test_agent_cors.py` | CORS：默认放行本地前端源、预检与实响应的头、鉴权层在 CORS 之内 |
+| `tests/test_agent_documents.py` | 材料台账代理：上传/列表/删除透传、400/404 原样带回、不依赖 agent 图就绪 |
+| `tests/test_agent_session.py` | 会话记忆：跨轮提示词带首轮问答、双会话隔离、没开会话就拒 `session_id` |
+| `tests/test_agent_session_cleanup.py` | 会话清理：TTL 判定、干跑只数不删、0 值不开库 |
 | `tests/test_agent_service.py` | agent 侧图逻辑：节点级，假件是脚本化 LLM + 假 client，不碰 ASGI |
 | `tests/test_agent_wire.py` | agent 的 HTTP 面端到端：`RagClient` → 真 `TestClient(rag_app)` → 真 `/answer`，只有最里面那层生成器是桩；`/qa/stream` 的 `step`/`done` 事件序、`/health` 的 rag 可达性、503 分支 |
 | `tests/test_server_qa.py` | rag 的 HTTP 面：mode 分派与回显、`/qa/stream` 的 `evidence`/`delta`/`done` 与截断标记、`mode=agent` 已不认（422）、重依赖不进 import |
+| `tests/test_answer_stream.py` | 流式归并 `drain`：帧序回调、尾帧定稿、与 `answer()` 双路 parity（空检索 / 带材料 / 带时效） |
+| `tests/test_rag_concurrency.py` | 并发闸：排队超时 503 + Retry-After、流式收 error 帧、reindex 串行锁 |
 | `tests/test_llm_adapter.py` | LLM 适配器：`chat` 带回 `finish_reason`、流式在 usage-only 空 `choices` 尾片上不炸 |
 | `tests/test_documents.py` | 上传入库与台账、会话材料进提示词、`/reindex` 热替换 runtime |
+| `tests/test_pdf_reader.py` | PDF 读者：页眉页脚去噪、折行拼接、目录页不产幻影条号 |
 | `tests/test_openapi_contract.py` | 契约漂移：提交的 `openapi.json` 与应用现服逐字节一致；客户端只调已声明的操作、只发已声明的字段，拒绝与连不上都归成 `QaError` |
 | `tests/test_tool_parity.py` | 工具面：参数怎么变成请求、缺口怎么回、载荷怎么重建对象图；渲染文本与 S0 快照的 golden 逐字相等（切包不许改工具输出）；本地臂不许碰契约客户端 |
 | `tests/test_mcp_tools.py` | MCP 工具面：名字与参数 ⊆ 端点契约（上下界逐键比）、载荷原样透传、工具表不载 SDK 也不拉重依赖 |
