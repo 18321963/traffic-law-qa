@@ -312,10 +312,29 @@ print(qa("醉驾怎么处罚").render())                                 # 检�
 print(qa("深圳 行人在机动车道 罚款多少", mode="search").render())  # 只检索，不花钱
 ```
 
+### 前端界面
+
+界面在 `frontend/`（React + Vite）。三种起法，选一种：
+
+```powershell
+# A. 什么都不装，跟全栈一起起：上面的 compose 已含 web 服务，浏览器开 http://localhost:3000；8001 只是 API 直连，不是界面
+
+# B. 开发模式（改界面代码即时热更；需 Node ^20.19 或 >=22.12）
+#    先保证有个 agent 在跑（compose 的宿主 :8001，或裸跑的 uvicorn），然后：
+cd frontend
+npm ci                    # 首次
+npm run dev               # Vite 开发服务器 → http://localhost:5173；/qa /health /laws /documents /sessions 反代到 127.0.0.1:8001
+                          # 换目标：先 $env:VITE_API_TARGET="http://host:port" 再 npm run dev
+
+# C. 只看构建产物：npm run build（tsc --noEmit + vite build）→ frontend/dist；npm run preview → http://localhost:4173（反代同 B）
+```
+
+`deploy/build.sh` 建 web 镜像时会在 `frontend/src` 比 `dist` 新时自己先跑一遍 `npm ci && npm run build`，不用手动建 `dist`。
+
 ### 测试
 
 ```powershell
-python -m pytest                # 382 条离线用例，约 30 秒；不碰 Milvus、不调模型
+python -m pytest                # 386 条离线用例，约 30 秒；不碰 Milvus、不调模型
 ruff check .
 ```
 
@@ -354,17 +373,6 @@ ruff check .
 
 **观测（langfuse）**：全局开关，两个服务读同一份 `.env` 的 `LANGFUSE_*`——agent 侧配了就真上报（启动日志有 `[langfuse] 观测已开启`），rag 侧没有装配点、永远不上报。容器里没有 `--no-langfuse`（那是 CLI 参数），要单独关一个只能换那份服务的 env_file、要关就不给 keys。
 
-## 它长什么样
-
-`qa("醉驾怎么处罚")` 的真实输出节选：
-
-> 醉酒驾驶机动车的，由公安机关交通管理部门约束至酒醒，吊销机动车驾驶证，依法追究刑事责任；五年内不得重新取得机动车驾驶证。 [依据1]
->
-> 参考文献：
->   【依据1】 《中华人民共和国道路交通安全法》(2021-04-29)第九十一条 — 第九十一条　饮酒后驾驶机动车的，处暂扣六个月机动车驾驶证，并处一千元以上二千元以下罚款。…
-
-正文里的 `[依据N]` 是模型写的，`参考文献` 那段是 `Answer.render()` 按检索结果拼的 —— 编号与原文的对应不经过模型的手。
-
 ## 技术栈
 
 | 层 | 选型 |
@@ -374,17 +382,4 @@ ruff check .
 | 服务 | FastAPI + uvicorn，`/qa/stream` 走 SSE |
 | Agent | LangGraph 状态机，LLM 调用直接走 `openai` SDK |
 | 依赖 | 基础组只有三个包：`openai` · `python-dotenv` · `httpx`；`pymilvus` 在 `milvus` 组，嵌入/重排的 `torch` + `transformers` 在 `local` 可选组，不装也能跑，退化成纯 BM25（agent 侧这两组都不装）；pdf 解析的 `pypdf` 在 `pdf` 组 —— 建库碰到 PDF 缺它就显式报错，不静默跳过 |
-
-## 进阶
-
-自用台账，与上面的项目介绍无关。
-- agent后面加一个审查正确性agent,再加打分agent测正确率
-    —— 前半已落：末端复核节点（判支撑 + 算分 + 低分降级）。后半也已落：阈值按判官批标定，2026-10-10 定为 0.35
-       （63 条：拦 6 = 3 真错 + 3 误杀、交付正确率 77.8%；旧 0.6 拦 16 = 5 真错 + 11 误杀）。
-       检测力已有量化：复核分度量「引用标签卫生」不度量「结论正确性」——高分区结构性漏放（6 条放行判错里 3 条 score=1.0）；
-       旧探针（「追加原文没有的话两次都判支撑」）打的是入口意图模型，不是复核模型；复核模型 2026-10-10 随基线换成 kimi-k2.6，与阈值标定臂同源（容器端到端未重跑标定批）。
-- 加网页搜索工具 —— 已实现，但没挂进工具面，见上。
-- 加PDF解析 —— 已落地：pdf/ 与 docx/ 并列建库真源、上传通道也收 pdf（缺 pypdf 显式报错不降级），8 部 / 656 条 / 966 块；换语料后免费检索行已重跑（LLM 两行停在 6 部口径）。
-- 记忆（这项目好像需求不高）
-- 再进阶：数据库优化 / redis / 消息队列 / 更清晰的架构
 
