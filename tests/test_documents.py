@@ -34,6 +34,7 @@ from rag_service.indexing.ingest import (  # noqa: E402
 )
 from rag_service.indexing.parser import LawLibrary, ParseStage  # noqa: E402
 from rag_service.indexing.readiness import ReadyState  # noqa: E402
+from rag_service.indexing.sources import TextReader  # noqa: E402
 from rag_service.prompts import MATERIAL_HEADER  # noqa: E402
 from rag_service.query.generator import AnswerGenerator  # noqa: E402
 from rag_service.query.materials import load_materials, search_materials  # noqa: E402
@@ -514,3 +515,29 @@ def test_ledger_keeps_the_sha1_and_the_original_name(client) -> None:
     assert got.sha1 == hashlib.sha1(MATERIAL_MD.encode("utf-8")).hexdigest()
     assert got.display_name == "车辆管理规定.md"
     assert got.bytes == len(MATERIAL_MD.encode("utf-8"))
+
+
+def test_text_reader_does_not_let_a_repeated_heading_double_the_articles(tmp_path) -> None:
+    source = tmp_path / "law.md"
+    source.write_text(
+        "# 第一章 总则\n"
+        "\n"
+        "第一条 为了维护道路交通秩序，预防和减少交通事故，制定本法。\n"
+        "\n"
+        "#### 第九十条\n"
+        "\n"
+        "第九十条　机动车驾驶人违反道路通行规定的，处警告或者二十元以上二百元以下罚款。\n",
+        encoding="utf-8",
+    )
+
+    assert [paragraph.text for paragraph in TextReader().read(source)] == [
+        "第一章 总则",
+        "第一条 为了维护道路交通秩序，预防和减少交通事故，制定本法。",
+        "第九十条　机动车驾驶人违反道路通行规定的，处警告或者二十元以上二百元以下罚款。",
+    ], (
+        "`LawLibrary.save` 写出的 text/*.md 是这个形状：`#### 第九十条` 之后另起一段 `第九十条　正文…`，"
+        "条号写了两遍；而 LawParser 的正文锚点是 `^第…条`，两行都命中 —— "
+        "留着标题行会把条号与正文错开并让条数翻倍（实测 82 → 164），"
+        "一个都不剥则标题行被并进上一条的正文尾部（实测每条正文尾部挂着下一行的 `#### 第X条`）。"
+        "所以：剥掉 `#`，若下一段以它开头就连标题一起丢掉；用户自己写的 md 正文不重复条号时标题照常保留。"
+    )

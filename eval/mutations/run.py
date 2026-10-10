@@ -14,6 +14,10 @@ from .retrieval import MUTATIONS as RETRIEVAL
 
 __all__ = ["main", "TABLES", "run_table"]
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 USAGE = """变异自检：把一处规则改坏，跑对应测试，看它是否翻红。
 
     python -m eval.mutations.run all                  # 四张表全跑

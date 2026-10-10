@@ -99,16 +99,6 @@ RE_BLANK = re.compile(r"\n\s*\n")
 
 
 def _dedupe_headings(blocks: list[str]) -> list[str]:
-    """剥掉 `#`，并丢掉与正文重复的那一行标题。
-
-    `LawLibrary.save` 写出的 `text/*.md` 是这个形状：`#### 第九十条` 之后另起一段
-    `第九十条　正文…` —— **条号写了两遍**。`LawParser` 的 `RE_ARTICLE` 是 `^第…条` 锚定的，
-    两行都命中：留着标题行会把条号与正文错开并让条数翻倍（实测 82 → 164）；
-    一个都不剥则标题行不命中 `RE_CHAPTER`/`RE_ARTICLE`，被 `buffer` 追加到**上一条**的正文里
-    （实测每条正文尾部都挂着下一行的 `#### 第X条`）。所以：剥 `#`，再按「下一段以它开头」去重。
-
-    用户自己写的 md 若正文不重复条号（`#### 第九十条` 后直接跟正文），标题行照常保留、照常成条。
-    """
     out: list[str] = []
     for index, block in enumerate(blocks):
         body = RE_HEADING.sub("", block).strip()

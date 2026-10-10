@@ -274,7 +274,7 @@ Copy-Item .env.example .env     # 填 LLM_API_KEY
 
 ```powershell
 # 一路起全（Docker）：Milvus + 知识库服务 + agent + 浏览器界面（compose 文件在 deploy/ 下）
-deploy/build.sh                                  # 建三个镜像并上线（直连 buildx；禁用 compose up --build；web 镜像要先有 frontend/dist）
+deploy/build.sh                                  # 建三个镜像并上线（直连 buildx；禁用 compose up --build；前端源码比 dist 新时脚本自己先重建 dist）
 docker compose -f deploy/docker-compose.yml up -d
 docker compose -f deploy/docker-compose.yml ps   # 等六个容器 healthy
 curl.exe localhost:8001/health  # 必须带 .exe：PowerShell 的 curl 是 IWR 别名
@@ -289,7 +289,7 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up 
 
 镜像里三个服务都在 compose 里：`app`（rag 服务，生产面不占宿主端口、dev 覆盖暴露 :8000；挂 GPU、四个命名卷、模型只读挂载）、`agent`（agent 服务，宿主 :8001 → 容器内 :8000；不挂 GPU，挂一卷 `tlr_sessions` 存会话记忆、不载模型，rag 地址由 `RAG_BASE_URL=http://app:8000` 给，地区澄清默认开）与 `web`（界面，宿主 :3000 → 容器 :80；nginx:alpine，只放前端构建产物，把 `/health` `/qa` `/laws` `/documents` 同源反代到 agent，上传限 10MB）。agent 的 healthcheck 读的是 `/health` 的 body：自己 `status=ok` 且内嵌的 `rag.status=ok` 才算健康，所以 rag 断掉它就会变 unhealthy。
 
-改了代码要重建：跑 `deploy/build.sh`（等价直连 buildx 三条 + 把 app/agent/web 滚动上线）。镜像把源码烤进去了，不重建跑的还是上一版，且不报任何错；**也别用 `docker compose up --build`**（本机 compose v5.4.0 内嵌 bake 出错，报错表面像网络问题）或 `docker builder prune`。web 镜像 COPY 的是 `frontend/dist`，所以重建前先 `cd frontend && npm ci && npm run build`（缺 dist 时 `build.sh` 会直接提示这一句）。首次构建要下 CUDA 版 torch（约 2.8GB），之后有缓存就快。构建中途别 Ctrl-C：torch 下到一半断了不落缓存，下次还得重下。三个镜像构建完的体量：rag 6.03GB（大头就是 CUDA 版 torch），agent 266MB，web 63.2MB。
+改了代码要重建：跑 `deploy/build.sh`（等价直连 buildx 三条 + 把 app/agent/web 滚动上线）。镜像把源码烤进去了，不重建跑的还是上一版，且不报任何错；**也别用 `docker compose up --build`**（本机 compose v5.4.0 内嵌 bake 出错，报错表面像网络问题）或 `docker builder prune`。web 镜像 COPY 的是 `frontend/dist`，`build.sh` 会拿 `frontend/src`、`index.html`、`package*.json`、`tsconfig.json`、`vite.config.ts` 跟 `dist/index.html` 比 mtime：源码更新就先 `npm ci && npm run build` 再建镜像，dist 不比源码旧就跳过（要强制重建就先删 `frontend/dist`）。首次构建要下 CUDA 版 torch（约 2.8GB），之后有缓存就快。构建中途别 Ctrl-C：torch 下到一半断了不落缓存，下次还得重下。三个镜像构建完的体量：rag 6.03GB（大头就是 CUDA 版 torch），agent 266MB，web 63.2MB。
 
 agent 一直 `unhealthy` 怎么办 —— 两种成因，修法同一条。① 启动时就探不到 rag（`boot_error`）：agent 进程本身是活的，`restart: unless-stopped` 不会触发（Docker 没有「unhealthy 就重启」这回事），而 lifespan 只跑一次，所以它不会自愈；② 起来之后 rag 又断了：healthcheck 变红，进程同样不重启。**先修好 rag，再 `docker compose -f deploy/docker-compose.yml restart agent`** —— 重启才会重跑一次 lifespan、重新探一遍 rag。
 
@@ -315,7 +315,7 @@ print(qa("深圳 行人在机动车道 罚款多少", mode="search").render())  
 ### 测试
 
 ```powershell
-python -m pytest                # 359 条离线用例，约 26 秒；不碰 Milvus、不调模型
+python -m pytest                # 376 条离线用例，约 26 秒；不碰 Milvus、不调模型
 ruff check .
 ```
 

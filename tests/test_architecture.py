@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import ast
+import io
+import re
 import subprocess
 import sys
+import tokenize
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 import pytest
@@ -821,3 +825,322 @@ def test_the_agent_storage_scan_has_teeth() -> None:
     assert _sqlite_connect_lines(ast.parse("from sqlite3 import connect as c\nc('x')\n")) == [2]
     assert _sqlite_connect_lines(ast.parse("import sqlite3\nsqlite3.Connection('x')\n")) == []
     assert _sqlite_connect_lines(ast.parse("MilvusIndexer().connect()\n")) == []
+
+
+EVAL_PACKAGE = ROOT / "eval"
+EVAL_SOURCES = sorted(path for path in EVAL_PACKAGE.rglob("*.py") if "__pycache__" not in path.parts)
+assert len(EVAL_SOURCES) > 8, (
+    f"扫描根不成立：{EVAL_PACKAGE} 下只有 {len(EVAL_SOURCES)} 个 .py，下面的门禁会静默放行"
+)
+
+EVAL_TO_RAG = {
+    ("eval/harness.py", "rag_service.adapters.milvus"),
+    ("eval/harness.py", "rag_service.adapters.sqlite"),
+    ("eval/harness.py", "rag_service.api"),
+    ("eval/harness.py", "rag_service.api.facade"),
+    ("eval/harness.py", "rag_service.api.runtime"),
+    ("eval/harness.py", "rag_service.indexing.chunker"),
+    ("eval/harness.py", "rag_service.query.articles"),
+    ("eval/multihop.py", "rag_service.adapters.sqlite"),
+    ("eval/multihop.py", "rag_service.api"),
+    ("eval/multihop.py", "rag_service.api.facade"),
+    ("eval/multihop.py", "rag_service.api.runtime"),
+    ("eval/multihop.py", "rag_service.indexing.chunker"),
+    ("eval/multihop.py", "rag_service.query.articles"),
+    ("eval/singlehop.py", "rag_service.api.facade"),
+}
+
+
+def _rag_imports_in_text(rel: str, text: str) -> set[tuple[str, str]]:
+    found: set[tuple[str, str]] = set()
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == "rag_service":
+                    found.add((rel, alias.name))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            if node.module.split(".")[0] == "rag_service":
+                found.add((rel, node.module))
+    return found
+
+
+def _rag_imports_in_eval() -> set[tuple[str, str]]:
+    found: set[tuple[str, str]] = set()
+    for path in EVAL_SOURCES:
+        found |= _rag_imports_in_text(_rootrel(path), path.read_text(encoding="utf-8"))
+    return found
+
+
+def test_the_eval_package_only_reaches_rag_through_registered_edges() -> None:
+    found = _rag_imports_in_eval()
+    added = sorted(found - EVAL_TO_RAG)
+    gone = sorted(EVAL_TO_RAG - found)
+    assert not added and not gone, (
+        "eval 直取 rag_service 的边变了。eval 是仓内评测工具（在进程内起真 app、跑真检索），"
+        "按设计不走 HTTP —— 所以这条边允许存在，但必须逐条登记：\n"
+        f"  多出来的：{added or '无'}\n  已经不存在的：{gone or '无'}\n"
+        "（新增的要么补进 EVAL_TO_RAG 并说明是哪条臂在用，要么改走 `--http URL` 那条臂：走服务端点、不 import rag）"
+    )
+
+
+def test_the_eval_rag_edge_scan_has_teeth() -> None:
+    probe = (
+        "from rag_service.api.facade import QaError\n"
+        "import rag_contracts\n"
+        "\n"
+        "\n"
+        "def f():\n"
+        "    import rag_service.query.rag\n"
+    )
+    assert _rag_imports_in_text("eval/harness.py", probe) == {
+        ("eval/harness.py", "rag_service.api.facade"),
+        ("eval/harness.py", "rag_service.query.rag"),
+    }
+    assert ("eval/singlehop.py", "rag_service.api.facade") in _rag_imports_in_eval(), (
+        "探针失明：连既有的那条 eval → rag_service 边都扫不出来，上面那条门禁恒绿"
+    )
+
+
+FRONTEND_SSE = ROOT / "frontend" / "src" / "api" / "sse.ts"
+SSE_EMITTERS = ("rag_service/api/app.py", "agent_service/api/app.py")
+SSE_FRAMES = ("delta", "done", "error", "evidence", "interrupt", "step")
+SSE_FRAMES_THE_FRONTEND_IGNORES = {"evidence"}
+
+
+def _frames_in_source(text: str) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(text)):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        func = node.func
+        head = node.args[0]
+        if isinstance(func, ast.Name) and func.id == "_sse":
+            if isinstance(head, ast.Constant) and isinstance(head.value, str):
+                names.add(head.value)
+        elif isinstance(func, ast.Attribute) and func.attr == "put":
+            if isinstance(head, ast.Tuple) and head.elts:
+                first = head.elts[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    names.add(first.value)
+    return names
+
+
+def _frontend_frames_in_source(text: str) -> set[str]:
+    return set(re.findall(r'frame\.event === "([a-zA-Z_]+)"', text))
+
+
+def test_the_frontend_knows_exactly_the_frames_the_two_services_emit() -> None:
+    emitted: set[str] = set()
+    for rel in SSE_EMITTERS:
+        emitted |= _frames_in_source((ROOT / rel).read_text(encoding="utf-8"))
+    assert emitted == set(SSE_FRAMES), (
+        "两端 SSE 帧名的并集变了。帧名是跨端契约（前端按名分派，未知帧会被丢掉）：\n"
+        f"  多出来的：{sorted(emitted - set(SSE_FRAMES))}\n"
+        f"  已经不发的：{sorted(set(SSE_FRAMES) - emitted)}"
+    )
+    known = _frontend_frames_in_source(FRONTEND_SSE.read_text(encoding="utf-8"))
+    expected = set(SSE_FRAMES) - SSE_FRAMES_THE_FRONTEND_IGNORES
+    assert known == expected, (
+        "前端的 sse.ts 认的帧名与后端对不上（认了不发的名＝死分支；漏了发的名＝帧被静默丢掉）：\n"
+        f"  前端认的：{sorted(known)}\n  该认的：{sorted(expected)}\n"
+        "（确实有意忽略的帧，写进 SSE_FRAMES_THE_FRONTEND_IGNORES）"
+    )
+
+
+def test_the_sse_frame_scan_has_teeth() -> None:
+    assert _frames_in_source('_sse("delta", payload)\nout.put(("done", payload))\n') == {"delta", "done"}
+    assert _frames_in_source("_sse(name, payload)\n") == set(), (
+        "探针把非常量帧名也算进来了，上面那条门禁会误报"
+    )
+    assert _frontend_frames_in_source('if (frame.event === "step") return null;\n') == {"step"}
+
+
+DOCKERIGNORE = ROOT / ".dockerignore"
+IMAGE_DATA_KEEP = frozenset(
+    {
+        "eval_corpus.json",
+        "eval_multihop.json",
+        "eval_nogold.json",
+        "eval_reference.json",
+        "eval_retrieval.json",
+    }
+)
+IMAGE_MUST_IGNORE = (
+    "data/documents.db",
+    "data/sessions.db",
+    "data/usage.db",
+    "data/uploads/2026-10-11.x.docx",
+    "data/traces/single82_q3next.json",
+    "deploy/backup/20261009-205732/milvus.tar.gz",
+    "volumes/milvus/data/flush",
+)
+
+
+def _dockerignore_patterns(text: str) -> tuple[str, ...]:
+    return tuple(
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith(("#", "!"))
+    )
+
+
+def _dockerignored(rel: str, patterns: tuple[str, ...]) -> bool:
+    for pattern in patterns:
+        if pattern.endswith("/"):
+            if rel == pattern.rstrip("/") or rel.startswith(pattern):
+                return True
+        elif fnmatchcase(rel, pattern) or fnmatchcase(rel.split("/")[-1], pattern):
+            return True
+    return False
+
+
+def test_the_build_never_carries_local_state_into_the_images() -> None:
+    patterns = _dockerignore_patterns(DOCKERIGNORE.read_text(encoding="utf-8"))
+    leaked = [
+        str(path.relative_to(ROOT))
+        for path in sorted((ROOT / "data").rglob("*"))
+        if path.is_file()
+        and path.name not in IMAGE_DATA_KEEP
+        and not _dockerignored(_rootrel(path), patterns)
+    ]
+    unguarded = [rel for rel in IMAGE_MUST_IGNORE if not _dockerignored(rel, patterns)]
+    assert not leaked and not unguarded, (
+        "本机运行期状态会进构建上下文／镜像层（镜像层会被 push 与 `docker history` 看到）：\n"
+        f"  data/ 里没被挡掉的：{leaked or '无'}\n  规则没盖住的：{unguarded or '无'}\n"
+        f"（.dockerignore 里 data/ 只该放行题集桶文件：{sorted(IMAGE_DATA_KEEP)}；"
+        "确有意放行的，补进 IMAGE_DATA_KEEP 并说明为什么）"
+    )
+
+
+def test_the_dockerignore_scan_has_teeth() -> None:
+    patterns = _dockerignore_patterns("# 注释\n!keep.txt\n  data/*.db  \ndata/uploads/\n")
+    assert patterns == ("data/*.db", "data/uploads/"), patterns
+    assert _dockerignored("data/sessions.db", patterns)
+    assert _dockerignored("data/uploads/x/y.docx", patterns)
+    assert not _dockerignored("data/eval_corpus.json", patterns)
+    assert not _dockerignored("volumes/milvus/data/flush", patterns), (
+        "匹配器把没写规则的东西也当成已挡掉了，上面那条门禁恒绿"
+    )
+
+
+OWN_SOURCES = sorted(
+    path
+    for root in [*TOP_PACKAGES, ROOT / "tests"]
+    for path in root.rglob("*.py")
+    if "__pycache__" not in path.parts
+)
+assert len(OWN_SOURCES) > 100, (
+    f"扫描根不成立：自研 Python 只找到 {len(OWN_SOURCES)} 个，下面的门禁会静默放行"
+)
+
+PACKAGE_SOURCES = sorted(
+    path for package in TOP_PACKAGES for path in package.rglob("*.py") if "__pycache__" not in path.parts
+)
+
+README_REF_SOURCES = [
+    path for path in PACKAGE_SOURCES if path.relative_to(ROOT).parts[:2] != ("eval", "mutations")
+]
+
+NOQA_ONLY = re.compile(r"^#\s*noqa(?::\s*[A-Z0-9,\s]+)?$")
+README_PATH = ROOT / "README.md"
+README_REF = re.compile(r"README「([^」]+)」")
+
+
+def _prose_comments(text: str) -> list[int]:
+    return [
+        token.start[0]
+        for token in tokenize.generate_tokens(io.StringIO(text).readline)
+        if token.type == tokenize.COMMENT and not NOQA_ONLY.match(token.string.strip())
+    ]
+
+
+def _docstring_lines(text: str) -> list[int]:
+    out: list[int] = []
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            if ast.get_docstring(node):
+                out.append(getattr(node, "lineno", 1))
+    return sorted(out)
+
+
+def _readme_headings(text: str) -> set[str]:
+    return {line.lstrip("#").strip() for line in text.splitlines() if line.startswith("#")}
+
+
+def _unused_usage_modules() -> list[str]:
+    offenders: list[str] = []
+    for path in OWN_SOURCES:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        declared = any(
+            isinstance(node, (ast.Assign, ast.AnnAssign))
+            and any(getattr(target, "id", "") == "USAGE" for target in (
+                node.targets if isinstance(node, ast.Assign) else [node.target]
+            ))
+            for node in tree.body
+        )
+        if not declared:
+            continue
+        used = any(
+            isinstance(node, ast.Name) and node.id == "USAGE" and isinstance(node.ctx, ast.Load)
+            for node in ast.walk(tree)
+        )
+        if not used:
+            offenders.append(_rootrel(path))
+    return offenders
+
+
+def test_no_prose_comments_and_no_docstrings_in_our_own_python() -> None:
+    offenders: list[str] = []
+    for path in OWN_SOURCES:
+        text = path.read_text(encoding="utf-8")
+        offenders += [f"{_rootrel(path)}:{line} 散文注释" for line in _prose_comments(text)]
+        offenders += [f"{_rootrel(path)}:{line} docstring" for line in _docstring_lines(text)]
+    assert not offenders, (
+        "本仓刻意零散文注释、零 docstring（用法文本放模块级 USAGE 常量，成因写进断言消息或文档）：\n  "
+        + "\n  ".join(offenders)
+        + "\n（`# noqa: <码>` 是机器指令，不算散文注释）"
+    )
+
+
+def test_every_usage_constant_is_actually_referenced() -> None:
+    offenders = _unused_usage_modules()
+    assert not offenders, (
+        "这些模块定义了 USAGE 却没有任何地方用它 —— 用法文本会烂在文件里，"
+        "`--help` 与报错提示都看不到它：\n  " + "\n  ".join(offenders) + "\n（要么用上，要么删掉）"
+    )
+
+
+def test_every_readme_section_reference_points_at_a_real_heading() -> None:
+    headings = _readme_headings(README_PATH.read_text(encoding="utf-8"))
+    offenders = [
+        f"{_rootrel(path)} → README「{name}」"
+        for path in README_REF_SOURCES
+        for name in README_REF.findall(path.read_text(encoding="utf-8"))
+        if name not in headings
+    ]
+    assert not offenders, (
+        "自检文案按名引用了 README 里不存在的小节 —— 改 README 章节标题前先 `grep -rn \"README「\"`：\n  "
+        + "\n  ".join(offenders)
+        + f"\n（README 现有小节：{sorted(headings)}；"
+        "扫描不含 eval/mutations/ —— 那里面是变异夹具，故意写着坏样例）"
+    )
+
+
+def test_the_wording_and_readme_reference_scans_have_teeth() -> None:
+    probe = (
+        '"""模块说明。"""\n'
+        "\n"
+        "import os\n"
+        "\n"
+        "\n"
+        "def f():\n"
+        '    """函数说明。"""\n'
+        "    x = 1  # 这里解释一下\n"
+        "    y = 2  # noqa: E402\n"
+        "    return x + y\n"
+    )
+    assert _docstring_lines(probe) == [1, 6]
+    assert _prose_comments(probe) == [8]
+    assert _readme_headings("## 入口\n\n### 端点\n\n普通行 README「入口」\n") == {"入口", "端点"}
+    assert README_REF.findall('raise SystemExit("清单见 README「入口」")') == ["入口"]
+    assert ROOT / "eval" / "harness.py" in README_REF_SOURCES, "排除面开太大，把 eval/ 的正文也跳过了"
