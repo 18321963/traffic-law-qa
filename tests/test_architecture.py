@@ -761,3 +761,63 @@ def test_the_copy_face_scan_has_teeth() -> None:
         ["fake_gamma（镜像入口包）"],
         set(),
     )
+
+
+AGENT_PACKAGE = ROOT / "agent_service"
+AGENT_SOURCES = sorted(
+    path for path in AGENT_PACKAGE.rglob("*.py") if "__pycache__" not in path.parts
+)
+assert len(AGENT_SOURCES) > 20, (
+    f"扫描根不成立：{AGENT_PACKAGE} 下只有 {len(AGENT_SOURCES)} 个 .py，存储门禁会静默放行"
+)
+
+
+def _sqlite_connect_lines(tree: ast.AST) -> list[int]:
+    connections = {"sqlite3"}
+    factories: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "sqlite3":
+                    connections.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module == "sqlite3":
+            for alias in node.names:
+                if alias.name == "connect":
+                    factories.add(alias.asname or alias.name)
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "connect":
+            if isinstance(func.value, ast.Name) and func.value.id in connections:
+                lines.append(node.lineno)
+        elif isinstance(func, ast.Name) and func.id in factories:
+            lines.append(node.lineno)
+    return sorted(lines)
+
+
+def test_the_agent_side_opens_sqlite_only_in_the_storage_module() -> None:
+    storage_path = AGENT_PACKAGE / "storage.py"
+    probe = _sqlite_connect_lines(ast.parse(storage_path.read_text(encoding="utf-8")))
+    assert probe, "探针失明：agent_service/storage.py 里认不出 sqlite3.connect 调用，本门会恒绿"
+    offenders = [
+        f"{_rootrel(path)}:{line}"
+        for path in AGENT_SOURCES
+        if path != storage_path
+        for line in _sqlite_connect_lines(ast.parse(path.read_text(encoding="utf-8")))
+    ]
+    assert not offenders, (
+        "agent 侧的 sqlite 连接只许在 agent_service/storage.py 里开"
+        "（import sqlite3 本身不拦，类型标注可用；开连接要过 storage 的开库函数）：\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_the_agent_storage_scan_has_teeth() -> None:
+    assert _sqlite_connect_lines(ast.parse("import sqlite3\nsqlite3.connect('x')\n")) == [2]
+    assert _sqlite_connect_lines(ast.parse("import sqlite3 as s\ns.connect('x')\n")) == [2]
+    assert _sqlite_connect_lines(ast.parse("from sqlite3 import connect\nconnect('x')\n")) == [2]
+    assert _sqlite_connect_lines(ast.parse("from sqlite3 import connect as c\nc('x')\n")) == [2]
+    assert _sqlite_connect_lines(ast.parse("import sqlite3\nsqlite3.Connection('x')\n")) == []
+    assert _sqlite_connect_lines(ast.parse("MilvusIndexer().connect()\n")) == []

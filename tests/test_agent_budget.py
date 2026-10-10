@@ -13,6 +13,7 @@ from conftest import AgentStubLLM, AgentStubService  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 
+from agent_service import storage  # noqa: E402
 from agent_service.agents.graph import AgentRunner  # noqa: E402
 from agent_service.api import app as server  # noqa: E402
 from agent_service.api import budget  # noqa: E402
@@ -143,6 +144,13 @@ def test_the_utc_day_key_and_the_retry_window() -> None:
     assert budget.retry_after_seconds(now=0) == 86400
     assert budget.retry_after_seconds(now=86399) == 1
     assert 1 <= budget.retry_after_seconds() <= 86400
+
+
+def test_budget_reexports_storage_names_and_keeps_the_wrapper_seam() -> None:
+    assert budget.DB_FAIL_PREFIX is storage.DB_FAIL_PREFIX
+    assert budget.day_key is storage.day_key
+    assert budget.used_today is not storage.used_today
+    assert budget.record_usage is not storage.record_usage
 
 
 def test_the_ledger_is_created_on_demand_and_accumulates_one_row_per_day(tmp_path) -> None:
