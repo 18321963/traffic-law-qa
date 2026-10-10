@@ -23,7 +23,7 @@
 | 地区澄清（人在环） | ✅ | 判不出该按哪里的规定时（题面没点出地区、或点出的地名不是适用地，如产地题）先中断问一句「按该地法规还是只按全国法」再作答；判出地区直接答。回复经 resume 端点交回（服务里默认开，`AGENT_CLARIFY` 控制） |
 | 流式输出 | ✅ | rag `/qa/stream` 推检索结果与逐字 token；agent `/qa/stream` 推步骤流 + 逐字草稿；**草稿是草稿** —— `done` 才是复核之后的权威 |
 | 浏览器界面 | ✅ | web 镜像（nginx 静态托管，宿主 :3000）：问答流 · 依据/轨迹/材料三栏 · 材料上传 · 删会话 · 澄清回复；同源反代到 agent（源码 `frontend/`，React + Vite） |
-| 末端复核 | ✅ | 逐条判「被原文支撑？」→ 低分整篇降级（阈值 0.35；标定账见文末台账） |
+| 末端复核 | ✅ | 逐条判「被原文支撑？」→ 低分整篇降级（阈值 0.35；标定账见[运维手册](deploy/运维手册.md) §9） |
 | 就绪门 | ✅ | 启动时比对 docx／本地产物／集合三者，不一致自动重建；也能 `--rebuild` 或 `POST /reindex` 手动触发 |
 | 权重门禁 | ✅ | 索引快照里记着嵌入权重的指纹（文件名 + 大小 + mtime）：换了权重就拒绝服务并说明差在哪，`POST /reindex` / `RAG_ALLOW_REBUILD=1` 显式放行；老快照没指纹不拦，只标 `degraded`。启发式，防误换不防篡改 |
 | 上传入库 | ✅ | `session` 只进本次会话（工具面可查，答完即弃）｜`permanent` 干跑校验后写进真源、落台账、重建生效 |
@@ -72,7 +72,119 @@
 - **单跳上 agent 不加值**：同预算与 rag 逐条相同（78/93），跑满轮次只多查到 1 条 gold、引用反少 1、全中题反少 1，代价 5.45× token。
 - **多跳上 agent 加值，但增量全在第 2 轮起**：检索落空 10 → 4、全中题 12 → 15、引用 65 → 70；首轮还低于 rag（61/126 vs 65/126）—— 靠换查询词重查补回来，代价 4.99× token。
 - 失败几乎全在检索侧：多跳的主失败是「检索缺腿」（41、38/63，缺的 gold 从没进过候选）；单跳是「检索落空」（7、6/82）；引用侧只有「有证据未引用」2~4 题 —— 有证据时模型基本都会引。
-- 多跳那次开了复核闸：16/63 篇判降级（被点名不支撑的依据条数合计 57）；该轮阈值还是占位值 0.6，判官批（2026-10-10）事后判了这 16 条：11 条其实答对、5 条真错——复核分度量「引用标签卫生」不度量「结论正确性」（见文末台账），阈值已据此改为 0.35。
+- 多跳那次开了复核闸：16/63 篇判降级（被点名不支撑的依据条数合计 57）；该轮阈值还是占位值 0.6，判官批（2026-10-10）事后判了这 16 条：11 条其实答对、5 条真错——复核分度量「引用标签卫生」不度量「结论正确性」（见[运维手册](deploy/运维手册.md) §9），阈值已据此改为 0.35。
+
+## 快速开始
+
+### 环境要求
+
+- Python 3.10+
+- Docker Desktop —— 跑 Milvus 用（只想裸跑也得起它一个：`docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up -d --wait standalone`）
+- Node `^20.19` 或 `>=22.12` —— 建 web 镜像要用：`frontend/dist` 不入库，`deploy/build.sh` 会先在宿主机 `npm ci && npm run build` 出 dist；不要浏览器界面就不用装
+- GPU 可选：有 NVIDIA 卡（WSL2 直通开着）就用 GPU 跑嵌入与重排；没有就把 `deploy/docker-compose.yml` 里 `app` 下的 `gpus: all` 一行删掉（不删会在 `docker compose up` 时报设备错）—— 嵌入与重排退回 CPU，只是慢
+
+### 安装
+
+只用 Docker 起全栈（下面「启动」第一条）的话，这节整段跳过 —— 依赖都烤在镜像里。
+
+```powershell
+pip install -e ".[all]"
+```
+
+基础依赖只有三个包（`openai` · `python-dotenv` · `httpx`）；`pymilvus` 在 `milvus` 组，不装只是连不上 Milvus；`torch` + `transformers` 在 `local` 可选组里，不装也能跑 —— 退化成纯 BM25；`langgraph` 在 `agent` 组，不装只是起不了 agent 服务；`fastapi` + `uvicorn` 在 `api` 组，不装只是不能起服务；MCP SDK 在 `mcp` 组，不装只是不能 `python -m mcp_server`。`.[all]` 把这些组全带上（Langfuse 不在内，要上报单装 `.[langfuse]`；Studio 演示台在 `studio` 组，也不进 `all`）。
+
+两个 Python 镜像各取所需，都不装对方的：rag 服务镜像装 `api,local,milvus,pdf`；agent 镜像装 `agent,api,langfuse`（不装 `pymilvus`、也不装 `torch` —— 它两条都不需要）。web 镜像只放 nginx 与前端构建产物。
+
+### 配置
+
+```powershell
+Copy-Item .env.example .env     # 填 LLM_API_KEY
+```
+
+- `LLM_API_KEY`（连同 `LLM_BASE_URL` / `LLM_MODEL`）：生成要用的 OpenAI 兼容端点。没有 key 也能跑 —— 生成层拒答，检索照常。
+- 嵌入与重排是本地权重，没有远端端点要配：从 ModelScope（或 HF）拉 `bge-m3` 与 `bge-reranker-v2-m3`，目录名照抄、各占一层（`法规知识库/models/bge-m3/`、`法规知识库/models/bge-reranker-v2-m3/`），合计约 4.6GB，拉一次之后检索不出网（权重目录不入库，clone 里没有）。只做 BM25 就不需要这两个 —— 不放不报错，检索就是纯 BM25。
+- 可选：`AGENT_REGION_*` / `AGENT_REVIEW_*` 给判地区与末端复核单独配模型；`LANGFUSE_*` 开上报；`BOCHA_API_KEY` 给联网检索（已实现、当前未挂进工具面）。
+- 检索侧还有一组 `RAG_*`（`RAG_TOP_K` 召回条数、`RAG_CANDIDATES` 候选池、`RAG_RERANK` 开关…），默认值都在 `.env.example` 里列着。
+- 换了嵌入权重会让索引对不上号，所以建库时把权重目录的指纹（文件名 + 大小 + mtime）记进索引快照，启动时核对：对不上就拒绝服务（`/health` 503 并说明差在哪），指向同一目录的 `POST /reindex` 或 `RAG_ALLOW_REBUILD=1` 可显式放行 —— 放行即重建一次，新快照写入新指纹。指纹是启发式，防误换不防篡改。老快照（没记指纹）不拦，只把 `/health` 标成 `weights=unknown` / `degraded=true`，重建一次就补上。
+- 指纹误报最常见的一种：模型目录是拷贝或解压来的，mtime 是拷贝那一刻而不是原始时间 —— 换机、重新拷贝都会翻新。真遇上了不用改代码，`RAG_ALLOW_REBUILD=1` 重建一次即可。
+
+### 启动
+
+下面这组命令在 **Git Bash** 里执行 —— `deploy/build.sh` 是 bash 脚本，PowerShell 里直接敲跑不了（其余命令两个 shell 都行；curl 那行 PowerShell 里要写 `curl.exe`）。
+
+首次起全栈前：先在 `deploy/.env` 里写两键 `MINIO_ROOT_USER=` 与 `MINIO_ROOT_PASSWORD=`（值自定、随便填；该文件已 gitignore）。**base 与 dev 覆盖两条 compose 路都要求这两键存在** —— 缺了直接报错退出（必填插值在读文件时就检查，覆盖文件救不了；dev 覆盖只把值换成字面 `minioadmin`）。
+
+首次的等待大头在两处：下载与建库 —— 下载是 Milvus 三件套镜像（etcd 64.7MB + MinIO 161MB + Milvus 960MB，compose 自己拉）、CUDA 版 torch（约 2.8GB，构建时下）、可选的嵌入/重排权重（约 4.6GB，见「配置」）；建库是 app 首轮那几分钟。
+
+```bash
+# 一路起全（Docker）：Milvus + 知识库服务 + agent + 浏览器界面（compose 文件在 deploy/ 下）
+deploy/build.sh                                  # 建三个镜像并上线（直连 buildx；禁用 compose up --build；前端源码比 dist 新时脚本自己先重建 dist）
+docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml ps   # 等六个容器 healthy（首次启动 app 要先在容器里自动建库/核对，比日常启动多花几分钟）
+curl localhost:8001/health  # PowerShell 里要写 curl.exe：curl 是 IWR 别名
+# 界面在 localhost:3000（nginx 静态托管 + 同源反代到 agent），8001 是 API 直连
+```
+
+生产面（base compose）宿主见两个入口：**8001**（agent，API 直连）与 **3000**（web，浏览器界面）。本地开发用覆盖文件恢复全部端口与默认凭据：
+
+```bash
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up -d
+```
+
+镜像里三个服务都在 compose 里：`app`（rag 服务，生产面不占宿主端口、dev 覆盖暴露 :8000；挂 GPU、四个命名卷、模型只读挂载）、`agent`（agent 服务，宿主 :8001 → 容器内 :8000；不挂 GPU，挂一卷 `tlr_sessions` 存会话记忆、不载模型，rag 地址由 `RAG_BASE_URL=http://app:8000` 给，地区澄清默认开）与 `web`（界面，宿主 :3000 → 容器 :80；nginx:alpine，只放前端构建产物，把 `/health` `/qa` `/laws` `/documents` `/sessions` 同源反代到 agent，上传限 10MB）。agent 的 healthcheck 读的是 `/health` 的 body：自己 `status=ok` 且内嵌的 `rag.status=ok` 才算健康，所以 rag 断掉它就会变 unhealthy。
+
+改了代码要重建：跑 `deploy/build.sh`（等价直连 buildx 三条 + 把 app/agent/web 滚动上线）。镜像把源码烤进去了，不重建跑的还是上一版，且不报任何错；**也别用 `docker compose up --build`**（本机 compose v5.4.0 内嵌 bake 出错，报错表面像网络问题）或 `docker builder prune`。web 镜像 COPY 的是 `frontend/dist`，`build.sh` 会拿 `frontend/src`、`index.html`、`package*.json`、`tsconfig.json`、`vite.config.ts` 跟 `dist/index.html` 比 mtime：源码更新就先 `npm ci && npm run build` 再建镜像，dist 不比源码旧就跳过（要强制重建就先删 `frontend/dist`）。首次构建要下 CUDA 版 torch（约 2.8GB），之后有缓存就快。构建中途别 Ctrl-C：torch 下到一半断了不落缓存，下次还得重下。三个镜像构建完的体量：rag 6.03GB（大头就是 CUDA 版 torch），agent 266MB，web 63.9MB。
+
+agent 一直 `unhealthy` 怎么办 —— 两种成因，修法同一条。① 启动时就探不到 rag（`boot_error`）：agent 进程本身是活的，`restart: unless-stopped` 不会触发（Docker 没有「unhealthy 就重启」这回事），而 lifespan 只跑一次，所以它不会自愈；② 起来之后 rag 又断了：healthcheck 变红，进程同样不重启。**先修好 rag，再 `docker compose -f deploy/docker-compose.yml restart agent`** —— 重启才会重跑一次 lifespan、重新探一遍 rag。
+
+```bash
+# 裸跑（改代码即时生效）
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up -d --wait standalone   # 只起 Milvus（dev 覆盖才有宿主 19530）
+python -m rag_service.cli.build build        # 建库，docx 没变就跳过解析
+python -m rag_service "醉驾怎么处罚"          # 提问（线性管道）
+python -m rag_service.cli.serve              # 起 rag 服务（另开一个终端）
+python -m agent_service "在深圳，不按规定使用安全带罚多少？" --timing   # agent 循环，走上面那个服务
+```
+
+Agent 是另一个进程：它默认打 `http://127.0.0.1:8000`（`--http` 或 `RAG_BASE_URL` 换地方），检索、取条、材料、生成全在 rag 服务里发生；`python -m uvicorn agent_service.api.app:app --port 8001` 把它立成服务，端点面见下。注意 compose 里已经常驻着一个（宿主 :8001），上面这条裸跑是改代码时用的，两个都打同一个 rag。
+
+```python
+# 当库用
+from rag_service import qa
+
+print(qa("醉驾怎么处罚").render())                                 # 检索 + 生成
+print(qa("深圳 行人在机动车道 罚款多少", mode="search").render())  # 只检索，不花钱
+```
+
+### 前端界面
+
+界面在 `frontend/`（React + Vite）。三种起法，选一种：
+
+```powershell
+# A. 什么都不装，跟全栈一起起：上面的 compose 已含 web 服务，浏览器开 http://localhost:3000；8001 只是 API 直连，不是界面
+
+# B. 开发模式（改界面代码即时热更；需 Node ^20.19 或 >=22.12）
+#    先保证有个 agent 在跑（compose 的宿主 :8001，或裸跑的 uvicorn），然后：
+cd frontend
+npm ci                    # 首次
+npm run dev               # Vite 开发服务器 → http://localhost:5173；/qa /health /laws /documents /sessions 反代到 127.0.0.1:8001
+                          # 换目标：先 $env:VITE_API_TARGET="http://host:port" 再 npm run dev
+
+# C. 只看构建产物：npm run build（tsc --noEmit + vite build）→ frontend/dist；npm run preview → http://localhost:4173（反代同 B）
+```
+
+`deploy/build.sh` 建 web 镜像时会在 `frontend/src` 比 `dist` 新时自己先跑一遍 `npm ci && npm run build`，不用手动建 `dist`。
+
+### 测试
+
+```powershell
+python -m pytest                # 386 条离线用例，约 30 秒；不碰 Milvus、不调模型
+ruff check .
+```
+
+`pyproject.toml` 的 `addopts` 里已经有 `-q`，再加一个 `-q` 会变成 `-qq`，把最后的汇总行吞掉 —— 直接跑 `pytest` 就好。全部离线可跑，一条都不跳过；`integration` 这个 marker 留给「要 Milvus 或模型端点」的用例（`pytest -m integration` 才跑），目前还没有用例标它。
+
+命令与端点一览见「入口」「端点」两节。
 
 ## 架构
 
@@ -239,114 +351,6 @@ rag 那条路只剩两档；agent 循环搬走之后，它有自己的端点（�
 | rag `mode=search` | 检索 + 重排 | 不花 |
 | rag `mode=ask` | 检索 + 生成 | 花（一次 LLM 调用） |
 | agent `/qa` | 多轮工具调用 + 生成 + 复核 | 花（多次调用，最慢） |
-
-## 快速开始
-
-### 环境要求
-
-- Python 3.10+
-- Docker Desktop —— 跑 Milvus 用（只想裸跑也得起它一个：`docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up -d --wait standalone`）
-- Node `^20.19` 或 `>=22.12` —— 建 web 镜像要用：`frontend/dist` 不入库，`deploy/build.sh` 会先在宿主机 `npm ci && npm run build` 出 dist；不要浏览器界面就不用装
-- GPU 可选：有 CUDA 就用 GPU 跑嵌入与重排；没有也能跑，只是慢
-
-### 安装
-
-只用 Docker 起全栈（下面「启动」第一条）的话，这节整段跳过 —— 依赖都烤在镜像里。
-
-```powershell
-pip install -e ".[all]"
-```
-
-基础依赖只有三个包（`openai` · `python-dotenv` · `httpx`）；`pymilvus` 在 `milvus` 组，不装只是连不上 Milvus；`torch` + `transformers` 在 `local` 可选组里，不装也能跑 —— 退化成纯 BM25；`langgraph` 在 `agent` 组，不装只是起不了 agent 服务；`fastapi` + `uvicorn` 在 `api` 组，不装只是不能起服务；MCP SDK 在 `mcp` 组，不装只是不能 `python -m mcp_server`。`.[all]` 把这些组全带上（Langfuse 不在内，要上报单装 `.[langfuse]`；Studio 演示台在 `studio` 组，也不进 `all`）。
-
-两个 Python 镜像各取所需，都不装对方的：rag 服务镜像装 `api,local,milvus,pdf`；agent 镜像装 `agent,api,langfuse`（不装 `pymilvus`、也不装 `torch` —— 它两条都不需要）。web 镜像只放 nginx 与前端构建产物。
-
-### 配置
-
-```powershell
-Copy-Item .env.example .env     # 填 LLM_API_KEY
-```
-
-- `LLM_API_KEY`（连同 `LLM_BASE_URL` / `LLM_MODEL`）：生成要用的 OpenAI 兼容端点。没有 key 也能跑 —— 生成层拒答，检索照常。
-- 嵌入与重排是本地权重，没有远端端点要配：放 `法规知识库/models/`（`bge-m3`、`bge-reranker-v2-m3`，ModelScope 可下，约 4.6GB，拉一次之后检索不出网）。只做 BM25 就不需要这两个。
-- 可选：`AGENT_REGION_*` / `AGENT_REVIEW_*` 给判地区与末端复核单独配模型；`LANGFUSE_*` 开上报；`BOCHA_API_KEY` 给联网检索（已实现、当前未挂进工具面）。
-- 检索侧还有一组 `RAG_*`（`RAG_TOP_K` 召回条数、`RAG_CANDIDATES` 候选池、`RAG_RERANK` 开关…），默认值都在 `.env.example` 里列着。
-- 换了嵌入权重会让索引对不上号，所以建库时把权重目录的指纹（文件名 + 大小 + mtime）记进索引快照，启动时核对：对不上就拒绝服务（`/health` 503 并说明差在哪），指向同一目录的 `POST /reindex` 或 `RAG_ALLOW_REBUILD=1` 可显式放行 —— 放行即重建一次，新快照写入新指纹。指纹是启发式，防误换不防篡改。老快照（没记指纹）不拦，只把 `/health` 标成 `weights=unknown` / `degraded=true`，重建一次就补上。
-- 指纹误报最常见的一种：模型目录是拷贝或解压来的，mtime 是拷贝那一刻而不是原始时间 —— 换机、重新拷贝都会翻新。真遇上了不用改代码，`RAG_ALLOW_REBUILD=1` 重建一次即可。
-
-### 启动
-
-首次起全栈前：先在 `deploy/.env` 里写两键 `MINIO_ROOT_USER=` 与 `MINIO_ROOT_PASSWORD=`（值自定，该文件已 gitignore；缺了 `docker compose` 直接报错退出）。不想建它就走下面的 dev 覆盖 —— 凭据由字面默认值提供。
-
-```powershell
-# 一路起全（Docker）：Milvus + 知识库服务 + agent + 浏览器界面（compose 文件在 deploy/ 下）
-deploy/build.sh                                  # 建三个镜像并上线（直连 buildx；禁用 compose up --build；前端源码比 dist 新时脚本自己先重建 dist）
-docker compose -f deploy/docker-compose.yml up -d
-docker compose -f deploy/docker-compose.yml ps   # 等六个容器 healthy
-curl.exe localhost:8001/health  # 必须带 .exe：PowerShell 的 curl 是 IWR 别名
-# 界面在 localhost:3000（nginx 静态托管 + 同源反代到 agent），8001 是 API 直连
-```
-
-生产面（base compose）宿主见两个入口：**8001**（agent，API 直连）与 **3000**（web，浏览器界面）。本地开发用覆盖文件恢复全部端口与默认凭据：
-
-```powershell
-docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up -d
-```
-
-镜像里三个服务都在 compose 里：`app`（rag 服务，生产面不占宿主端口、dev 覆盖暴露 :8000；挂 GPU、四个命名卷、模型只读挂载）、`agent`（agent 服务，宿主 :8001 → 容器内 :8000；不挂 GPU，挂一卷 `tlr_sessions` 存会话记忆、不载模型，rag 地址由 `RAG_BASE_URL=http://app:8000` 给，地区澄清默认开）与 `web`（界面，宿主 :3000 → 容器 :80；nginx:alpine，只放前端构建产物，把 `/health` `/qa` `/laws` `/documents` `/sessions` 同源反代到 agent，上传限 10MB）。agent 的 healthcheck 读的是 `/health` 的 body：自己 `status=ok` 且内嵌的 `rag.status=ok` 才算健康，所以 rag 断掉它就会变 unhealthy。
-
-改了代码要重建：跑 `deploy/build.sh`（等价直连 buildx 三条 + 把 app/agent/web 滚动上线）。镜像把源码烤进去了，不重建跑的还是上一版，且不报任何错；**也别用 `docker compose up --build`**（本机 compose v5.4.0 内嵌 bake 出错，报错表面像网络问题）或 `docker builder prune`。web 镜像 COPY 的是 `frontend/dist`，`build.sh` 会拿 `frontend/src`、`index.html`、`package*.json`、`tsconfig.json`、`vite.config.ts` 跟 `dist/index.html` 比 mtime：源码更新就先 `npm ci && npm run build` 再建镜像，dist 不比源码旧就跳过（要强制重建就先删 `frontend/dist`）。首次构建要下 CUDA 版 torch（约 2.8GB），之后有缓存就快。构建中途别 Ctrl-C：torch 下到一半断了不落缓存，下次还得重下。三个镜像构建完的体量：rag 6.03GB（大头就是 CUDA 版 torch），agent 266MB，web 63.9MB。
-
-agent 一直 `unhealthy` 怎么办 —— 两种成因，修法同一条。① 启动时就探不到 rag（`boot_error`）：agent 进程本身是活的，`restart: unless-stopped` 不会触发（Docker 没有「unhealthy 就重启」这回事），而 lifespan 只跑一次，所以它不会自愈；② 起来之后 rag 又断了：healthcheck 变红，进程同样不重启。**先修好 rag，再 `docker compose -f deploy/docker-compose.yml restart agent`** —— 重启才会重跑一次 lifespan、重新探一遍 rag。
-
-```powershell
-# 裸跑（改代码即时生效）
-docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up -d --wait standalone   # 只起 Milvus（dev 覆盖才有宿主 19530）
-python -m rag_service.cli.build build        # 建库，docx 没变就跳过解析
-python -m rag_service "醉驾怎么处罚"          # 提问（线性管道）
-python -m rag_service.cli.serve              # 起 rag 服务（另开一个终端）
-python -m agent_service "在深圳，不按规定使用安全带罚多少？" --timing   # agent 循环，走上面那个服务
-```
-
-Agent 是另一个进程：它默认打 `http://127.0.0.1:8000`（`--http` 或 `RAG_BASE_URL` 换地方），检索、取条、材料、生成全在 rag 服务里发生；`python -m uvicorn agent_service.api.app:app --port 8001` 把它立成服务，端点面见下。注意 compose 里已经常驻着一个（宿主 :8001），下面这条裸跑是改代码时用的，两个都打同一个 rag。
-
-```python
-# 当库用
-from rag_service import qa
-
-print(qa("醉驾怎么处罚").render())                                 # 检索 + 生成
-print(qa("深圳 行人在机动车道 罚款多少", mode="search").render())  # 只检索，不花钱
-```
-
-### 前端界面
-
-界面在 `frontend/`（React + Vite）。三种起法，选一种：
-
-```powershell
-# A. 什么都不装，跟全栈一起起：上面的 compose 已含 web 服务，浏览器开 http://localhost:3000；8001 只是 API 直连，不是界面
-
-# B. 开发模式（改界面代码即时热更；需 Node ^20.19 或 >=22.12）
-#    先保证有个 agent 在跑（compose 的宿主 :8001，或裸跑的 uvicorn），然后：
-cd frontend
-npm ci                    # 首次
-npm run dev               # Vite 开发服务器 → http://localhost:5173；/qa /health /laws /documents /sessions 反代到 127.0.0.1:8001
-                          # 换目标：先 $env:VITE_API_TARGET="http://host:port" 再 npm run dev
-
-# C. 只看构建产物：npm run build（tsc --noEmit + vite build）→ frontend/dist；npm run preview → http://localhost:4173（反代同 B）
-```
-
-`deploy/build.sh` 建 web 镜像时会在 `frontend/src` 比 `dist` 新时自己先跑一遍 `npm ci && npm run build`，不用手动建 `dist`。
-
-### 测试
-
-```powershell
-python -m pytest                # 386 条离线用例，约 30 秒；不碰 Milvus、不调模型
-ruff check .
-```
-
-`pyproject.toml` 的 `addopts` 里已经有 `-q`，再加一个 `-q` 会变成 `-qq`，把最后的汇总行吞掉 —— 直接跑 `pytest` 就好。全部离线可跑，一条都不跳过；`integration` 这个 marker 留给「要 Milvus 或模型端点」的用例（`pytest -m integration` 才跑），目前还没有用例标它。
-
-命令与端点一览见下面两节。
 
 ## 入口
 
