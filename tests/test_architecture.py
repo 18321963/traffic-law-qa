@@ -628,3 +628,136 @@ def test_the_missing_pymilvus_error_names_the_milvus_extra() -> None:
         "pymilvus 的缺失提示没有指向 `.[milvus]` —— 新环境照着旧提示 `pip install -e .` 再装一遍，"
         "装完还是缺：milvus.py 的 ImportError 里要写明装法"
     )
+
+
+SERVICE_DOCKERFILES = ("rag_service/Dockerfile", "agent_service/Dockerfile")
+
+IMAGE_ENTRY_PACKAGES = {
+    "rag_service/Dockerfile": {"rag_service", "eval", "mcp_server"},
+    "agent_service/Dockerfile": {"agent_service"},
+}
+
+COPY_FACE_EXEMPT = {
+    ("rag_service/Dockerfile", "agent_service"): (
+        {"eval"},
+        "eval.multihop 要 rag 与 agent 两边，是开发侧工具，两镜像都不跑它；rag 镜像里的评测入口只有检索臂",
+    ),
+    ("agent_service/Dockerfile", "rag_service"): (
+        {"api_contracts"},
+        "api_contracts/regen.py 是生成面（从 rag_service 生成 openapi.json），运行期不 import",
+    ),
+}
+
+
+def _copy_top_levels(text: str) -> set[str]:
+    face: set[str] = set()
+    for raw in text.splitlines():
+        parts = raw.split()
+        if not parts or parts[0] != "COPY":
+            continue
+        for token in parts[1:-1]:
+            if token.startswith("--"):
+                continue
+            face.add(token.rstrip("/").split("/")[0])
+    return face
+
+
+def _imported_top_names(tree: ast.AST) -> set[str]:
+    tops: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            tops.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            tops.add(node.module.split(".")[0])
+    return tops
+
+
+def _missing_from_face(face: set[str], needed: set[str], names: set[str]) -> list[str]:
+    return sorted((needed & names) - face)
+
+
+def _exempt_gaps(
+    dockerfile: str,
+    missing: list[str],
+    entries: set[str],
+    importers: dict[str, set[str]],
+) -> tuple[list[str], set[tuple[str, str]]]:
+    gaps: list[str] = []
+    live: set[tuple[str, str]] = set()
+    for name in missing:
+        if name in entries:
+            gaps.append(f"{name}（镜像入口包）")
+            continue
+        allowed, _reason = COPY_FACE_EXEMPT.get((dockerfile, name), (set(), ""))
+        offenders = sorted(importers.get(name, set()) - allowed)
+        if offenders:
+            gaps.append(f"{name}（被这些包里 import：{offenders}）")
+        else:
+            live.add((dockerfile, name))
+    return gaps, live
+
+
+def _face_gaps(dockerfile: str) -> tuple[list[str], set[tuple[str, str]]]:
+    text = (ROOT / dockerfile).read_text(encoding="utf-8")
+    face = _copy_top_levels(text)
+    names = {path.name for path in TOP_PACKAGES}
+    entries = set(IMAGE_ENTRY_PACKAGES[dockerfile])
+    needed = set(entries)
+    importers: dict[str, set[str]] = {}
+    for name in sorted(face & names):
+        for path in (ROOT / name).rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            for top in _imported_top_names(ast.parse(path.read_text(encoding="utf-8"))) & names:
+                importers.setdefault(top, set()).add(name)
+    needed |= set(importers)
+    return _exempt_gaps(dockerfile, _missing_from_face(face, needed, names), entries, importers)
+
+
+def test_every_service_image_copies_the_packages_its_code_imports() -> None:
+    offenders: list[str] = []
+    live: set[tuple[str, str]] = set()
+    for dockerfile in SERVICE_DOCKERFILES:
+        gaps, seen = _face_gaps(dockerfile)
+        offenders += [f"{dockerfile} 的 COPY 面缺 {gap}" for gap in gaps]
+        live |= seen
+    offenders += [
+        f"豁免失效：{dockerfile} ← {package}（边已不存在，COPY_FACE_EXEMPT 要同步删）"
+        for dockerfile, package in sorted(COPY_FACE_EXEMPT)
+        if (dockerfile, package) not in live
+    ]
+    assert not offenders, (
+        "镜像 COPY 面没包住镜像内代码要 import 的包 —— 镜像照常构建、CI 全绿，容器起来才炸：\n  "
+        + "\n  ".join(offenders)
+        + "\n（口径：COPY 面内全部 .py 的顶层绝对 import（含 TYPE_CHECKING 与 try/except 软导入）"
+        "并入镜像入口包，都得在 COPY 面里；漏的补对应 Dockerfile 的 COPY 行；"
+        "确有意的开发侧边才进 COPY_FACE_EXEMPT，且豁免精确到「允许哪些包 import 它」）"
+    )
+
+
+def test_the_copy_face_scan_has_teeth() -> None:
+    face = _copy_top_levels(
+        "COPY pyproject.toml fake_alpha/ ./fake_alpha/\n"
+        "COPY --chown=app:app fake_beta/ ./fake_beta/\n"
+        "RUN echo COPY fake_gamma/\n"
+    )
+    assert face == {"pyproject.toml", "fake_alpha", "fake_beta"}, face
+    tree = ast.parse("import fake_alpha.sub\nfrom fake_beta import thing\nfrom . import sibling\nimport os\n")
+    assert _imported_top_names(tree) == {"fake_alpha", "fake_beta", "os"}
+    names = {"fake_alpha", "fake_beta", "fake_gamma"}
+    needed = {"fake_alpha", "fake_beta", "fake_gamma", "os"}
+    assert _missing_from_face(face, needed, names) == ["fake_gamma"]
+    dockerfile, package = sorted(COPY_FACE_EXEMPT)[0]
+    allowed, _reason = COPY_FACE_EXEMPT[(dockerfile, package)]
+    assert _exempt_gaps(dockerfile, [package], set(), {package: allowed}) == ([], {(dockerfile, package)})
+    assert _exempt_gaps(dockerfile, [package], set(), {package: allowed | {"fake_alpha"}})[0] == [
+        f"{package}（被这些包里 import：['fake_alpha']）"
+    ]
+    assert _exempt_gaps("fake/Dockerfile", ["fake_gamma"], set(), {"fake_gamma": {"fake_alpha"}}) == (
+        ["fake_gamma（被这些包里 import：['fake_alpha']）"],
+        set(),
+    )
+    assert _exempt_gaps("fake/Dockerfile", ["fake_gamma"], {"fake_gamma"}, {}) == (
+        ["fake_gamma（镜像入口包）"],
+        set(),
+    )
