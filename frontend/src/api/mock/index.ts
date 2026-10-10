@@ -29,7 +29,7 @@ import {
 } from "./corpus";
 
 export const USAGE =
-  "示例数据源：按《接口文档.md》手搓的 SSE 帧（step / delta / interrupt / done / error 全覆盖）与非 200 状态码，不连服务、不外呼。事件序照真实节点顺序：region → agent → tools → delta… → finalize → review → done。";
+  "示例数据源：按《接口文档》手搓的 SSE 帧（step / delta / interrupt / done / error 全覆盖）与非 200 状态码，不连服务、不外呼。事件序照真实节点顺序：region → agent → tools → delta… → finalize → review → done。";
 
 const DEGRADED_RESUME_DETAIL = "规划模型暂不可用，无法恢复被中断的会话；请直接重新提问。";
 

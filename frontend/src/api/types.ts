@@ -1,5 +1,5 @@
 export const USAGE =
-  "契约类型镜像：只按仓根《接口文档.md》§1.7 / §3.1 / §3.2 的形状声明，字段可缺省处一律 optional。";
+  "契约类型镜像：只按《接口文档》（docs/04_接口文档.md）§1.7 / §3.1 / §3.2 的形状声明，字段可缺省处一律 optional。";
 
 export type Usage = {
   prompt_tokens?: number;

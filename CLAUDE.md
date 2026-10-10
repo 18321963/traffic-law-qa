@@ -10,7 +10,7 @@
 ## 文档
 
 - README 是唯一对外文档：只放结果与口径须知；「入口」等小节名被 6 处自检文案按名引用，改其章节标题前先 `grep -rn "README「"`。
-- 对外文案不用「demo」一词，用「服务」「示例」。改接口必须同步根目录接口文档。
+- 对外文案不用「demo」一词，用「服务」「示例」。改接口必须同步 `docs/04_接口文档.md`。
 
 ## 本机操作
 
@@ -30,6 +30,6 @@
 - 提交形状：特性分支 → 中文提交信息（`-F` 落盘，不塞 argv）→ `merge: 合入 <分支>（中文摘要）` 进 main；推送等用户明说。
 
 ## 并行工作流
-- 单写者：`rag_contracts/config.py`、`.env.example` 只由 W0 改；`deploy/docker-compose*.yml` 只由 S4 改；`接口文档.md`、`README.md`、`deploy/运维手册.md` 只由集成流（W3）改；CLAUDE.md 与 docs 三件套谁都不改。
+- 单写者：`rag_contracts/config.py`、`.env.example` 只由 W0 改；`deploy/docker-compose*.yml` 只由 S4 改；`docs/04_接口文档.md`、`README.md`、`deploy/运维手册.md` 只由集成流（W3）改；CLAUDE.md 与 docs 三件套谁都不改。
 - worktree 里跑测试：`cd <worktree> && D:\projects\交通法规问答agent\.venv\Scripts\python.exe -m pytest`（`-m` 把 cwd 置顶，测的是 worktree 代码；直接调 `.venv` 里的 pytest 会把测试跑回主仓）。
 - 每流收工 = 全量 pytest 落盘（rc + 点阵）+ 改行为面配变异枪 + `git status` 面核对；合并统一由 W3 按序执行，推送等用户明说。
