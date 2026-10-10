@@ -286,7 +286,7 @@ class AgentConfig:
 
     session_db: str = str(DATA_DIR / "sessions.db")
     clarify: bool = False
-    history_turns: int = 5
+    history_turns: int = 3
     tool_timeout: float = 15.0
     api_keys: tuple[str, ...] = ()
     rate_limit_rpm: int = 30
@@ -305,7 +305,7 @@ def agent_config() -> AgentConfig:
         review_min_score=_env_float("AGENT_REVIEW_MIN_SCORE", 0.35),
         session_db=_env("AGENT_SESSION_DB", str(DATA_DIR / "sessions.db")),
         clarify=_env_bool("AGENT_CLARIFY", False),
-        history_turns=_env_int("AGENT_HISTORY_TURNS", 5),
+        history_turns=_env_int("AGENT_HISTORY_TURNS", 3),
         tool_timeout=_env_float("AGENT_TOOL_TIMEOUT", 15.0),
         api_keys=_env_list("AGENT_API_KEYS"),
         rate_limit_rpm=_env_int("AGENT_RATE_LIMIT_RPM", 30),

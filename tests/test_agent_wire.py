@@ -264,10 +264,10 @@ def test_the_fallback_asks_the_service_to_search_and_generate(agent_wire) -> Non
     assert answer.retrieval is not None and len(answer.retrieval.articles) == 2
 
 
-def test_a_place_question_pauses_the_wire_stream_with_an_interrupt(agent_wire) -> None:
+def test_an_unresolved_region_pauses_the_wire_stream_with_an_interrupt(agent_wire) -> None:
     remote, _rt, _rag_app = agent_wire
     http = _agent_http(
-        _runner(remote, region=("深圳", "深圳"), clarify=True, sessions=InMemorySaver())
+        _runner(remote, region=("?", "深圳"), clarify=True, sessions=InMemorySaver())
     )
 
     frames = _post_stream(http, "/qa/stream", {"question": QUESTION, "session_id": "s1"})
@@ -286,7 +286,7 @@ def test_a_place_question_pauses_the_wire_stream_with_an_interrupt(agent_wire) -
 def test_the_wire_resume_stream_closes_the_clarified_session(agent_wire) -> None:
     remote, _rt, _rag_app = agent_wire
     http = _agent_http(
-        _runner(remote, region=("深圳", "深圳"), clarify=True, sessions=InMemorySaver())
+        _runner(remote, region=("?", "深圳"), clarify=True, sessions=InMemorySaver())
     )
 
     primed = _post_stream(http, "/qa/stream", {"question": QUESTION, "session_id": "s1"})
@@ -308,7 +308,7 @@ def test_the_wire_resume_stream_closes_the_clarified_session(agent_wire) -> None
 def test_the_wire_resume_answers_once_and_then_conflicts(agent_wire) -> None:
     remote, _rt, _rag_app = agent_wire
     http = _agent_http(
-        _runner(remote, region=("深圳", "深圳"), clarify=True, sessions=InMemorySaver())
+        _runner(remote, region=("?", "深圳"), clarify=True, sessions=InMemorySaver())
     )
     _post_stream(http, "/qa/stream", {"question": QUESTION, "session_id": "s1"})
     body = {"session_id": "s1", "value": {"region": "national"}}
@@ -337,7 +337,7 @@ def test_the_wire_resume_refuses_when_the_planning_model_is_missing(agent_wire) 
     remote, _rt, _rag_app = agent_wire
     saver = InMemorySaver()
     http = _agent_http(
-        _runner(remote, region=("深圳", "深圳"), clarify=True, sessions=saver)
+        _runner(remote, region=("?", "深圳"), clarify=True, sessions=saver)
     )
     primed = _post_stream(http, "/qa/stream", {"question": QUESTION, "session_id": "s1"})
     assert primed[-1][0] == "interrupt"
@@ -346,7 +346,7 @@ def test_the_wire_resume_refuses_when_the_planning_model_is_missing(agent_wire) 
         _runner(
             remote,
             llm=AgentStubLLM(model="none", available=False),
-            region=("深圳", "深圳"),
+            region=("?", "深圳"),
             clarify=True,
             sessions=saver,
         )
@@ -390,7 +390,7 @@ def test_the_wire_remembers_the_first_round_under_one_session_id(agent_wire) -> 
     assert second.json()["session_id"] == "s1"
     prompt = runner.llm.prompts[2]
     assert {"role": "user", "content": QUESTION} in prompt
-    assert {"role": "assistant", "content": "答案正文[依据1]"} in prompt
+    assert {"role": "assistant", "content": "（本轮按「深圳」的规定作答）答案正文[依据1]"} in prompt
 
 
 def test_the_wire_stream_falls_back_to_the_service_without_an_llm(agent_wire) -> None:

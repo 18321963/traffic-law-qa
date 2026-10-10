@@ -75,6 +75,15 @@ def _pairs_to_entries(pairs: Iterable[Sequence[str]]) -> list[dict]:
     return entries
 
 
+def _region_tag(entry: dict) -> str:
+    region = str(entry.get("region") or "").strip()
+    if not region or region == REGION_UNKNOWN:
+        return ""
+    if region == "national":
+        return "（本轮按全国法作答）"
+    return f"（本轮按「{region}」的规定作答）"
+
+
 def _build_history(
     conversation: Iterable[dict],
     fallback: Iterable[Sequence[str]],
@@ -86,11 +95,13 @@ def _build_history(
     history: list[tuple[str, str]] = []
     for entry in entries[-turns:] if turns > 0 else []:
         history.append(("user", str(entry.get("question") or "")))
-        history.append(("assistant", _clip_answer(str(entry.get("answer") or ""))))
+        history.append(
+            ("assistant", _region_tag(entry) + _clip_answer(str(entry.get("answer") or "")))
+        )
     return history
 
 
-def make_region_node(llm: LLM, laws: Sequence[LawInfo], *, history_turns: int = 5):
+def make_region_node(llm: LLM, laws: Sequence[LawInfo], *, history_turns: int = 3):
     from langgraph.types import Overwrite
 
     prompt_head = REGION_SYSTEM_PROMPT % {
@@ -110,6 +121,7 @@ def make_region_node(llm: LLM, laws: Sequence[LawInfo], *, history_turns: int = 
             "truncated": Overwrite(0),
             "call_keys": Overwrite([]),
             "answer": None,
+            "region_note": "",
             "history": _build_history(
                 state.get("conversation") or (),
                 state.get("history") or (),

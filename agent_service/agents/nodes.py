@@ -272,6 +272,9 @@ def make_finalize_node(
         place = str(state.get("place") or "")
         if region == "national" and place:
             notes.append(f"这题涉及「{place}」：按全国法作答（未叠加地方性法规）")
+        region_note = str(state.get("region_note") or "")
+        if region_note:
+            notes.append(region_note)
 
         merged = merge_retrievals(
             logs,

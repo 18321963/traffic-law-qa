@@ -54,7 +54,7 @@ export const SCENARIOS: Scenario[] = [
   {
     id: "clarify",
     label: "地区澄清中断",
-    hint: "深圳电动自行车：interrupt 帧 → 地区选择 → 恢复流",
+    hint: "深圳产的电动自行车上牌：判不出地区 → interrupt 帧 → 地区选择 → 恢复流",
     caseId: "shenzhen",
     clarify: true,
   },
@@ -262,11 +262,11 @@ function askBeats(settings: Settings, question: string, sessionId: string): Beat
   const scenario = activeScenario(settings);
   const pace = pacing(scenario.pace ?? 1);
   const caseId = resolveCase(settings, question);
-  const local = caseId === "shenzhen";
+  const local = caseId === "shenzhen" && !scenario.clarify;
   const beats: Beat[] = [
     { delay: pace(340), event: { type: "step", data: stepRegion(local ? "深圳" : null, local ? LOCAL_LAWS.length : 0) } },
   ];
-  if (scenario.clarify || (scenario.caseId === "auto" && local)) {
+  if (scenario.clarify) {
     interrupted.set(sessionId, { caseId: "shenzhen", question, place: "深圳" });
     beats.push({
       delay: pace(680),
@@ -473,7 +473,7 @@ export function createMockTransport(getSettings: () => Settings): Transport {
       await sleep(900, signal);
       if (failure) throw failure;
       const sessionId = req.session_id || hex32();
-      if (scenario.clarify || (scenario.caseId === "auto" && resolveCase(settings, req.question) === "shenzhen")) {
+      if (scenario.clarify) {
         interrupted.set(sessionId, { caseId: "shenzhen", question: req.question, place: "深圳" });
         const response: AskResponse = {
           status: "interrupted",

@@ -239,7 +239,7 @@ def _clarify_runner(sessions) -> AgentRunner:
     return AgentRunner(
         AgentStubService(),
         llm=AgentStubLLM([dict(message) for message in PLAN], model="stub-agent"),
-        region_llm=AgentStubLLM(_region_line("national", place="深圳"), model="stub-region"),
+        region_llm=AgentStubLLM(_region_line("?", place="深圳"), model="stub-region"),
         review_llm=AgentStubLLM(_review_line(True) * 4, model="stub-review"),
         cfg=config.AgentConfig(max_steps=2, clarify=True),
         tracer=Tracer(),
