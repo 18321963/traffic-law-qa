@@ -15,6 +15,8 @@ from langgraph.checkpoint.base import (
 )
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from ..storage import open_sessions_db
+
 __all__ = ["open_sessions"]
 
 
@@ -106,7 +108,7 @@ class _LockedSaver(BaseCheckpointSaver):
 
 
 def open_sessions(path: str) -> _LockedSaver:
-    conn = sqlite3.connect(path, check_same_thread=False)
+    conn = open_sessions_db(path)
     saver = SqliteSaver(conn)
     saver.setup()
     return _LockedSaver(saver, conn)
