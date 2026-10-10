@@ -184,5 +184,22 @@ export function createLiveTransport(getSettings: () => Settings): Transport {
       }
       return readJson<unknown>(response);
     },
+    async deleteSession(sessionId: string, signal?: AbortSignal) {
+      const settings = getSettings();
+      let response: Response;
+      try {
+        response = await fetch(endpoint(settings.base, `/sessions/${encodeURIComponent(sessionId)}`), {
+          method: "DELETE",
+          headers: requestHeaders(settings, false),
+          signal,
+        });
+      } catch (exc) {
+        throw networkFailure(exc);
+      }
+      if (!response.ok) {
+        throw await readFailure(response);
+      }
+      return readJson<unknown>(response);
+    },
   };
 }

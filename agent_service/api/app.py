@@ -224,6 +224,14 @@ def delete_document(request: Request, doc_id: str) -> JSONResponse:
     return JSONResponse(status_code=status, content=payload)
 
 
+@app.delete("/sessions/{session_id}")
+def delete_session(request: Request, session_id: str) -> dict:
+    runner = runner_of(request)
+    if not runner.delete_session(session_id):
+        raise HTTPException(status_code=404, detail=f"没有这条会话：{session_id}")
+    return {"ok": True, "session_id": session_id}
+
+
 def _streaming(events) -> StreamingResponse:
     return StreamingResponse(
         events,

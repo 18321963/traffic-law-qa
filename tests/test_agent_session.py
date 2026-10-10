@@ -228,6 +228,8 @@ def test_a_sessionless_runner_rejects_a_session_id() -> None:
         runner.ask_payload(QUESTION, session_id="s1")
     with pytest.raises(SessionUnsupported):
         runner.resume("s1", {"region": "national"})
+    with pytest.raises(SessionUnsupported):
+        runner.delete_session("s1")
     assert runner.invoke(QUESTION)["answer"] is not None
 
 
@@ -591,3 +593,35 @@ def test_the_locked_saver_survives_interleaved_reads_and_writes(tmp_path) -> Non
         assert saver.get_tuple({"configurable": {"thread_id": "t1"}}) is not None
     finally:
         saver.close()
+
+
+def test_deleting_a_session_is_physical_and_vacuums(tmp_path, monkeypatch) -> None:
+    saver = open_sessions(str(tmp_path / "sessions.db"))
+    runner, _client = _runner(plan=_plan(2), sessions=saver)
+    runner.invoke(QUESTION, session_id="s1")
+    assert saver.get_tuple({"configurable": {"thread_id": "s1"}}) is not None
+
+    calls: list[str] = []
+    original = saver.vacuum
+    monkeypatch.setattr(saver, "vacuum", lambda: (calls.append("vacuum"), original())[1])
+
+    assert runner.delete_session("s1") is True
+    assert calls == ["vacuum"]
+    assert saver.get_tuple({"configurable": {"thread_id": "s1"}}) is None
+
+    assert runner.delete_session("s1") is False
+    assert calls == ["vacuum"]
+
+    fresh = runner.invoke(FOLLOW_UP, session_id="s1")
+    assert [entry["question"] for entry in fresh["conversation"]] == [FOLLOW_UP]
+    saver.close()
+
+
+def test_a_saver_without_vacuum_still_deletes() -> None:
+    saver = InMemorySaver()
+    runner, _client = _runner(plan=PLAN, sessions=saver)
+    runner.invoke(QUESTION, session_id="s1")
+
+    assert runner.delete_session("s1") is True
+    assert saver.get_tuple({"configurable": {"thread_id": "s1"}}) is None
+    assert runner.delete_session("s1") is False

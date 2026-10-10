@@ -570,5 +570,10 @@ export function createMockTransport(getSettings: () => Settings): Transport {
       documents.splice(index, 1);
       return { ok: true, doc_id: docId };
     },
+    async deleteSession(sessionId: string, signal?: AbortSignal) {
+      await sleep(240, signal);
+      interrupted.delete(sessionId);
+      return { ok: true, session_id: sessionId };
+    },
   };
 }

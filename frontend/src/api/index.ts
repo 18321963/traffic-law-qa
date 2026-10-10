@@ -19,6 +19,7 @@ export function createTransport(readSettings: () => Settings): Transport {
     listDocuments: (mode, signal) => pick().listDocuments(mode, signal),
     uploadDocument: (file, mode, signal) => pick().uploadDocument(file, mode, signal),
     deleteDocument: (docId, signal) => pick().deleteDocument(docId, signal),
+    deleteSession: (sessionId, signal) => pick().deleteSession(sessionId, signal),
   };
 }
 

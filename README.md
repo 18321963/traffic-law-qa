@@ -19,7 +19,7 @@
 | 交叉编码器重排 | ✅ | `bge-reranker-v2-m3`（sigmoid）；不可用或抛异常时按融合序返回并留一条 note |
 | 强制引用式生成 | ✅ | 每条结论挂 `[依据N]`；参考文献段由 `Answer.render()` 拼，编号与原文的对应不过模型的手 |
 | Agentic RAG | ✅ | LangGraph 单节点循环：模型自决查什么、查几轮；一轮没调工具就想收工会被代码闸拦下 |
-| 会话记忆（短期） | ✅ | 请求带 `session_id` = 同一张会话跨轮记得住（LangGraph checkpointer，SQLite 落 `data/sessions.db`）；提示词里带最近 N 轮（每轮已定地区随行标出），不带则每问独立 |
+| 会话记忆（短期） | ✅ | 请求带 `session_id` = 同一张会话跨轮记得住（LangGraph checkpointer，SQLite 落 `data/sessions.db`）；提示词里带最近 N 轮（每轮已定地区随行标出），不带则每问独立；整条可删（`DELETE /sessions/{session_id}`，thread 与挂起澄清一起物理清掉） |
 | 地区澄清（人在环） | ✅ | 判不出该按哪里的规定时（题面没点出地区、或点出的地名不是适用地，如产地题）先中断问一句「按该地法规还是只按全国法」再作答；判出地区直接答。回复经 resume 端点交回（服务里默认开，`AGENT_CLARIFY` 控制） |
 | 流式输出 | ✅ | rag `/qa/stream` 推检索结果与逐字 token；agent `/qa/stream` 推步骤流 + 逐字草稿；**草稿是草稿** —— `done` 才是复核之后的权威 |
 | 末端复核 | ✅ | 逐条判「被原文支撑？」→ 低分整篇降级（阈值 0.35；标定账见文末台账） |
@@ -91,7 +91,7 @@ flowchart LR
 
     LIN --> RAG
     CLI --> AGENT
-    WEB -->|"/qa /health /laws /documents"| AGENT
+    WEB -->|"/qa /health /laws /documents /sessions"| AGENT
     MCP -->|RagClient 走 HTTP| RAG
     AGENT -->|RagClient 走 HTTP| RAG
     RAG --> MV
@@ -171,7 +171,7 @@ rag_service/
 agent_service/
 ├── agents/        AgentRunner 与图：判地区 · 单节点循环 · 收尾 · 末端复核
 ├── tools/         工具面：schema · 参数规整 · 回执渲染 · 四个工具的实现
-├── api/           自己的 HTTP 面：/qa · /qa/stream · /qa/resume（含流式）· /documents 代理 · /health
+├── api/           自己的 HTTP 面：/qa · /qa/stream · /qa/resume（含流式）· /documents 代理 · /sessions 删会话 · /health
 ├── merge.py       多轮检索结果按 parent_id 合并去重
 ├── websearch.py   博查联网检索（已实现、当前未挂进工具面）
 ├── trace.py       终端决策链与分段耗时渲染（--trace / --timing）
@@ -287,7 +287,7 @@ curl.exe localhost:8001/health  # 必须带 .exe：PowerShell 的 curl 是 IWR �
 docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up -d
 ```
 
-镜像里三个服务都在 compose 里：`app`（rag 服务，生产面不占宿主端口、dev 覆盖暴露 :8000；挂 GPU、四个命名卷、模型只读挂载）、`agent`（agent 服务，宿主 :8001 → 容器内 :8000；不挂 GPU，挂一卷 `tlr_sessions` 存会话记忆、不载模型，rag 地址由 `RAG_BASE_URL=http://app:8000` 给，地区澄清默认开）与 `web`（界面，宿主 :3000 → 容器 :80；nginx:alpine，只放前端构建产物，把 `/health` `/qa` `/laws` `/documents` 同源反代到 agent，上传限 10MB）。agent 的 healthcheck 读的是 `/health` 的 body：自己 `status=ok` 且内嵌的 `rag.status=ok` 才算健康，所以 rag 断掉它就会变 unhealthy。
+镜像里三个服务都在 compose 里：`app`（rag 服务，生产面不占宿主端口、dev 覆盖暴露 :8000；挂 GPU、四个命名卷、模型只读挂载）、`agent`（agent 服务，宿主 :8001 → 容器内 :8000；不挂 GPU，挂一卷 `tlr_sessions` 存会话记忆、不载模型，rag 地址由 `RAG_BASE_URL=http://app:8000` 给，地区澄清默认开）与 `web`（界面，宿主 :3000 → 容器 :80；nginx:alpine，只放前端构建产物，把 `/health` `/qa` `/laws` `/documents` `/sessions` 同源反代到 agent，上传限 10MB）。agent 的 healthcheck 读的是 `/health` 的 body：自己 `status=ok` 且内嵌的 `rag.status=ok` 才算健康，所以 rag 断掉它就会变 unhealthy。
 
 改了代码要重建：跑 `deploy/build.sh`（等价直连 buildx 三条 + 把 app/agent/web 滚动上线）。镜像把源码烤进去了，不重建跑的还是上一版，且不报任何错；**也别用 `docker compose up --build`**（本机 compose v5.4.0 内嵌 bake 出错，报错表面像网络问题）或 `docker builder prune`。web 镜像 COPY 的是 `frontend/dist`，`build.sh` 会拿 `frontend/src`、`index.html`、`package*.json`、`tsconfig.json`、`vite.config.ts` 跟 `dist/index.html` 比 mtime：源码更新就先 `npm ci && npm run build` 再建镜像，dist 不比源码旧就跳过（要强制重建就先删 `frontend/dist`）。首次构建要下 CUDA 版 torch（约 2.8GB），之后有缓存就快。构建中途别 Ctrl-C：torch 下到一半断了不落缓存，下次还得重下。三个镜像构建完的体量：rag 6.03GB（大头就是 CUDA 版 torch），agent 266MB，web 63.2MB。
 
@@ -331,7 +331,7 @@ ruff check .
 | `python -m rag_service.cli.build <子命令>` | 建库：`build` / `status` / `layers` / `docx` / `parse` / `chunk` / `index` |
 | `python -m rag_service.cli.serve [--host H] [--port P]` | 起知识库服务 |
 | `python -m agent_service "问题" [--trace] [--timing] [--json]` | 提问：完整 Agent 循环（判地区 → 规划 → 工具调用 → 复核 → 生成），打的是 rag 服务的 HTTP 面 |
-| `python -m uvicorn agent_service.api.app:app --port 8001` | 把 agent 立成服务（`/qa` · `/qa/stream` · `/qa/resume` · `/qa/resume/stream` · `/documents` 材料台账 · `/health`）；compose 里已常驻一个（宿主 :8001），这条是裸跑用 |
+| `python -m uvicorn agent_service.api.app:app --port 8001` | 把 agent 立成服务（`/qa` · `/qa/stream` · `/qa/resume` · `/qa/resume/stream` · `/documents` 材料台账 · `/sessions/{id}` 删会话 · `/health`）；compose 里已常驻一个（宿主 :8001），这条是裸跑用 |
 | `python -m eval [--reference] [--pool N] [--http asgi\|URL]` | 评测：域内 池子召回 / hit@k / 单通道召回 ｜ 点名桶取条。`--http` 把同一套题发到服务端点（跨进程那条臂；不给默认走 asgi，等于在本进程里起一个真 app 过真 HTTP） |
 | `python -m eval.singlehop` | 单跳两臂对照 |
 | `python -m eval.multihop` | 跨法多跳 |
@@ -350,7 +350,7 @@ ruff check .
 
 **知识库服务（rag_service，:8000）**：`GET /health` · `POST /qa`（`mode=ask` 检索+生成｜`mode=search` 只检索不花钱；另有 `pool` / `debug` / `law_filter` 三个诊断参数）· `POST /qa/stream`（SSE）· `POST /answer` + `/answer/stream`（不检索只生成，`retrieval` 缺了 422）· `POST /documents` + `GET /documents` + `DELETE /documents/{id}`（`session` 答完即弃｜`permanent` 干跑校验后入知识库）· `POST /reindex`（重建并热替换）· `GET /laws`（`law_filter` 的 id 来源）· `POST /articles/lookup`（查不到不报错：200 + `found=false`）· `POST /materials/search`。机器可读版本是 `api_contracts/openapi.json`（`python -m api_contracts.regen` 重出，`tests/test_openapi_contract.py` 盯着逐字节一致）；薄客户端 `api_contracts/client.py` 进出一律 dict、4xx/5xx 抛 `QaError`（材料台账三个透传方法例外——状态码原样带回）。
 
-**agent 服务（宿主 :8001 → 容器 :8000）**：`GET /health` · `POST /qa` · `/qa/stream` · `POST /qa/resume` + `/qa/resume/stream`（交澄清回复；没有等待中的澄清普通面 409、流式收 `error` 帧）· `POST /documents` + `GET /documents` + `DELETE /documents/{id}`（材料台账代理面，400/404 原样透传；**生产面宿主只有这一条路能传材料**）。`/qa` 是**完整 Agent 循环、不是 rag 面的代理**：模型自己决定查几轮，末端复核引用、支撑不住整篇降级；判不出地区且开了澄清时 `status=interrupted`（拿 `session_id` 去 resume）。带 `session_id` 的请求共用一张会话（记忆落 SQLite `data/sessions.db`）；流式面 `delta` 是草稿、`done` 才是权威。这个面不出 openapi（本轮没有第二消费者），字段由 `tests/test_agent_wire.py` 过真 HTTP 盯着。
+**agent 服务（宿主 :8001 → 容器 :8000）**：`GET /health` · `POST /qa` · `/qa/stream` · `POST /qa/resume` + `/qa/resume/stream`（交澄清回复；没有等待中的澄清普通面 409、流式收 `error` 帧）· `POST /documents` + `GET /documents` + `DELETE /documents/{id}`（材料台账代理面，400/404 原样透传；**生产面宿主只有这一条路能传材料**）· `DELETE /sessions/{session_id}`（删会话：thread 与挂起澄清一起物理清掉，没有这条 404、删完再 resume 409；材料与用量账本不受影响）。`/qa` 是**完整 Agent 循环、不是 rag 面的代理**：模型自己决定查几轮，末端复核引用、支撑不住整篇降级；判不出地区且开了澄清时 `status=interrupted`（拿 `session_id` 去 resume）。带 `session_id` 的请求共用一张会话（记忆落 SQLite `data/sessions.db`）；流式面 `delta` 是草稿、`done` 才是权威。这个面不出 openapi（本轮没有第二消费者），字段由 `tests/test_agent_wire.py` 过真 HTTP 盯着。
 
 **观测（langfuse）**：全局开关，两个服务读同一份 `.env` 的 `LANGFUSE_*`——agent 侧配了就真上报（启动日志有 `[langfuse] 观测已开启`），rag 侧没有装配点、永远不上报。容器里没有 `--no-langfuse`（那是 CLI 参数），要单独关一个只能换那份服务的 env_file、要关就不给 keys。
 

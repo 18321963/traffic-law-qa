@@ -22,6 +22,7 @@ export type Transport = {
   listDocuments(mode?: string | null, signal?: AbortSignal): Promise<DocumentList>;
   uploadDocument(file: File, mode: string, signal?: AbortSignal): Promise<DocumentRecord>;
   deleteDocument(docId: string, signal?: AbortSignal): Promise<unknown>;
+  deleteSession(sessionId: string, signal?: AbortSignal): Promise<unknown>;
 };
 
 export type TransportFactory = (settings: Settings) => Transport;

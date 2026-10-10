@@ -17,6 +17,7 @@ pytest.importorskip("langgraph", reason='agent 循环要 pip install -e ".[agent
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 
 from agent_service.agents import graph as graph_mod  # noqa: E402
+from agent_service.agents.session import open_sessions  # noqa: E402
 from agent_service.prompts import RESUME_UNAVAILABLE_DETAIL  # noqa: E402
 
 QUESTION = "在深圳，醉酒驾驶机动车怎么处罚？"
@@ -220,14 +221,16 @@ def test_every_endpoint_hands_back_the_boot_error_while_the_agent_is_down() -> N
     boot_error = '未安装 langgraph：agent 这条路要 pip install -e ".[agent]"'
     http = _unbooted_http(boot_error)
 
-    for path in ("/health", "/qa", "/qa/stream", "/qa/resume", "/qa/resume/stream"):
-        if path == "/health":
-            payload = None
-        elif path.startswith("/qa/resume"):
-            payload = {"session_id": "s1", "value": {"region": "深圳"}}
-        else:
-            payload = {"question": QUESTION}
-        resp = http.request("GET" if payload is None else "POST", path, json=payload)
+    calls = [
+        ("GET", "/health", None),
+        ("POST", "/qa", {"question": QUESTION}),
+        ("POST", "/qa/stream", {"question": QUESTION}),
+        ("POST", "/qa/resume", {"session_id": "s1", "value": {"region": "深圳"}}),
+        ("POST", "/qa/resume/stream", {"session_id": "s1", "value": {"region": "深圳"}}),
+        ("DELETE", "/sessions/s1", None),
+    ]
+    for method, path, payload in calls:
+        resp = http.request(method, path, json=payload)
 
         assert resp.status_code == 503, path
         assert resp.json()["detail"] == boot_error, path
@@ -419,3 +422,50 @@ def test_a_runner_without_sessions_refuses_a_session_id_on_the_wire(agent_wire) 
 
     assert [event for event, _payload in frames] == ["error"]
     assert "没接会话存储" in frames[-1][1]["message"]
+
+    deleted = http.delete("/sessions/s1")
+
+    assert deleted.status_code == 400
+    assert "没接会话存储" in deleted.json()["detail"]
+
+
+def test_the_delete_face_wipes_a_pending_clarify_and_the_resume_then_conflicts(
+    agent_wire, tmp_path
+) -> None:
+    remote, _rt, _rag_app = agent_wire
+    saver = open_sessions(str(tmp_path / "sessions.db"))
+    http = _agent_http(_runner(remote, region=("?", "深圳"), clarify=True, sessions=saver))
+
+    primed = _post_stream(http, "/qa/stream", {"question": QUESTION, "session_id": "s1"})
+    assert primed[-1][0] == "interrupt"
+    assert saver.get_tuple({"configurable": {"thread_id": "s1"}}) is not None
+
+    deleted = http.delete("/sessions/s1")
+
+    assert deleted.status_code == 200
+    assert deleted.json() == {"ok": True, "session_id": "s1"}
+    assert saver.get_tuple({"configurable": {"thread_id": "s1"}}) is None
+
+    again = http.delete("/sessions/s1")
+
+    assert again.status_code == 404
+    assert "没有这条会话" in again.json()["detail"]
+
+    refused = http.post("/qa/resume", json={"session_id": "s1", "value": {"region": "national"}})
+
+    assert refused.status_code == 409
+    assert "没有等待澄清" in refused.json()["detail"]
+    saver.close()
+
+
+def test_the_delete_face_is_behind_the_same_key(agent_wire, monkeypatch) -> None:
+    remote, _rt, _rag_app = agent_wire
+    monkeypatch.setenv("AGENT_API_KEYS", "session-key")
+    http = _agent_http(_runner(remote, sessions=InMemorySaver()))
+
+    assert http.delete("/sessions/s1").status_code == 401
+
+    crossed = http.delete("/sessions/s1", headers={"X-API-Key": "session-key"})
+
+    assert crossed.status_code == 404
+    assert "没有这条会话" in crossed.json()["detail"]
