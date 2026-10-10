@@ -30,8 +30,6 @@
 - 提交形状：特性分支 → 中文提交信息（`-F` 落盘，不塞 argv）→ `merge: 合入 <分支>（中文摘要）` 进 main；推送等用户明说。
 
 ## 并行工作流
-
-- 分工唯一真源 = `docs/prompt_plan.md`（规格 `docs/spec.md`、验收 `docs/eval_plan.md`）；一条工作流 = 一分支 + 一个 agent，只改卡片 own 面的文件。
 - 单写者：`rag_contracts/config.py`、`.env.example` 只由 W0 改；`deploy/docker-compose*.yml` 只由 S4 改；`接口文档.md`、`README.md`、`deploy/运维手册.md` 只由集成流（W3）改；CLAUDE.md 与 docs 三件套谁都不改。
 - worktree 里跑测试：`cd <worktree> && D:\projects\交通法规问答agent\.venv\Scripts\python.exe -m pytest`（`-m` 把 cwd 置顶，测的是 worktree 代码；直接调 `.venv` 里的 pytest 会把测试跑回主仓）。
 - 每流收工 = 全量 pytest 落盘（rc + 点阵）+ 改行为面配变异枪 + `git status` 面核对；合并统一由 W3 按序执行，推送等用户明说。
