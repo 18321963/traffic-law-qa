@@ -1,5 +1,9 @@
 import { groupClass, paragraphsOf, segmentsOf, type ReviewState } from "../render";
 import type { DonePayload } from "../api/types";
+import styles from "./AnswerBlock.module.css";
+
+export const USAGE =
+  "答案正文：草稿态配灰底与光标，终稿配复核徽章与一行元信息；[依据N]/[时效N]/[材料N] 切成可点引用片。";
 
 export type DraftState = "streaming" | "error" | "cancelled" | "stopped";
 
@@ -18,6 +22,14 @@ const DRAFT_HEADLINE: Record<DraftState, string> = {
   stopped: "这一轮已停下，下面是已收到的文字",
 };
 
+const TIER_CLASS: Record<ReviewState["tier"], string> = {
+  passed: styles.tierPassed,
+  failed: styles.tierFailed,
+  unfinished: styles.tierMuted,
+  unscored: styles.tierMuted,
+  none: styles.tierMuted,
+};
+
 function Meta({ answer, review }: { answer: DonePayload; review: ReviewState }) {
   const rows: string[] = [];
   if (answer.model) rows.push(`模型 ${answer.model}`);
@@ -27,36 +39,28 @@ function Meta({ answer, review }: { answer: DonePayload; review: ReviewState }) 
   if (typeof usage === "number") rows.push(`${usage} tokens`);
   if ((answer.evidences?.length ?? 0) > 0) rows.push(`依据 ${answer.evidences?.length} 条`);
   if (review.detail) rows.push(review.detail);
-  return <p className="answer__meta">{rows.join(" · ")}</p>;
+  return <p className={styles.meta}>{rows.join(" · ")}</p>;
 }
 
 export function AnswerBlock({ text, answer, draftState, review, onCite }: Props) {
   const paragraphs = paragraphsOf(text);
   const body = paragraphs.length > 0 ? paragraphs : [text];
   const draft = draftState !== null;
+  const streaming = draftState === "streaming";
   return (
-    <section
-      className={
-        draft
-          ? `answer answer--draft${draftState === "streaming" ? "" : ` answer--draft-${draftState}`}`
-          : "answer answer--final"
-      }
-    >
-      <header className="answer__head">
-        {draft ? (
-          <>
-            <span className="tag tag--draft">草稿</span>
-            <span className="answer__headline">{DRAFT_HEADLINE[draftState]}</span>
-            {draftState === "streaming" ? <span className="caret" aria-hidden="true" /> : null}
-          </>
-        ) : (
-          <>
-            <span className={`tag tag--${review.tier}`}>{review.label}</span>
-            <span className="answer__headline">答复</span>
-          </>
-        )}
-      </header>
-      <div className="answer__body">
+    <section className={draft ? styles.draft : styles.final}>
+      {draft ? (
+        <div className={styles.headRow}>
+          <span className={styles.draftChip}>草稿</span>
+          <span className={styles.draftHeadline}>{DRAFT_HEADLINE[draftState]}</span>
+        </div>
+      ) : (
+        <div className={styles.headRow}>
+          <span className={`${styles.chip} ${TIER_CLASS[review.tier]}`}>{review.label}</span>
+          <span className={styles.finalHeadline}>答复</span>
+        </div>
+      )}
+      <div className={styles.body}>
         {body.map((paragraph, index) => (
           <p key={index}>
             {segmentsOf(paragraph).map((segment, offset) =>
@@ -66,7 +70,7 @@ export function AnswerBlock({ text, answer, draftState, review, onCite }: Props)
                 <button
                   key={offset}
                   type="button"
-                  className={`cite cite--${groupClass(segment.group)}`}
+                  className={`${styles.cite} ${styles[groupClass(segment.group)]}`}
                   onClick={() => onCite(segment.index)}
                   title={`跳到${segment.group}${segment.index}`}
                 >
@@ -74,6 +78,7 @@ export function AnswerBlock({ text, answer, draftState, review, onCite }: Props)
                 </button>
               ),
             )}
+            {streaming && index === body.length - 1 ? <span className={styles.caret} aria-hidden="true" /> : null}
           </p>
         ))}
       </div>

@@ -1,10 +1,24 @@
-import { useState } from "react";
+import { App as AntdApp, Avatar, Button, Tooltip } from "antd";
+import {
+  CopyOutlined,
+  ExclamationCircleFilled,
+  FileSearchOutlined,
+  InfoCircleOutlined,
+  ReloadOutlined,
+  RightOutlined,
+  SyncOutlined,
+} from "@ant-design/icons";
 import { reviewStateOf } from "../render";
 import type { Turn } from "../state/conversation";
 import { AnswerBlock, type DraftState } from "./AnswerBlock";
+import { BrandMark } from "./BrandMark";
 import { ErrorNotice } from "./ErrorNotice";
-import { EvidenceList } from "./EvidenceList";
 import { RegionClarify } from "./RegionClarify";
+import { StepTrace } from "./StepTrace";
+import styles from "./TurnView.module.css";
+
+export const USAGE =
+  "一轮问答：右侧用户气泡 + 助手消息（处理轨迹 → 草稿/终稿 → 澄清卡/出错面 → 操作行）；续答轮不重复用户气泡。";
 
 type Props = {
   turn: Turn;
@@ -12,32 +26,24 @@ type Props = {
   onResume: (region: string) => void;
   onRetry: () => void;
   onDismissInterrupt: () => void;
+  onFocusEvidence: (turnId: string, index: number | null) => void;
 };
 
-function StatusLine({ turn }: { turn: Turn }) {
-  if (turn.status === "cancelled") return <p className="turn__status">已取消：这一轮不再等待收尾帧。</p>;
-  if (turn.clarifyOutcome?.kind === "dismissed") {
-    return <p className="turn__status">已跳过澄清：这条会话的挂起中断就此作废，之后恢复会得到 409。</p>;
-  }
-  if (turn.clarifyOutcome?.kind === "resumed") {
-    return <p className="turn__status">已按「{turn.clarifyOutcome.region}」恢复，答复在下面。</p>;
-  }
-  return null;
+function timeOf(ms: number): string {
+  const date = new Date(ms);
+  const hour = `${date.getHours()}`.padStart(2, "0");
+  const minute = `${date.getMinutes()}`.padStart(2, "0");
+  return `${hour}:${minute}`;
 }
 
-export function TurnView({ turn, busy, onResume, onRetry, onDismissInterrupt }: Props) {
-  const [highlight, setHighlight] = useState<number | null>(null);
+function SystemLine({ children }: { children: React.ReactNode }) {
+  return <p className={styles.sysLine}>{children}</p>;
+}
+
+export function TurnView({ turn, busy, onResume, onRetry, onDismissInterrupt, onFocusEvidence }: Props) {
+  const { message } = AntdApp.useApp();
   const review = reviewStateOf(turn.answer);
   const streaming = turn.status === "streaming";
-  const anchor = `turn-${turn.id}`;
-
-  const cite = (index: number) => {
-    setHighlight(index);
-    const target = document.getElementById(`${anchor}-ev-${index}`);
-    target?.scrollIntoView({ behavior: "smooth", block: "center" });
-    window.setTimeout(() => setHighlight((current) => (current === index ? null : current)), 2400);
-  };
-
   const showDraft = turn.draft !== "" && turn.answer === null;
   const draftState: DraftState = streaming
     ? "streaming"
@@ -49,68 +55,137 @@ export function TurnView({ turn, busy, onResume, onRetry, onDismissInterrupt }: 
   const showFinal = turn.status === "done" && turn.answer !== null;
   const original = turn.answer?.review?.original_text;
   const originalText = original && original !== turn.answer?.answer ? original : null;
+  const evidenceCount = turn.answer?.evidences?.length ?? 0;
+  const hitCount = turn.answer?.retrieval?.articles?.length ?? 0;
+
+  const copy = () => {
+    const text = turn.answer?.answer ?? "";
+    void navigator.clipboard
+      .writeText(text)
+      .then(() => message.success("答案已复制"))
+      .catch(() => message.error("复制失败：浏览器拒绝了剪贴板访问"));
+  };
 
   return (
-    <article className={`turn turn--${turn.status}`}>
-      <header className="turn__head">
-        <span className="turn__mark">{turn.resumed ? "续" : "问"}</span>
-        <h2 className="turn__question">{turn.question}</h2>
-      </header>
-      <StatusLine turn={turn} />
-
-      {showDraft ? (
-        <AnswerBlock text={turn.draft} answer={null} draftState={draftState} review={review} onCite={cite} />
+    <article className={styles.turn}>
+      {turn.question !== "" && !turn.resumed ? (
+        <div className={styles.userRow}>
+          <div className={styles.userBubble}>{turn.question}</div>
+        </div>
       ) : null}
 
-      {showFinal ? (
-        <>
-          {turn.answer?.notes && turn.answer.notes.length > 0 ? (
-            <ul className="turn__notes">
-              {turn.answer.notes.map((note, index) => (
-                <li key={index}>{note}</li>
-              ))}
-            </ul>
-          ) : null}
-          <AnswerBlock
-            text={turn.answer?.answer ?? ""}
-            answer={turn.answer}
-            draftState={null}
-            review={review}
-            onCite={cite}
+      {turn.clarifyOutcome?.kind === "dismissed" ? (
+        <SystemLine>已跳过澄清：这条会话的挂起中断就此作废，之后恢复会得到 409。</SystemLine>
+      ) : null}
+      {turn.clarifyOutcome?.kind === "resumed" ? (
+        <SystemLine>已按「{turn.clarifyOutcome.region}」恢复，答复在下面一轮。</SystemLine>
+      ) : null}
+      {turn.status === "cancelled" ? <SystemLine>已取消：这一轮不再等待收尾帧。</SystemLine> : null}
+
+      <div className={styles.assistant}>
+        <div className={styles.sender}>
+          <Avatar size={30} className={styles.avatar} icon={<BrandMark size={30} />} />
+          <span className={styles.name}>法规助手</span>
+          {turn.resumed ? <span className={styles.resumeTag}>续答</span> : null}
+        </div>
+
+        <div className={styles.content}>
+          <StepTrace
+            steps={turn.steps}
+            streaming={streaming}
+            mode={turn.mode}
+            elapsedMs={turn.elapsedMs}
           />
-          {review.tier === "failed" ? (
-            <p className="turn__downgrade">
-              复核未过：服务没给结论，下面是降级答复与未经复核确认的候选法条，需人工复审。
-            </p>
-          ) : turn.replaced ? (
-            <p className="turn__swap">复核后的答案与草稿不一致，界面已整篇换成权威版本。</p>
+
+          {showDraft ? (
+            <AnswerBlock
+              text={turn.draft}
+              answer={null}
+              draftState={draftState}
+              review={review}
+              onCite={() => undefined}
+            />
           ) : null}
-          {originalText ? (
-            <details className="turn__original">
-              <summary>复核前的草稿（模型原稿）</summary>
-              <div className="turn__original-body">{originalText}</div>
-            </details>
+
+          {showFinal ? (
+            <>
+              {turn.answer?.notes && turn.answer.notes.length > 0 ? (
+                <ul className={styles.notes}>
+                  {turn.answer.notes.map((note, index) => (
+                    <li key={index}>
+                      <InfoCircleOutlined className={styles.noteIcon} />
+                      <span>{note}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              <AnswerBlock
+                text={turn.answer?.answer ?? ""}
+                answer={turn.answer}
+                draftState={null}
+                review={review}
+                onCite={(index) => onFocusEvidence(turn.id, index)}
+              />
+              {review.tier === "failed" ? (
+                <div className={styles.downgrade}>
+                  <ExclamationCircleFilled className={styles.downgradeIcon} />
+                  复核未过：服务没给结论，下面是降级答复与未经复核确认的候选法条，需人工复审。
+                </div>
+              ) : turn.replaced ? (
+                <p className={styles.swap}>
+                  <SyncOutlined className={styles.swapIcon} />
+                  复核后的答案与草稿不一致，界面已整篇换成权威版本。
+                </p>
+              ) : null}
+              {originalText ? (
+                <details className={styles.original}>
+                  <summary>复核前的草稿（模型原稿）</summary>
+                  <div className={styles.originalBody}>{originalText}</div>
+                </details>
+              ) : null}
+              <div className={styles.actions}>
+                <span className={styles.time}>{timeOf(turn.startedAt)}</span>
+                <Tooltip title="复制答案">
+                  <Button type="text" shape="circle" size="small" icon={<CopyOutlined />} onClick={copy} />
+                </Tooltip>
+                <Tooltip title="重新提问">
+                  <Button
+                    type="text"
+                    shape="circle"
+                    size="small"
+                    icon={<ReloadOutlined />}
+                    disabled={busy}
+                    onClick={onRetry}
+                  />
+                </Tooltip>
+                {evidenceCount > 0 || hitCount > 0 ? (
+                  <button type="button" className={styles.evidenceChip} onClick={() => onFocusEvidence(turn.id, null)}>
+                    <FileSearchOutlined className={styles.evidenceChipIcon} />
+                    <b>依据 {evidenceCount} 条</b>
+                    <span className={styles.evidenceChipMeta}>命中 {hitCount}</span>
+                    <RightOutlined className={styles.evidenceChipArrow} />
+                  </button>
+                ) : null}
+              </div>
+            </>
           ) : null}
-          <EvidenceList answer={turn.answer} anchorPrefix={anchor} highlight={highlight} />
-        </>
-      ) : null}
 
-      {turn.status === "interrupted" && turn.interrupt ? (
-        <RegionClarify
-          value={turn.interrupt.value}
-          busy={busy}
-          onResume={onResume}
-          onDismiss={onDismissInterrupt}
-        />
-      ) : null}
+          {turn.status === "interrupted" && turn.interrupt ? (
+            <RegionClarify value={turn.interrupt.value} busy={busy} onResume={onResume} onDismiss={onDismissInterrupt} />
+          ) : null}
 
-      {turn.error ? <ErrorNotice error={turn.error} retryLabel="再试一次" onRetry={onRetry} /> : null}
+          {turn.error ? <ErrorNotice error={turn.error} retryLabel="再试一次" onRetry={onRetry} /> : null}
 
-      {streaming && turn.draft === "" ? (
-        <p className="turn__status">
-          {turn.mode === "once" ? "一次性请求已发出，等结果返回…" : "等第一个字符…"}
-        </p>
-      ) : null}
+          {streaming && turn.draft === "" ? (
+            <div className={styles.searching}>
+              <span className={styles.searchingIcon} aria-hidden="true" />
+              <span className={styles.searchingText}>
+                {turn.mode === "once" ? "一次性请求已发出，等结果返回…" : "正在检索与规划…"}
+              </span>
+            </div>
+          ) : null}
+        </div>
+      </div>
     </article>
   );
 }

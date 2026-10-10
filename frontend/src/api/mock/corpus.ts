@@ -202,7 +202,7 @@ function reviewPassed(total: number, original: string): CaseContent["review"] {
   return {
     passed: true,
     score: 1,
-    threshold: 0.6,
+    threshold: 0.35,
     total,
     supported: total,
     unsupported: [],
@@ -298,7 +298,7 @@ export function contentOf(caseId: CaseId): CaseContent {
     const final = [
       "本次回答未通过依据复核，暂不给出结论 —— 现有依据不足以支撑它，需人工复审。",
       "",
-      "复核结果：支撑 1/3（阈值 0.6），需人工复审。",
+      "复核结果：支撑 1/3（阈值 0.35），需人工复审。",
       "",
       "候选法条（未经复核确认，仅供人工核对）：",
       "  【依据1】 《道路交通安全违法行为记分管理办法》(2021-12-27)第十条",
@@ -318,7 +318,7 @@ export function contentOf(caseId: CaseId): CaseContent {
       review: {
         passed: false,
         score: 0.333,
-        threshold: 0.6,
+        threshold: 0.35,
         total: 3,
         supported: 1,
         unsupported: ["依据2", "依据3"],
@@ -326,7 +326,7 @@ export function contentOf(caseId: CaseId): CaseContent {
         original_text: draft,
       },
       model: "qwen-flash",
-      notes: [NOTE_MOCK, "复核未通过：支撑 1/3 < 阈值 0.6 —— 已降级为「依据不足」，需人工复审"],
+      notes: [NOTE_MOCK, "复核未通过：支撑 1/3 < 阈值 0.35 —— 已降级为「依据不足」，需人工复审"],
       fallback: false,
     };
   }

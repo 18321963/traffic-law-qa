@@ -1,0 +1,44 @@
+.header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 40px 0;
+}
+
+.side {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 300px;
+}
+
+.sideRight {
+  justify-content: flex-end;
+}
+
+.title {
+  flex-grow: 1;
+  min-width: 0;
+  text-align: center;
+  font-size: 18px;
+  font-weight: bold;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sourceTag {
+  padding: 1px 10px;
+  border-radius: 100px;
+  background: rgba(229, 235, 245, 0.9);
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+@media (max-width: 1080px) {
+  .side {
+    width: auto;
+  }
+}

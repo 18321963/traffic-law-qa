@@ -1,0 +1,30 @@
+.drawer :global(.ant-drawer-body) {
+  padding-top: 8px;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sectionTitle {
+  font-size: 13px;
+  font-weight: bold;
+  color: var(--ink);
+}
+
+.gap {
+  margin-top: 6px;
+}
+
+.hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--ink-faint);
+}
+
+.divider {
+  margin: 14px 0;
+}

@@ -1,0 +1,177 @@
+.sidebar {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 100;
+  width: 206px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  backdrop-filter: blur(2px);
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 18px 14px;
+}
+
+.logoTitle {
+  font-size: 16px;
+  font-weight: bold;
+  color: var(--ink-strong);
+  white-space: nowrap;
+}
+
+.newChat {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 10px;
+  padding: 9px 18px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: bold;
+  color: var(--ink);
+  text-align: left;
+  transition: background-color 0.2s;
+}
+
+.newChat:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.newChatIcon {
+  font-size: 16px;
+  color: var(--brand);
+}
+
+.divider {
+  margin: 0 18px 8px;
+  height: 1px;
+  background: var(--line-warm);
+  transform: scaleY(0.5);
+}
+
+.sectionLabel {
+  padding: 0 18px 6px;
+  font-size: 10px;
+  color: var(--ink-faint);
+}
+
+.list {
+  flex-grow: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 12px;
+}
+
+.item {
+  position: relative;
+  padding: 0 6px 0 0;
+}
+
+.itemMain {
+  display: block;
+  width: 100%;
+  padding: 7px 18px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  border-radius: 0;
+  transition: background-color 0.2s;
+}
+
+.itemMain:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.itemActive .itemMain {
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: inset 2px 0 0 var(--brand);
+}
+
+.itemTime {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--ink-faint);
+}
+
+.itemMeta {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.itemTitle {
+  display: block;
+  margin-top: 1px;
+  font-size: 14px;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.itemRemove {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--ink-faint);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.item:hover .itemRemove {
+  display: inline-flex;
+}
+
+.itemRemove:hover {
+  color: var(--danger);
+}
+
+.foot {
+  flex-shrink: 0;
+  padding: 10px 12px 14px;
+}
+
+.footNote {
+  margin: 0 6px 8px;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--ink-faint);
+}
+
+.footRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.modeChip {
+  padding: 1px 10px;
+  border-radius: 100px;
+  background: rgba(229, 235, 245, 0.9);
+  color: var(--ink-soft);
+  font-size: 12px;
+}

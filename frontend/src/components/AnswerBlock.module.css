@@ -1,0 +1,112 @@
+.draft,
+.final {
+  animation: rise-in 0.3s ease;
+}
+
+.headRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.draftChip {
+  flex-shrink: 0;
+  padding: 0 8px;
+  border-radius: 100px;
+  background: rgba(229, 235, 245, 0.95);
+  color: var(--ink-faint);
+  font-size: 11px;
+}
+
+.draftHeadline {
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.chip {
+  flex-shrink: 0;
+  padding: 0 8px;
+  border-radius: 100px;
+  font-size: 11px;
+}
+
+.tierPassed {
+  background: rgba(34, 160, 107, 0.12);
+  color: var(--ok);
+}
+
+.tierFailed {
+  background: rgba(245, 34, 45, 0.1);
+  color: var(--danger);
+}
+
+.tierMuted {
+  background: rgba(229, 235, 245, 0.95);
+  color: var(--ink-faint);
+}
+
+.finalHeadline {
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.body {
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+.draft .body {
+  color: var(--ink-think);
+}
+
+.body p {
+  margin: 0 0 8px;
+}
+
+.body p:last-child {
+  margin-bottom: 0;
+}
+
+.cite {
+  display: inline;
+  padding: 0 2px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--brand);
+  font-weight: bold;
+  border-radius: 4px;
+  transition: background-color 0.15s;
+}
+
+.cite:hover {
+  background: var(--brand-wash);
+}
+
+.timeliness {
+  color: var(--warn);
+}
+
+.material {
+  color: #7c5cff;
+}
+
+.caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  background: var(--brand);
+  animation: caret-blink 1s steps(1) infinite;
+}
+
+.meta {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--ink-faint);
+  line-height: 1.8;
+}
