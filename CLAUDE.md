@@ -33,7 +33,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 文档
 
-- README 是唯一对外文档：只放结果与口径须知；文末「进阶」是用户自留台账，原样保留、别清理。
+- README 是唯一对外文档：只放结果与口径须知。
 - 多处自检文案按名引用 README 小节（`README「入口」`）：改 README 章节标题前先 `grep -rn "README「"`，门禁会翻红。
 - 改接口必须同步 `docs/04_接口文档.md`（签名级契约）；文档清单与口径在 `docs/README.md`。
 - 对外文案不用「demo」一词，用「服务」「示例」。
