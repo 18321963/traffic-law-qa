@@ -54,7 +54,7 @@ export const SCENARIOS: Scenario[] = [
   {
     id: "clarify",
     label: "地区澄清中断",
-    hint: "深圳产的电动自行车上牌：判不出地区 → interrupt 帧 → 地区选择 → 恢复流",
+    hint: "电动自行车载人怎么处理（没点地区）：判不出地区 → interrupt 帧 → 地区选择 → 恢复流",
     caseId: "shenzhen",
     clarify: true,
   },
@@ -267,7 +267,7 @@ function askBeats(settings: Settings, question: string, sessionId: string): Beat
     { delay: pace(340), event: { type: "step", data: stepRegion(local ? "深圳" : null, local ? LOCAL_LAWS.length : 0) } },
   ];
   if (scenario.clarify) {
-    interrupted.set(sessionId, { caseId: "shenzhen", question, place: "深圳" });
+    interrupted.set(sessionId, { caseId: "shenzhen", question, place: "" });
     beats.push({
       delay: pace(680),
       event: {
@@ -276,7 +276,7 @@ function askBeats(settings: Settings, question: string, sessionId: string): Beat
           session_id: sessionId,
           interrupt: {
             id: `interrupt-${sessionId.slice(0, 8)}`,
-            value: { type: "region_clarify", place: "深圳", message: CLARIFY_MESSAGE, laws: LOCAL_LAWS },
+            value: { type: "region_clarify", place: "", message: CLARIFY_MESSAGE, laws: LOCAL_LAWS },
           },
         },
       },
@@ -474,13 +474,13 @@ export function createMockTransport(getSettings: () => Settings): Transport {
       if (failure) throw failure;
       const sessionId = req.session_id || hex32();
       if (scenario.clarify) {
-        interrupted.set(sessionId, { caseId: "shenzhen", question: req.question, place: "深圳" });
+        interrupted.set(sessionId, { caseId: "shenzhen", question: req.question, place: "" });
         const response: AskResponse = {
           status: "interrupted",
           session_id: sessionId,
           interrupt: {
             id: `interrupt-${sessionId.slice(0, 8)}`,
-            value: { type: "region_clarify", place: "深圳", message: CLARIFY_MESSAGE, laws: LOCAL_LAWS },
+            value: { type: "region_clarify", place: "", message: CLARIFY_MESSAGE, laws: LOCAL_LAWS },
           },
           request_ms: 2140.6,
         };
