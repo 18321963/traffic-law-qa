@@ -481,7 +481,7 @@ ruff check .
 | `接口文档.md` | 签名级契约：CLI / HTTP / 配置 / 产物 / 不变式（README「入口」是清单，这一份是契约） |
 | `CLAUDE.md` | 仓内协作规则（面向 coding agent） |
 | `frontend/` | 浏览器界面：`src/`（React + Vite 源码）· `nginx.conf`（同源反代）· `Dockerfile`（nginx:alpine）· `dist/`（构建产物，不进版本库）；界面走 agent 的 HTTP 面，没有独立后端 |
-| `docs/` | 项目文档：01 需求 / 02 设计 / 03 功能 / 00 导读 / frontend_plan（索引见 docs/README.md） |
+| `docs/` | 项目文档：00 导读 / 01 需求 / 02 设计 / 03 功能（索引见 docs/README.md） |
 | `法规知识库/` | `docx/` 与 `pdf/` 是建库真源（公开法规原文）；`text/` `parsed/` `chunks/` `index/` 是管线产物；`models/` 本地权重（约 4.6GB） |
 | `data/` | 题集源语料 + 四份桶文件（`eval_*.json`）+ `documents.db` 上传台账 + `uploads/` + `traces/` 跑批轨迹 |
 | `volumes/` | compose 挂载的运行时数据（etcd / MinIO / Milvus），可重建 |
