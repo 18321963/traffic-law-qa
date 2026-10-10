@@ -1,21 +1,38 @@
 import { useEffect, useRef, useState } from "react";
+import { Button, Input, Tooltip } from "antd";
+import { CloseOutlined, FileTextOutlined, PaperClipOutlined, SendOutlined, StopOutlined } from "@ant-design/icons";
 import type { AnswerMode } from "../config";
+import styles from "./Composer.module.css";
+
+export const USAGE =
+  "输入区：来源药丸（本会话挂上的材料，可单个摘掉）+ 发送卡；附件按钮上传会话材料，回车发送、Shift+回车换行。";
+
+export type Material = { docId: string; name: string };
 
 type Props = {
   busy: boolean;
   answerMode: AnswerMode;
   sessionId: string | null;
-  docIds: string[];
+  materials: Material[];
+  onRemoveDoc: (docId: string) => void;
   onAsk: (question: string) => void;
   onCancel: () => void;
-  onAnswerMode: (mode: AnswerMode) => void;
+  onAttach: (file: File) => void;
 };
 
-const SAMPLES = ["机动车闯红灯一次记多少分？", "深圳的电动自行车载人怎么规定的？", "醉酒驾驶机动车怎么处罚？"];
-
-export function Composer({ busy, answerMode, sessionId, docIds, onAsk, onCancel, onAnswerMode }: Props) {
+export function Composer({
+  busy,
+  answerMode,
+  sessionId,
+  materials,
+  onRemoveDoc,
+  onAsk,
+  onCancel,
+  onAttach,
+}: Props) {
   const [text, setText] = useState("");
   const areaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!busy) areaRef.current?.focus();
@@ -29,13 +46,32 @@ export function Composer({ busy, answerMode, sessionId, docIds, onAsk, onCancel,
   };
 
   return (
-    <div className="composer">
-      <div className="composer__row">
-        <textarea
+    <div className={styles.wrap}>
+      {materials.length > 0 ? (
+        <div className={styles.source}>
+          <span className={styles.sourceTitle}>来源</span>
+          <div className={styles.sourceList}>
+            {materials.map((row) => (
+              <span key={row.docId} className={styles.sourceItem}>
+                <FileTextOutlined className={styles.sourceIcon} />
+                <span className={styles.sourceName} title={row.name}>
+                  {row.name}
+                </span>
+                <button type="button" className={styles.sourceClose} onClick={() => onRemoveDoc(row.docId)}>
+                  <CloseOutlined />
+                </button>
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      <div className={styles.sender}>
+        <Input.TextArea
           ref={areaRef}
-          className="composer__input"
+          className={styles.input}
           value={text}
-          rows={2}
+          autoSize={{ minRows: 2, maxRows: 6 }}
           placeholder="问一条交通法规问题。回车发送，Shift+回车换行。"
           onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => {
@@ -45,48 +81,50 @@ export function Composer({ busy, answerMode, sessionId, docIds, onAsk, onCancel,
             }
           }}
         />
-        <div className="composer__actions">
-          {busy ? (
-            <button type="button" className="btn btn--quiet" onClick={onCancel}>
-              停止
-            </button>
-          ) : null}
-          <button type="button" className="btn btn--primary" disabled={busy || text.trim() === ""} onClick={submit}>
-            {busy ? "提问中…" : "提问"}
-          </button>
+        <div className={styles.actions}>
+          <div className={styles.actionsLeft}>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".docx,.md,.txt,.pdf"
+              hidden
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) onAttach(file);
+                event.target.value = "";
+              }}
+            />
+            <Tooltip title="上传会话材料（也可以拖到右栏材料页签）">
+              <Button size="small" icon={<PaperClipOutlined />} disabled={busy} onClick={() => fileRef.current?.click()}>
+                附件
+              </Button>
+            </Tooltip>
+            {answerMode === "once" ? <span className={styles.onceTag}>一次性问答</span> : null}
+          </div>
+          <div className={styles.actionsRight}>
+            {busy ? (
+              <Button size="small" icon={<StopOutlined />} onClick={onCancel}>
+                停止
+              </Button>
+            ) : null}
+            <Button
+              type="primary"
+              className={styles.send}
+              icon={<SendOutlined />}
+              loading={busy}
+              disabled={busy || text.trim() === ""}
+              onClick={submit}
+            >
+              发送
+            </Button>
+          </div>
         </div>
       </div>
-      <div className="composer__meta">
-        <div className="segmented" role="group" aria-label="回答方式">
-          <button
-            type="button"
-            className={answerMode === "stream" ? "is-active" : ""}
-            onClick={() => onAnswerMode("stream")}
-          >
-            流式
-          </button>
-          <button
-            type="button"
-            className={answerMode === "once" ? "is-active" : ""}
-            onClick={() => onAnswerMode("once")}
-          >
-            一次性
-          </button>
-        </div>
-        <span className="composer__session">
-          {sessionId ? `会话 ${sessionId.slice(0, 10)}…（跨轮记忆已开）` : "这条会话还没有 session_id（首问后会有）"}
-        </span>
-        {docIds.length > 0 ? <span className="composer__materials">材料 {docIds.length} 份</span> : null}
+
+      <div className={styles.meta}>
+        {sessionId ? `会话 ${sessionId.slice(0, 10)}…（跨轮记忆已开）` : "这条会话还没有 session_id（首问后会有）"}
+        {materials.length > 0 ? ` · 材料 ${materials.length} 份` : ""}
       </div>
-      {text.trim() === "" && !busy ? (
-        <div className="composer__samples">
-          {SAMPLES.map((sample) => (
-            <button key={sample} type="button" className="chip" onClick={() => setText(sample)}>
-              {sample}
-            </button>
-          ))}
-        </div>
-      ) : null}
     </div>
   );
 }

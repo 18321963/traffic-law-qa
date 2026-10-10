@@ -1,0 +1,174 @@
+.inline {
+  border-left: 2px solid var(--line-soft);
+  padding-left: 10px;
+  margin-bottom: 10px;
+  animation: rise-in 0.3s ease;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--ink-think);
+  font-size: 12px;
+}
+
+.headTitle {
+  font-weight: bold;
+}
+
+.headMeta {
+  color: var(--ink-faint);
+}
+
+.headCaret {
+  font-size: 9px;
+  color: var(--ink-faint);
+}
+
+.liveDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--brand);
+  animation: soft-pulse 1.2s ease-in-out infinite;
+}
+
+.doneDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #c9d2d8;
+}
+
+.steps {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.stepIcon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 10px;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: var(--shadow-card);
+}
+
+.iconRegion {
+  color: #0ea5a5;
+}
+
+.iconClarify {
+  color: var(--warn);
+}
+
+.iconAgent {
+  color: var(--brand);
+}
+
+.iconTools {
+  color: #7c5cff;
+}
+
+.iconFinalize {
+  color: #0e9f6e;
+}
+
+.iconReview {
+  color: #e2574c;
+}
+
+.iconDefault {
+  color: var(--ink-faint);
+}
+
+.stepBody {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.stepNode {
+  font-size: 12px;
+  font-weight: bold;
+  color: var(--ink-soft);
+}
+
+.stepDetail {
+  font-size: 12px;
+  color: var(--ink-faint);
+  line-height: 1.5;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.panelQuestion {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.7);
+  box-shadow: var(--shadow-card);
+  font-size: 12px;
+  color: var(--ink-soft);
+  line-height: 1.6;
+}
+
+.panel .step {
+  align-items: center;
+}
+
+.panel .stepIcon {
+  width: 24px;
+  height: 24px;
+  font-size: 12px;
+}
+
+.panel .stepNode {
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.panel .stepDetail {
+  font-size: 12px;
+}
+
+.panel .steps {
+  gap: 10px;
+}
+
+.empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.panelFoot {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-faint);
+}

@@ -1,0 +1,249 @@
+.turn {
+  display: flex;
+  flex-direction: column;
+  padding: 12px 0;
+}
+
+.turn + .turn {
+  margin-top: 6px;
+}
+
+.userRow {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.userBubble {
+  max-width: 70%;
+  padding: 6px 14px;
+  border-radius: 15px 15px 0 15px;
+  background: var(--user-bubble);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1.6;
+  word-break: break-word;
+  animation: rise-in 0.25s ease;
+}
+
+.sysLine {
+  margin: 10px auto 0;
+  padding: 2px 12px;
+  border-radius: 100px;
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--ink-faint);
+  font-size: 12px;
+  text-align: center;
+}
+
+.assistant {
+  margin-top: 14px;
+}
+
+.sender {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.avatar {
+  flex-shrink: 0;
+  background: transparent !important;
+  line-height: 0;
+}
+
+.name {
+  font-size: 14px;
+  font-weight: bold;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resumeTag {
+  flex-shrink: 0;
+  padding: 0 8px;
+  border-radius: 100px;
+  background: var(--brand-wash);
+  color: var(--brand);
+  font-size: 11px;
+}
+
+.content {
+  padding-left: 40px;
+}
+
+.notes {
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.notes li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-faint);
+  line-height: 1.6;
+}
+
+.noteIcon {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--brand-soft);
+}
+
+.downgrade {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 560px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(250, 240, 223, 0.9);
+  color: #8f5608;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.downgradeIcon {
+  flex-shrink: 0;
+  color: var(--warn);
+}
+
+.swap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.swapIcon {
+  color: var(--ok);
+}
+
+.original {
+  margin-top: 10px;
+  max-width: 620px;
+}
+
+.original summary {
+  font-size: 12px;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+
+.original summary:hover {
+  color: var(--brand);
+}
+
+.originalBody {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.7);
+  box-shadow: var(--shadow-card);
+  font-size: 13px;
+  color: var(--ink-soft);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.time {
+  margin-right: 2px;
+  color: var(--brand);
+  font-size: 12px;
+}
+
+.evidenceChip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 320px;
+  margin-left: 6px;
+  padding: 3px 10px;
+  border: 1px solid transparent;
+  border-radius: 100px;
+  background: rgba(255, 255, 255, 0.7);
+  box-shadow: var(--shadow-card);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--ink);
+  transition: border-color 0.2s, background-color 0.2s;
+}
+
+.evidenceChip:hover {
+  border-color: var(--brand-soft);
+  background: rgba(255, 255, 255, 0.95);
+}
+
+.evidenceChipIcon {
+  flex-shrink: 0;
+  color: var(--brand);
+}
+
+.evidenceChip b {
+  flex-shrink: 0;
+  color: var(--ink);
+}
+
+.evidenceChipMeta {
+  flex-shrink: 0;
+  color: var(--ink-faint);
+}
+
+.evidenceChipArrow {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--ink-faint);
+}
+
+.searching {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 2px;
+}
+
+.searchingIcon {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--ink-faint);
+  border-radius: 50%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: soft-pulse 1.3s ease-in-out infinite;
+}
+
+.searchingIcon::after {
+  content: "";
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+}
+
+.searchingText {
+  font-size: 12px;
+  color: var(--ink-faint);
+}

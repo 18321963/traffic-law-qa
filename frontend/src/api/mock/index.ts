@@ -239,7 +239,7 @@ function donePayload(caseId: CaseId, question: string, sessionId: string): DoneP
         ? null
         : {
             score: content.review.score,
-            threshold: 0.6,
+            threshold: content.review.threshold,
             total: content.review.total,
             supported: content.review.supported,
             unsupported: content.review.unsupported,

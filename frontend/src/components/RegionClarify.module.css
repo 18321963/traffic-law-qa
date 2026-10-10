@@ -1,0 +1,84 @@
+.clarify {
+  max-width: 520px;
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-card);
+  animation: rise-in 0.3s ease;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: bold;
+  color: var(--brand);
+}
+
+.headIcon {
+  font-size: 14px;
+}
+
+.headTitle {
+  letter-spacing: 0.01em;
+}
+
+.message {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ink);
+}
+
+.laws {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--ink-faint);
+  line-height: 1.6;
+}
+
+.choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.primary {
+  background: var(--grad-btn) !important;
+  border-color: #c7dfff !important;
+  font-weight: bold;
+}
+
+.custom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.custom > :first-child {
+  flex-grow: 1;
+}
+
+.skip {
+  margin-top: 10px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.skip:hover {
+  color: var(--brand);
+}
+
+.note {
+  margin: 10px 0 0;
+  font-size: 11px;
+  color: var(--ink-faint);
+  line-height: 1.6;
+}

@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
+import { Button } from "antd";
+import { ReloadOutlined } from "@ant-design/icons";
 import type { TurnError } from "../state/conversation";
+import styles from "./ErrorNotice.module.css";
+
+export const USAGE =
+  "出错面：状态码/帧错分档给出中文解释与可操作建议；429 带倒计时，倒计时内重试按钮禁用。";
 
 type Props = {
   error: TurnError;
@@ -60,22 +66,22 @@ export function ErrorNotice({ error, retryLabel, onRetry }: Props) {
   const title = error.status ? `请求被拒（${error.status}）` : "这一轮没能完成";
   const hint = hintOf(error);
   return (
-    <section className="failure" role="alert">
-      <header className="failure__head">
-        <span className="tag tag--wrong">出错</span>
-        <span>{title}</span>
-      </header>
-      <p className="failure__message">{error.message}</p>
-      {hint ? <p className="failure__hint">{hint}</p> : null}
+    <section className={styles.failure} role="alert">
+      <div className={styles.head}>
+        <span className={styles.code}>{error.status ?? "出错"}</span>
+        <span className={styles.title}>{title}</span>
+      </div>
+      <p className={styles.message}>{error.message}</p>
+      {hint ? <p className={styles.hint}>{hint}</p> : null}
       {blocked ? (
-        <p className="failure__countdown">
+        <p className={styles.countdown}>
           {error.status === 429 && error.message.startsWith("日额度") ? "距额度重置" : "距可重试"} {waitLabel(left)}
         </p>
       ) : null}
-      <div className="failure__actions">
-        <button type="button" className="btn" disabled={blocked} onClick={onRetry}>
+      <div className={styles.actions}>
+        <Button size="small" type="primary" icon={<ReloadOutlined />} disabled={blocked} onClick={onRetry}>
           {blocked ? `${retryLabel}（${waitLabel(left)}后）` : retryLabel}
-        </button>
+        </Button>
       </div>
     </section>
   );

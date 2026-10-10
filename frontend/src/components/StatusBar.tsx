@@ -1,5 +1,11 @@
 import { useState } from "react";
+import { Button, Popover } from "antd";
+import { DownOutlined, ReloadOutlined, UpOutlined } from "@ant-design/icons";
 import type { HealthState } from "../state/health";
+import styles from "./StatusBar.module.css";
+
+export const USAGE =
+  "健康状态条：药丸按钮点开 Popover，先给一句人话结论，再列 /health 的原始口径；探活失败按连不上处理。";
 
 type Props = {
   health: HealthState;
@@ -40,28 +46,37 @@ export function StatusBar({ health, mode }: Props) {
     ["最近一次探活", health.checkedAt ? new Date(health.checkedAt).toLocaleTimeString("zh-CN") : "—"],
   ];
 
-  return (
-    <div className={`status status--${tone}`}>
-      <button type="button" className="status__pill" onClick={() => setOpen((value) => !value)} aria-expanded={open}>
-        <span className="status__dot" aria-hidden="true" />
-        <span className="status__text">{text}</span>
-        <span className="status__more">{open ? "收起" : "详情"}</span>
-      </button>
-      {open ? (
-        <div className="status__panel">
-          <dl className="status__rows">
-            {rows.map(([label, value]) => (
-              <div key={label} className="status__row">
-                <dt>{label}</dt>
-                <dd>{value}</dd>
-              </div>
-            ))}
-          </dl>
-          <button type="button" className="btn btn--quiet" onClick={health.refresh}>
-            立刻探活
-          </button>
-        </div>
-      ) : null}
+  const panel = (
+    <div className={styles.panel}>
+      <dl className={styles.rows}>
+        {rows.map(([label, value]) => (
+          <div key={label} className={styles.row}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <Button size="small" icon={<ReloadOutlined />} onClick={() => health.refresh()}>
+        立刻探活
+      </Button>
     </div>
+  );
+
+  return (
+    <Popover
+      content={panel}
+      trigger="click"
+      open={open}
+      onOpenChange={setOpen}
+      placement="bottomRight"
+      arrow={false}
+      styles={{ body: { padding: 12 } }}
+    >
+      <button type="button" className={`${styles.pill} ${styles[tone]}`} aria-expanded={open}>
+        <span className={styles.dot} aria-hidden="true" />
+        <span className={styles.text}>{text}</span>
+        {open ? <UpOutlined className={styles.caret} /> : <DownOutlined className={styles.caret} />}
+      </button>
+    </Popover>
   );
 }
