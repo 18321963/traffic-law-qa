@@ -426,6 +426,18 @@ class AgentRunner:
             command, kwargs, sid, request={"resume": value, "session_id": sid}
         )
 
+    def delete_session(self, session_id: str) -> bool:
+        if self.sessions is None:
+            raise SessionUnsupported("这个 runner 没接会话存储（sessions=None），不能删会话")
+        config = make_run_config(session_id, sessions=self.sessions)["config"]
+        if self.sessions.get_tuple(config) is None:
+            return False
+        self.sessions.delete_thread(session_id)
+        vacuum = getattr(self.sessions, "vacuum", None)
+        if callable(vacuum):
+            vacuum()
+        return True
+
     def describe(self) -> str:
         threshold = self.cfg.review_min_score
         review_state = (

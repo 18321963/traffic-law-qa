@@ -15,6 +15,7 @@ export default defineConfig(({ mode }) => {
         "/qa": proxy(),
         "/laws": proxy(),
         "/documents": proxy(),
+        "/sessions": proxy(),
       },
     },
     preview: { port: 4173 },

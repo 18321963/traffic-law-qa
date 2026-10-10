@@ -107,6 +107,7 @@ export type ConversationApi = {
   startConversation: () => void;
   selectConversation: (id: string) => void;
   removeConversation: (id: string) => void;
+  deleteConversation: (id: string) => Promise<void>;
   renameConversation: (id: string, title: string) => void;
   setDocIds: (ids: string[]) => void;
   appendDocuments: (ids: string[]) => void;
@@ -355,6 +356,25 @@ export function useConversations(transport: Transport, settings: Settings): Conv
     });
   }, []);
 
+  const deleteConversation = useCallback(
+    async (id: string) => {
+      const conv = conversations.find((row) => row.id === id);
+      if (!conv) return;
+      if (conv.turns.at(-1)?.status === "streaming") return;
+      if (conv.sessionId && conv.turns.length > 0) {
+        try {
+          await transport.deleteSession(conv.sessionId);
+        } catch (exc) {
+          if (!(exc instanceof ApiError && exc.kind === "http" && exc.status === 404)) {
+            throw exc;
+          }
+        }
+      }
+      removeConversation(id);
+    },
+    [conversations, removeConversation, transport],
+  );
+
   const renameConversation = useCallback(
     (id: string, title: string) => patchConversation(id, (conv) => ({ ...conv, title: title.trim() || conv.title })),
     [patchConversation],
@@ -382,6 +402,7 @@ export function useConversations(transport: Transport, settings: Settings): Conv
     startConversation,
     selectConversation,
     removeConversation,
+    deleteConversation,
     renameConversation,
     setDocIds,
     appendDocuments,

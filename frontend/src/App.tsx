@@ -9,7 +9,7 @@ import { Sidebar } from "./components/Sidebar";
 import { TurnView } from "./components/TurnView";
 import { Welcome } from "./components/Welcome";
 import { loadSettings, saveSettings, type Settings } from "./config";
-import { useConversations } from "./state/conversation";
+import { turnErrorOf, useConversations } from "./state/conversation";
 import { useDocuments } from "./state/documents";
 import { useHealth } from "./state/health";
 import styles from "./App.module.css";
@@ -80,6 +80,12 @@ export function App() {
     conversations.ask(question);
   };
 
+  const removeConversation = (id: string) => {
+    conversations.deleteConversation(id).catch((exc) => {
+      message.error(`没删成：${turnErrorOf(exc).message}`);
+    });
+  };
+
   const cite = (turnId: string, index: number | null) => {
     userTabRef.current = true;
     setRailTurnId(turnId);
@@ -131,7 +137,7 @@ export function App() {
         mode={settings.mode}
         onSelect={conversations.selectConversation}
         onCreate={conversations.startConversation}
-        onRemove={conversations.removeConversation}
+        onRemove={removeConversation}
         onOpenSettings={() => setShowSettings(true)}
       />
 

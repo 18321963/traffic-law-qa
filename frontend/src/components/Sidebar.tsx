@@ -1,4 +1,4 @@
-import { Button } from "antd";
+import { Button, Popconfirm } from "antd";
 import { CloseOutlined, PlusOutlined, SettingOutlined } from "@ant-design/icons";
 import type { ApiMode } from "../config";
 import type { Conversation } from "../state/conversation";
@@ -6,7 +6,7 @@ import { BrandMark } from "./BrandMark";
 import styles from "./Sidebar.module.css";
 
 export const USAGE =
-  "左栏：品牌区、新会话、本机会话历史（时间 + 标题，悬停可清掉）；底部是数据来源与设置入口。";
+  "左栏：品牌区、新会话、本机会话历史（时间 + 标题，悬停可删除 —— 本机记录与服务端会话记忆一起清）；底部是数据来源与设置入口。";
 
 type Props = {
   conversations: Conversation[];
@@ -46,6 +46,7 @@ export function Sidebar({ conversations, activeId, mode, onSelect, onCreate, onR
       <div className={`${styles.list} scrollbar`}>
         {conversations.map((conv) => {
           const active = conv.id === activeId;
+          const streaming = conv.turns.at(-1)?.status === "streaming";
           return (
             <div key={conv.id} className={`${styles.item} ${active ? styles.itemActive : ""}`}>
               <button type="button" className={styles.itemMain} onClick={() => onSelect(conv.id)}>
@@ -58,14 +59,24 @@ export function Sidebar({ conversations, activeId, mode, onSelect, onCreate, onR
                 <span className={styles.itemTitle}>{conv.title}</span>
               </button>
               {conversations.length > 1 ? (
-                <button
-                  type="button"
-                  className={styles.itemRemove}
-                  title="清掉这条会话的本地记录"
-                  onClick={() => onRemove(conv.id)}
+                <Popconfirm
+                  title="删除这条会话？"
+                  description="本机记录与服务端的会话记忆会一起删掉，删了恢复不了；已挂的材料不受影响。"
+                  okText="删除"
+                  cancelText="再想想"
+                  okButtonProps={{ danger: true }}
+                  disabled={streaming}
+                  onConfirm={() => onRemove(conv.id)}
                 >
-                  <CloseOutlined />
-                </button>
+                  <button
+                    type="button"
+                    className={styles.itemRemove}
+                    title={streaming ? "这条会话正在作答，等它结束再删" : "删除这条会话（本机记录与服务端记忆一起删）"}
+                    disabled={streaming}
+                  >
+                    <CloseOutlined />
+                  </button>
+                </Popconfirm>
               ) : null}
             </div>
           );
@@ -73,7 +84,7 @@ export function Sidebar({ conversations, activeId, mode, onSelect, onCreate, onR
       </div>
 
       <div className={styles.foot}>
-        <p className={styles.footNote}>会话只是本机的记录，不会同步到服务；带 session_id 的那条才有跨轮记忆。</p>
+        <p className={styles.footNote}>会话 = 本机记录 + 服务端记忆（问过才有）；删会话两边一起清，材料不受影响。</p>
         <div className={styles.footRow}>
           <span className={styles.modeChip}>{mode === "live" ? "直连服务" : "示例数据"}</span>
           <Button type="text" size="small" icon={<SettingOutlined />} onClick={onOpenSettings}>
