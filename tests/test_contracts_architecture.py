@@ -22,6 +22,8 @@ CONSUMERS = ("rag_service", "agent_service", "eval", "mcp_server", "api_contract
 
 HEAVY = ("pymilvus", "torch", "transformers", "fastapi", "langgraph", "langfuse")
 
+FROZEN_PACKAGES = ("agent_service", "api_contracts", "eval", "mcp_server", "rag_contracts", "rag_service")
+
 BLOCKER = """import sys
 
 class Blocked(BaseException):
@@ -65,6 +67,20 @@ def _absolute_imports(tree: ast.AST) -> list[tuple[int, str]]:
     return out
 
 
+def _top_level_packages() -> list[str]:
+    return sorted(path.name for path in ROOT.iterdir() if path.is_dir() and (path / "__init__.py").exists())
+
+
+def test_the_six_top_level_packages_stay_exactly_six() -> None:
+    found = _top_level_packages()
+    assert found == list(FROZEN_PACKAGES), (
+        "六包拓扑是冻结约定（CLAUDE.md 架构节与 README 目录都按它写）：多出来的顶层包、"
+        "或被并进别处的包，都要显式改这里，并同步 CLAUDE.md、README 目录、"
+        "pyproject 的 packages.find.include 与两个镜像的 COPY 面：\n"
+        f"  现在：{found}\n  冻结：{list(FROZEN_PACKAGES)}"
+    )
+
+
 def test_the_contracts_package_never_imports_a_consumer() -> None:
     offenders = [
         f"{path.relative_to(ROOT)}:{line} import 了 {name}"
@@ -95,9 +111,7 @@ def test_importing_the_contracts_package_pulls_in_no_heavy_dependency() -> None:
 def test_every_top_level_package_is_declared_for_packaging() -> None:
     data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     patterns = data["tool"]["setuptools"]["packages"]["find"]["include"]
-    dirs = sorted(
-        path.name for path in ROOT.iterdir() if path.is_dir() and (path / "__init__.py").exists()
-    )
+    dirs = _top_level_packages()
 
     uncovered = [name for name in dirs if not any(fnmatchcase(name, p) for p in patterns)]
     assert not uncovered, (

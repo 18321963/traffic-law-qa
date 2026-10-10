@@ -39,8 +39,13 @@ volumes/
 # 模型权重（约 4.6GB）：容器靠 compose 在运行时 bind mount 挂进去，
 # 进构建上下文只会让每次 build 都往 daemon 塞几 GB。
 法规知识库/models/
-# 评测轨迹：本地跑出来的，服务层用不到（Dockerfile 的 COPY data/ 本来会带上它，所以在这里挡掉）。
+# 本机运行期状态：台账 / 会话 / 上传材料 / 评测轨迹 —— 镜像层会被 push 与 `docker history` 看到，
+# 台账里记着「谁在什么时候传了什么」，不该跟着镜像走（Dockerfile 的 COPY data/ 本来会把它们带上）。
+data/*.db
+data/uploads/
 data/traces/
+# 备份压缩包（每套四件、共约 190M）：任何 COPY 都不用它，留在上下文里只是每次 build 都往 daemon 塞。
+deploy/backup/
 
 # --- 前端：node_modules 绝不进上下文；dist 要留给 web 镜像 COPY ---
 frontend/node_modules/
