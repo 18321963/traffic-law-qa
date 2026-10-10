@@ -98,7 +98,11 @@ def make_review_node(llm: LLM, cfg: config.AgentConfig):
     from langgraph.types import Overwrite
 
     def _remember(state: AgentState, answer: Answer, text: str) -> dict:
-        entry = {"question": answer.question, "answer": text}
+        entry = {
+            "question": answer.question,
+            "answer": text,
+            "region": str(state.get("region") or ""),
+        }
         entries = list(state.get("conversation") or ()) + [entry]
         keep = max(cfg.history_turns, 0)
         if len(entries) > 2 * keep:

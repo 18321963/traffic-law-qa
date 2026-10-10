@@ -31,6 +31,7 @@ class AgentState(TypedDict, total=False):
     region: str
     region_scope: tuple[str, ...]
     place: str
+    region_note: str
 
     conversation: Annotated[list[dict], operator.add]
     answer: Answer | None

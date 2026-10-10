@@ -18,7 +18,7 @@ export function RegionClarify({ value, busy, onResume, onDismiss }: Props) {
   const [custom, setCustom] = useState("");
   const place = value?.place?.trim() || "";
   const laws = value?.laws ?? [];
-  const message = value?.message?.trim() || "这个问题涉及具体地区，先确认按哪里的规定回答。";
+  const message = value?.message?.trim() || "先确认按哪里的规定回答。";
   const submitCustom = () => {
     const region = custom.trim();
     if (region === "" || busy) return;

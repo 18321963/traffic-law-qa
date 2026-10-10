@@ -19,8 +19,8 @@
 | 交叉编码器重排 | ✅ | `bge-reranker-v2-m3`（sigmoid）；不可用或抛异常时按融合序返回并留一条 note |
 | 强制引用式生成 | ✅ | 每条结论挂 `[依据N]`；参考文献段由 `Answer.render()` 拼，编号与原文的对应不过模型的手 |
 | Agentic RAG | ✅ | LangGraph 单节点循环：模型自决查什么、查几轮；一轮没调工具就想收工会被代码闸拦下 |
-| 会话记忆（短期） | ✅ | 请求带 `session_id` = 同一张会话跨轮记得住（LangGraph checkpointer，SQLite 落 `data/sessions.db`）；提示词里带最近 N 轮，不带则每问独立 |
-| 地区澄清（人在环） | ✅ | 问题沾到具体地区时先中断问一句「按该地法规还是只按全国法」再作答，回复经 resume 端点交回（服务里默认开，`AGENT_CLARIFY` 控制） |
+| 会话记忆（短期） | ✅ | 请求带 `session_id` = 同一张会话跨轮记得住（LangGraph checkpointer，SQLite 落 `data/sessions.db`）；提示词里带最近 N 轮（每轮已定地区随行标出），不带则每问独立 |
+| 地区澄清（人在环） | ✅ | 判不出该按哪里的规定时（题面没点出地区、或点出的地名不是适用地，如产地题）先中断问一句「按该地法规还是只按全国法」再作答；判出地区直接答。回复经 resume 端点交回（服务里默认开，`AGENT_CLARIFY` 控制） |
 | 流式输出 | ✅ | rag `/qa/stream` 推检索结果与逐字 token；agent `/qa/stream` 推步骤流 + 逐字草稿；**草稿是草稿** —— `done` 才是复核之后的权威 |
 | 末端复核 | ✅ | 逐条判「被原文支撑？」→ 低分整篇降级（阈值 0.35；标定账见文末台账） |
 | 就绪门 | ✅ | 启动时比对 docx／本地产物／集合三者，不一致自动重建；也能 `--rebuild` 或 `POST /reindex` 手动触发 |
@@ -83,7 +83,7 @@ flowchart LR
     CLI["python -m agent_service<br/>命令行"]
     WEB["web :3000（nginx）<br/>静态界面 + 同源反代"]
     MCP["mcp_server<br/>MCP 客户端走 stdio"]
-    AGENT["agent_service（:8001）<br/>LangGraph：判地区 → 工具循环 → 收尾 → 复核"]
+    AGENT["agent_service（:8001）<br/>LangGraph：判地区 → 澄清（判不出地区时）→ 工具循环 → 收尾 → 复核"]
     RAG["rag_service（:8000）<br/>检索 · 生成 · 建库"]
     MV[(Milvus traffic_law<br/>稠密 + BM25 + RRF 融合)]
     MODELS["本地权重（进程内）<br/>bge-m3 + bge-reranker-v2-m3"]
@@ -215,7 +215,7 @@ agent_service/
 ```
 问题（POST http://127.0.0.1:8001/qa，可带 session_id 记上下文）
   → agents/region          判地区（本地 / 深圳 / 全国）→ 定法名范围
-  → agents/clarify         沾到具体地区先问一句再答（开了 AGENT_CLARIFY 时）
+  → agents/clarify         判不出地区才回问一句再答（开了 AGENT_CLARIFY 时）
   → 单节点循环             模型自己决定调哪个工具、调几轮
       ├─ search_law            混合检索（可多轮，结果按 parent_id 合并去重）
       ├─ get_article           已知条号直取原文
@@ -227,7 +227,7 @@ agent_service/
   → trace.py               决策链渲染（--trace / --timing / Langfuse）
 ```
 
-上面每一步要的检索、取条、材料，都经 `RagClient` 打到 rag 服务的 HTTP 面（`/qa?mode=search` · `/articles/lookup` · `/materials/search` · `/laws` · `/answer` · `/answer/stream`）—— 进程里没有第二个 `LegalRAG`，也没有 `rag_service` 的任何 import。检索调用带超时预算（`AGENT_TOOL_TIMEOUT`，默认 15 秒）：超时回执单列「检索超时」（与一般失败分开），交模型换招、不自动重试。请求带 `session_id` 时同一会话跨轮记忆（LangGraph checkpointer，落 `data/sessions.db`）；开了 `AGENT_CLARIFY` 时，沾到地方的问题先中断问一句、由 resume 端点收尾（见「端点」）。
+上面每一步要的检索、取条、材料，都经 `RagClient` 打到 rag 服务的 HTTP 面（`/qa?mode=search` · `/articles/lookup` · `/materials/search` · `/laws` · `/answer` · `/answer/stream`）—— 进程里没有第二个 `LegalRAG`，也没有 `rag_service` 的任何 import。检索调用带超时预算（`AGENT_TOOL_TIMEOUT`，默认 15 秒）：超时回执单列「检索超时」（与一般失败分开），交模型换招、不自动重试。请求带 `session_id` 时同一会话跨轮记忆（LangGraph checkpointer，落 `data/sessions.db`）；开了 `AGENT_CLARIFY` 时，判不出地区的问题先中断问一句、由 resume 端点收尾（见「端点」）。
 
 三道关卡都在代码里，不靠提示词自觉：**就绪门**（rag 服务启动/请求前保证索引可用）、**零证据闸**（`agents/nodes.py::_unearned_stop`）、**末端复核**（逐条判支撑，支撑不住的整篇降级）。
 
@@ -315,7 +315,7 @@ print(qa("深圳 行人在机动车道 罚款多少", mode="search").render())  
 ### 测试
 
 ```powershell
-python -m pytest                # 376 条离线用例，约 26 秒；不碰 Milvus、不调模型
+python -m pytest                # 382 条离线用例，约 30 秒；不碰 Milvus、不调模型
 ruff check .
 ```
 
@@ -350,7 +350,7 @@ ruff check .
 
 **知识库服务（rag_service，:8000）**：`GET /health` · `POST /qa`（`mode=ask` 检索+生成｜`mode=search` 只检索不花钱；另有 `pool` / `debug` / `law_filter` 三个诊断参数）· `POST /qa/stream`（SSE）· `POST /answer` + `/answer/stream`（不检索只生成，`retrieval` 缺了 422）· `POST /documents` + `GET /documents` + `DELETE /documents/{id}`（`session` 答完即弃｜`permanent` 干跑校验后入知识库）· `POST /reindex`（重建并热替换）· `GET /laws`（`law_filter` 的 id 来源）· `POST /articles/lookup`（查不到不报错：200 + `found=false`）· `POST /materials/search`。机器可读版本是 `api_contracts/openapi.json`（`python -m api_contracts.regen` 重出，`tests/test_openapi_contract.py` 盯着逐字节一致）；薄客户端 `api_contracts/client.py` 进出一律 dict、4xx/5xx 抛 `QaError`（材料台账三个透传方法例外——状态码原样带回）。
 
-**agent 服务（宿主 :8001 → 容器 :8000）**：`GET /health` · `POST /qa` · `/qa/stream` · `POST /qa/resume` + `/qa/resume/stream`（交澄清回复；没有等待中的澄清普通面 409、流式收 `error` 帧）· `POST /documents` + `GET /documents` + `DELETE /documents/{id}`（材料台账代理面，400/404 原样透传；**生产面宿主只有这一条路能传材料**）。`/qa` 是**完整 Agent 循环、不是 rag 面的代理**：模型自己决定查几轮，末端复核引用、支撑不住整篇降级；沾到地方且开了澄清时 `status=interrupted`（拿 `session_id` 去 resume）。带 `session_id` 的请求共用一张会话（记忆落 SQLite `data/sessions.db`）；流式面 `delta` 是草稿、`done` 才是权威。这个面不出 openapi（本轮没有第二消费者），字段由 `tests/test_agent_wire.py` 过真 HTTP 盯着。
+**agent 服务（宿主 :8001 → 容器 :8000）**：`GET /health` · `POST /qa` · `/qa/stream` · `POST /qa/resume` + `/qa/resume/stream`（交澄清回复；没有等待中的澄清普通面 409、流式收 `error` 帧）· `POST /documents` + `GET /documents` + `DELETE /documents/{id}`（材料台账代理面，400/404 原样透传；**生产面宿主只有这一条路能传材料**）。`/qa` 是**完整 Agent 循环、不是 rag 面的代理**：模型自己决定查几轮，末端复核引用、支撑不住整篇降级；判不出地区且开了澄清时 `status=interrupted`（拿 `session_id` 去 resume）。带 `session_id` 的请求共用一张会话（记忆落 SQLite `data/sessions.db`）；流式面 `delta` 是草稿、`done` 才是权威。这个面不出 openapi（本轮没有第二消费者），字段由 `tests/test_agent_wire.py` 过真 HTTP 盯着。
 
 **观测（langfuse）**：全局开关，两个服务读同一份 `.env` 的 `LANGFUSE_*`——agent 侧配了就真上报（启动日志有 `[langfuse] 观测已开启`），rag 侧没有装配点、永远不上报。容器里没有 `--no-langfuse`（那是 CLI 参数），要单独关一个只能换那份服务的 env_file、要关就不给 keys。
 

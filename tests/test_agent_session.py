@@ -83,7 +83,7 @@ def _runner(
     laws=_MISSING,
     cfg=None,
     clarify=False,
-    history_turns=5,
+    history_turns=3,
 ):
     client = client if client is not None else AgentStubService()
     if sessions is _MISSING:
@@ -148,14 +148,15 @@ def test_the_second_turn_prompts_carry_the_first_qa() -> None:
     runner.invoke(QUESTION, session_id="s1")
     runner.invoke(FOLLOW_UP, session_id="s1")
 
+    tagged = "（本轮按「深圳」的规定作答）答案正文[依据1]"
     turn2_region = runner.region_llm.prompts[1]
     assert {"role": "user", "content": QUESTION} in turn2_region
-    assert {"role": "assistant", "content": "答案正文[依据1]"} in turn2_region
+    assert {"role": "assistant", "content": tagged} in turn2_region
     assert turn2_region[-1] == {"role": "user", "content": FOLLOW_UP}
 
     turn2_agent = runner.llm.prompts[2]
     assert {"role": "user", "content": QUESTION} in turn2_agent
-    assert {"role": "assistant", "content": "答案正文[依据1]"} in turn2_agent
+    assert {"role": "assistant", "content": tagged} in turn2_agent
 
 
 def test_a_first_turn_prompt_is_still_system_plus_question() -> None:
@@ -187,10 +188,12 @@ def test_the_history_snippet_clips_long_answers() -> None:
     runner.invoke(QUESTION, session_id="s1")
     runner.invoke(FOLLOW_UP, session_id="s1")
 
+    tag = "（本轮按「深圳」的规定作答）"
     assistant = [m["content"] for m in runner.region_llm.prompts[1] if m["role"] == "assistant"]
     assert len(assistant) == 1
+    assert assistant[0].startswith(tag)
     assert assistant[0].endswith("…")
-    assert len(assistant[0]) == HISTORY_ANSWER_CHARS + 1
+    assert len(assistant[0]) == len(tag) + HISTORY_ANSWER_CHARS + 1
 
 
 def test_two_sessions_do_not_bleed() -> None:
@@ -248,7 +251,9 @@ def test_memory_survives_a_disabled_review() -> None:
     state = runner.invoke(QUESTION, session_id="s1")
 
     assert state["answer"].review is None
-    assert state["conversation"] == [{"question": QUESTION, "answer": "答案正文[依据1]"}]
+    assert state["conversation"] == [
+        {"question": QUESTION, "answer": "答案正文[依据1]", "region": "深圳"}
+    ]
 
 
 def test_the_runner_fallback_never_touches_the_session() -> None:
@@ -264,8 +269,8 @@ def test_the_runner_fallback_never_touches_the_session() -> None:
     assert saver.get_tuple({"configurable": {"thread_id": "s1"}}) is None
 
 
-def test_a_place_question_pauses_for_clarification_then_resumes_national() -> None:
-    runner, _client = _runner(plan=PLAN, clarify=True, region=("深圳", "深圳"))
+def test_an_unresolved_region_pauses_for_clarification_then_resumes_national() -> None:
+    runner, _client = _runner(plan=PLAN, clarify=True, region=("?", "深圳"))
 
     events = list(runner.stream(QUESTION, session_id="s1"))
 
@@ -292,8 +297,38 @@ def test_a_place_question_pauses_for_clarification_then_resumes_national() -> No
     assert set(values["region_scope"]) == {ROAD_ID}
 
 
+def test_a_resolved_region_answers_without_clarifying() -> None:
+    runner, _client = _runner(plan=PLAN, clarify=True, region=("深圳", "深圳"))
+
+    events = list(runner.stream(QUESTION, session_id="s1"))
+
+    kinds = [kind for kind, _payload in events]
+    assert "interrupt" not in kinds
+    nodes = [payload["node"] for kind, payload in events if kind == "step"]
+    assert nodes[0] == "region"
+    assert events[-1][0] == "answer"
+    assert events[-1][1]["answer"] == "答案正文[依据1]"
+    values = _values(runner, "s1")
+    assert values["region"] == "深圳"
+    assert set(values["region_scope"]) == {ROAD_ID, PENALTY_ID}
+
+
+def test_a_no_place_question_still_clarifies() -> None:
+    runner, _client = _runner(plan=PLAN, clarify=True, region=("?", ""))
+
+    events = list(runner.stream(QUESTION, session_id="s1"))
+
+    kinds = [kind for kind, _payload in events]
+    assert kinds == ["step", "interrupt"]
+    payload = events[1][1]
+    assert payload["interrupt"]["value"]["place"] == ""
+    message = payload["interrupt"]["value"]["message"]
+    assert "按哪里的规定回答" in message
+    assert "涉及具体的地区" not in message
+
+
 def test_resuming_with_a_region_keeps_national_plus_that_local_law() -> None:
-    runner, _client = _runner(plan=_plan(2), clarify=True, region=("深圳", "深圳"))
+    runner, _client = _runner(plan=_plan(2), clarify=True, region=("?", "深圳"))
 
     list(runner.stream(QUESTION, session_id="s1"))
     list(runner.resume_stream("s1", {"region": "深圳经济特区"}))
@@ -301,10 +336,53 @@ def test_resuming_with_a_region_keeps_national_plus_that_local_law() -> None:
     values = _values(runner, "s1")
     assert values["region"] == "深圳经济特区"
     assert set(values["region_scope"]) == {ROAD_ID, PENALTY_ID}
+    assert values["conversation"][-1]["region"] == "深圳经济特区"
+
+
+def test_the_resolved_region_rides_the_history_into_the_next_region_prompt() -> None:
+    runner, _client = _runner(plan=_plan(2), clarify=True, region=("?", "深圳"))
+
+    list(runner.stream(QUESTION, session_id="s1"))
+    list(runner.resume_stream("s1", {"region": "深圳经济特区"}))
+    list(runner.stream(FOLLOW_UP, session_id="s1"))
+
+    prompts = runner.region_llm.prompts
+    assert len(prompts) >= 2
+    first, second = prompts[0], prompts[-1]
+    assert second[-1] == {"role": "user", "content": FOLLOW_UP}
+    assert any(
+        "（本轮按「深圳经济特区」的规定作答）" in message["content"] for message in second
+    )
+    assert "已定地区" in second[0]["content"]
+    assert all("（本轮按" not in message["content"] for message in first)
+
+
+def test_a_resume_reply_off_the_library_lands_a_note() -> None:
+    runner, _client = _runner(plan=_plan(2), clarify=True, region=("?", "深圳"))
+
+    list(runner.stream(QUESTION, session_id="s1"))
+    resumed = list(runner.resume_stream("s1", {"region": "广州"}))
+
+    assert resumed[-1][0] == "answer"
+    notes = resumed[-1][1]["notes"]
+    assert "回复的「广州」未匹配到库内地区，本次按全国法作答" in notes
+
+
+def test_the_off_library_note_does_not_stick_to_the_next_turn() -> None:
+    runner, _client = _runner(plan=_plan(4), clarify=True, region=("?", "深圳"))
+
+    list(runner.stream(QUESTION, session_id="s1"))
+    list(runner.resume_stream("s1", {"region": "广州"}))
+    runner.region_llm._replies.append(_region("深圳", "深圳")[0])
+    state = runner.invoke(FOLLOW_UP, session_id="s1")
+
+    assert state["region"] == "深圳"
+    assert not any("未匹配到库内地区" in note for note in state["answer"].notes)
+    assert state["conversation"][-1]["region"] == "深圳"
 
 
 def test_an_unknown_region_resume_falls_back_to_national() -> None:
-    runner, _client = _runner(plan=_plan(2), clarify=True, region=("深圳", "深圳"))
+    runner, _client = _runner(plan=_plan(2), clarify=True, region=("?", "深圳"))
 
     list(runner.stream(QUESTION, session_id="s1"))
     list(runner.resume_stream("s1", {"region": "火星"}))
@@ -315,7 +393,7 @@ def test_an_unknown_region_resume_falls_back_to_national() -> None:
 
 
 def test_a_non_streaming_resume_returns_the_payload_and_keeps_flags_off() -> None:
-    runner, client = _runner(plan=PLAN, clarify=True, region=("深圳", "深圳"))
+    runner, client = _runner(plan=PLAN, clarify=True, region=("?", "深圳"))
 
     list(runner.stream(QUESTION, session_id="s1"))
     status, payload = runner.resume("s1", {"region": "national"})
@@ -381,7 +459,7 @@ def test_ask_payload_returns_an_answer_under_a_generated_thread() -> None:
 
 
 def test_ask_payload_reports_an_interrupt_instead_of_an_answer() -> None:
-    runner, _client = _runner(plan=PLAN, clarify=True, region=("深圳", "深圳"))
+    runner, _client = _runner(plan=PLAN, clarify=True, region=("?", "深圳"))
 
     status, payload = runner.ask_payload(QUESTION, session_id="s1")
 
@@ -389,6 +467,30 @@ def test_ask_payload_reports_an_interrupt_instead_of_an_answer() -> None:
     assert payload["session_id"] == "s1"
     assert payload["interrupt"]["value"]["type"] == "region_clarify"
     assert "answer" not in payload
+
+
+def test_build_history_annotates_resolved_regions_only() -> None:
+    history = region_mod._build_history(
+        [
+            {"question": "q1", "answer": "a1", "region": "深圳"},
+            {"question": "q2", "answer": "a2", "region": "national"},
+            {"question": "q3", "answer": "a3", "region": "?"},
+            {"question": "q4", "answer": "a4"},
+        ],
+        (),
+        4,
+    )
+
+    assert history == [
+        ("user", "q1"),
+        ("assistant", "（本轮按「深圳」的规定作答）a1"),
+        ("user", "q2"),
+        ("assistant", "（本轮按全国法作答）a2"),
+        ("user", "q3"),
+        ("assistant", "a3"),
+        ("user", "q4"),
+        ("assistant", "a4"),
+    ]
 
 
 def test_parse_region_reads_both_fields_and_survives_garbage() -> None:
@@ -419,7 +521,7 @@ def test_only_the_review_node_writes_the_conversation_channel() -> None:
 
     assert writers == {"review"}
 
-    paused, _client = _runner(plan=PLAN, clarify=True, region=("深圳", "深圳"))
+    paused, _client = _runner(plan=PLAN, clarify=True, region=("?", "深圳"))
     kwargs, _sid = paused._config_kwargs("paused")
     initial = paused._initial(Question(text=QUESTION), ())
 

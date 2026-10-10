@@ -587,7 +587,7 @@ def test_stream_without_a_key_falls_back_to_the_linear_path() -> None:
 
 def test_a_degraded_resume_refuses_with_a_clear_message() -> None:
     runner, _client = _runner(
-        clarify=True, region="深圳", place="深圳", sessions=InMemorySaver()
+        clarify=True, region="?", place="深圳", sessions=InMemorySaver()
     )
     status, _payload = runner.ask_payload(QUESTION, session_id="s1")
 
@@ -601,7 +601,7 @@ def test_a_degraded_resume_refuses_with_a_clear_message() -> None:
 
 def test_a_degraded_resume_stream_refuses_with_the_same_message() -> None:
     runner, _client = _runner(
-        clarify=True, region="深圳", place="深圳", sessions=InMemorySaver()
+        clarify=True, region="?", place="深圳", sessions=InMemorySaver()
     )
     status, _payload = runner.ask_payload(QUESTION, session_id="s1")
 
@@ -803,7 +803,7 @@ def test_a_stream_that_ends_before_the_final_frame_raises() -> None:
 
 def test_a_national_resume_notes_the_place_it_skipped() -> None:
     runner, _client = _runner(
-        plan=PLAN_THEN_ANSWER, region="深圳", place="深圳", clarify=True, sessions=InMemorySaver()
+        plan=PLAN_THEN_ANSWER, region="?", place="深圳", clarify=True, sessions=InMemorySaver()
     )
 
     first = list(runner.stream(QUESTION, session_id="s1"))
@@ -826,7 +826,7 @@ def test_a_national_verdict_without_a_place_gets_no_note() -> None:
 
 def test_the_national_note_also_lands_on_the_non_streaming_resume() -> None:
     runner, _client = _runner(
-        plan=PLAN_THEN_ANSWER, region="深圳", place="深圳", clarify=True, sessions=InMemorySaver()
+        plan=PLAN_THEN_ANSWER, region="?", place="深圳", clarify=True, sessions=InMemorySaver()
     )
 
     list(runner.stream(QUESTION, session_id="s1"))

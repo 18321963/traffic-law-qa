@@ -6,7 +6,7 @@ export const USAGE =
 export const NOTE_MOCK = "示例数据：本回答由界面内置夹具生成，不是服务检索的结果";
 
 export const CLARIFY_MESSAGE =
-  "这个问题涉及具体的地区，先确认按哪里的规定回答：回复一个地区名（如「深圳」）就按该地区法规加上全国法作答；回复 national 则只按全国法作答。";
+  "这个问题还没拿准按哪里的规定回答，先确认一下：回复一个地区名（如「深圳」）就按该地区法规加上全国法作答；回复 national 则只按全国法作答。";
 
 export const UNAVAILABLE_ANSWER = "（未配置大模型，下面只给出召回的法条）";
 

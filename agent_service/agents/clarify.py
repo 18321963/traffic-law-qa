@@ -10,7 +10,7 @@ from .state import AgentState
 __all__ = ["CLARIFY_MESSAGE", "make_clarify_node"]
 
 CLARIFY_MESSAGE = (
-    "这个问题涉及具体的地区，先确认按哪里的规定回答："
+    "这个问题还没拿准按哪里的规定回答，先确认一下："
     "回复一个地区名（如「深圳」）就按该地区法规加上全国法作答；"
     "回复 national 则只按全国法作答。"
 )
@@ -36,9 +36,16 @@ def make_clarify_node(laws: Sequence[LawInfo]):
         )
         region = _resume_region(value)
         scope = national_law_ids(laws) if region == "national" else law_scope(region, laws)
+        note = ""
         if not scope:
+            note = f"回复的「{region}」未匹配到库内地区，本次按全国法作答"
             region = "national"
             scope = national_law_ids(laws)
-        return {"region": region, "region_scope": scope, "usage_extra": Overwrite([])}
+        return {
+            "region": region,
+            "region_scope": scope,
+            "region_note": note,
+            "usage_extra": Overwrite([]),
+        }
 
     return clarify_node

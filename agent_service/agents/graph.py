@@ -126,7 +126,9 @@ def build_graph(
     graph.add_edge(START, "region")
     graph.add_conditional_edges(
         "region",
-        lambda state: "clarify" if cfg.clarify and state.get("place") else "agent",
+        lambda state: (
+            "clarify" if cfg.clarify and state.get("region") == REGION_UNKNOWN else "agent"
+        ),
         {"clarify": "clarify", "agent": "agent"},
     )
     graph.add_edge("clarify", "agent")
@@ -436,10 +438,10 @@ class AgentRunner:
         )
         return (
             f"Agent：最多 {self.cfg.max_steps} 轮 | "
-            f"入口判地区（1 次 {self.region_llm.model_name} 调用，判不出则不限地区） | "
+            f"入口判地区（1 次 {self.region_llm.model_name} 调用，判不出则回问或不限地区） | "
             f"{review_state} | "
             f"工具 {len(TOOLS)} 个（{'、'.join(tool['function']['name'] for tool in TOOLS)}） | "
             f"会话记忆：{'开（thread_id=session_id）' if self.sessions else '关'} | "
-            f"地区澄清：{'开（问题沾到地方先回问一次）' if self.cfg.clarify else '关'} | "
+            f"地区澄清：{'开（判不出地区时先回问一次）' if self.cfg.clarify else '关'} | "
             f"LLM {self.llm.model_name}"
         )
