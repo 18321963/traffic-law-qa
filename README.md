@@ -22,7 +22,7 @@
 | 会话记忆（短期） | ✅ | 请求带 `session_id` = 同一张会话跨轮记得住（LangGraph checkpointer，SQLite 落 `data/sessions.db`）；提示词里带最近 N 轮（每轮已定地区随行标出），不带则每问独立；整条可删（`DELETE /sessions/{session_id}`，thread 与挂起澄清一起物理清掉） |
 | 地区澄清（人在环） | ✅ | 判不出该按哪里的规定时（题面没点出地区、或点出的地名不是适用地，如产地题）先中断问一句「按该地法规还是只按全国法」再作答；判出地区直接答。回复经 resume 端点交回（服务里默认开，`AGENT_CLARIFY` 控制） |
 | 流式输出 | ✅ | rag `/qa/stream` 推检索结果与逐字 token；agent `/qa/stream` 推步骤流 + 逐字草稿；**草稿是草稿** —— `done` 才是复核之后的权威 |
-| 浏览器界面 | ✅ | web 镜像（nginx 静态托管，宿主 :3000）：问答流 · 依据/轨迹/材料三栏 · 材料上传 · 删会话 · 澄清回复；同源反代到 agent（源码 `frontend/`，React + Vite） |
+| 浏览器界面 | ✅ | web 镜像（nginx 静态托管，宿主 :3000）：问答流 · 依据/轨迹/材料三栏 · 材料上传 · 删会话 · 澄清回复 · 仅 RAG 通道（设置里切换）；同源反代到 agent（源码 `frontend/`，React + Vite） |
 | 末端复核 | ✅ | 逐条判「被原文支撑？」→ 低分整篇降级（阈值 0.35；标定账见[运维手册](deploy/运维手册.md) §9） |
 | 就绪门 | ✅ | 启动时比对 docx／本地产物／集合三者，不一致自动重建；也能 `--rebuild` 或 `POST /reindex` 手动触发 |
 | 权重门禁 | ✅ | 索引快照里记着嵌入权重的指纹（文件名 + 大小 + mtime）：换了权重就拒绝服务并说明差在哪，`POST /reindex` / `RAG_ALLOW_REBUILD=1` 显式放行；老快照没指纹不拦，只标 `degraded`。启发式，防误换不防篡改 |
@@ -147,7 +147,7 @@ curl localhost:8001/health  # PowerShell 里要写 curl.exe：curl 是 IWR 别�
 docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up -d
 ```
 
-镜像里三个服务都在 compose 里：`app`（rag 服务，生产面不占宿主端口、dev 覆盖暴露 :8000；挂 GPU、四个命名卷、模型只读挂载）、`agent`（agent 服务，宿主 :8001 → 容器内 :8000；不挂 GPU，挂一卷 `tlr_sessions` 存会话记忆、不载模型，rag 地址由 `RAG_BASE_URL=http://app:8000` 给，地区澄清默认开）与 `web`（界面，宿主 :3000 → 容器 :80；nginx:alpine，只放前端构建产物，把 `/health` `/qa` `/laws` `/documents` `/sessions` 同源反代到 agent，上传限 10MB）。agent 的 healthcheck 读的是 `/health` 的 body：自己 `status=ok` 且内嵌的 `rag.status=ok` 才算健康，所以 rag 断掉它就会变 unhealthy。
+镜像里三个服务都在 compose 里：`app`（rag 服务，生产面不占宿主端口、dev 覆盖暴露 :8000；挂 GPU、四个命名卷、模型只读挂载）、`agent`（agent 服务，宿主 :8001 → 容器内 :8000；不挂 GPU，挂一卷 `tlr_sessions` 存会话记忆、不载模型，rag 地址由 `RAG_BASE_URL=http://app:8000` 给，地区澄清默认开）与 `web`（界面，宿主 :3000 → 容器 :80；nginx:alpine，只放前端构建产物，把 `/health` `/qa` `/laws` `/documents` `/sessions` 同源反代到 agent、把 `/rag/qa` `/rag/answer` `/rag/answer/stream` `/rag/materials/search` 四条 POST 反代到 rag（`app:8000`，仅 RAG 通道用），上传限 10MB）。agent 的 healthcheck 读的是 `/health` 的 body：自己 `status=ok` 且内嵌的 `rag.status=ok` 才算健康，所以 rag 断掉它就会变 unhealthy。
 
 改了代码要重建：跑 `deploy/build.sh`（等价直连 buildx 三条 + 把 app/agent/web 滚动上线）。镜像把源码烤进去了，不重建跑的还是上一版，且不报任何错；**也别用 `docker compose up --build`**（本机 compose v5.4.0 内嵌 bake 出错，报错表面像网络问题）或 `docker builder prune`。web 镜像 COPY 的是 `frontend/dist`，`build.sh` 会拿 `frontend/src`、`index.html`、`package*.json`、`tsconfig.json`、`vite.config.ts` 跟 `dist/index.html` 比 mtime：源码更新就先 `npm ci && npm run build` 再建镜像，dist 不比源码旧就跳过（要强制重建就先删 `frontend/dist`）。首次构建要下 CUDA 版 torch（约 2.8GB），之后有缓存就快。构建中途别 Ctrl-C：torch 下到一半断了不落缓存，下次还得重下。三个镜像构建完的体量：rag 6.03GB（大头就是 CUDA 版 torch），agent 266MB，web 63.9MB。
 
@@ -183,8 +183,8 @@ print(qa("深圳 行人在机动车道 罚款多少", mode="search").render())  
 #    先保证有个 agent 在跑（compose 的宿主 :8001，或裸跑的 uvicorn），然后：
 cd frontend
 npm ci                    # 首次
-npm run dev               # Vite 开发服务器 → http://localhost:5173；/qa /health /laws /documents /sessions 反代到 127.0.0.1:8001
-                          # 换目标：先 $env:VITE_API_TARGET="http://host:port" 再 npm run dev
+npm run dev               # Vite 开发服务器 → http://localhost:5173；/qa /health /laws /documents /sessions 反代到 127.0.0.1:8001（/rag 反代到 127.0.0.1:8000，仅 RAG 通道用）
+                          # 换目标：先 $env:VITE_API_TARGET="http://host:port" 再 npm run dev；rag 侧换 VITE_RAG_TARGET
 
 # C. 只看构建产物：npm run build（tsc --noEmit + vite build）→ frontend/dist；npm run preview → http://localhost:4173（反代同 B）
 ```
@@ -194,7 +194,7 @@ npm run dev               # Vite 开发服务器 → http://localhost:5173；/qa
 ### 测试
 
 ```powershell
-python -m pytest                # 386 条离线用例，约 30 秒；不碰 Milvus、不调模型
+python -m pytest                # 388 条离线用例，约 30 秒；不碰 Milvus、不调模型
 ruff check .
 ```
 
@@ -204,13 +204,13 @@ ruff check .
 
 ## 架构
 
-两个进程、一条 HTTP 缝，外加一个界面服务（静态托管 + 同源反代到 agent）：
+两个进程、一条 HTTP 缝，外加一个界面服务（静态托管 + 同源反代到 agent 与 rag：`/rag` 只放四条 POST）：
 
 ```mermaid
 flowchart LR
     LIN["python -m rag_service<br/>线性问答（评测基线）"]
     CLI["python -m agent_service<br/>命令行"]
-    WEB["web :3000（nginx）<br/>静态界面 + 同源反代"]
+    WEB["web :3000（nginx）<br/>静态界面 + 同源反代（agent + /rag 四条）"]
     MCP["mcp_server<br/>MCP 客户端走 stdio"]
     AGENT["agent_service（:8001）<br/>LangGraph：判地区 → 澄清（判不出地区时）→ 工具循环 → 收尾 → 复核"]
     RAG["rag_service（:8000）<br/>检索 · 生成 · 建库"]
@@ -221,6 +221,7 @@ flowchart LR
     LIN --> RAG
     CLI --> AGENT
     WEB -->|"/qa /health /laws /documents /sessions"| AGENT
+    WEB -->|"仅 RAG 通道：/rag 四条 POST"| RAG
     MCP -->|RagClient 走 HTTP| RAG
     AGENT -->|RagClient 走 HTTP| RAG
     RAG --> MV

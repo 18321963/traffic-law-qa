@@ -118,4 +118,11 @@ PROBES = [
         "README「入口一览」",
         TESTS,
     ),
+    (
+        "门禁⑰ 前端调的 /rag 路径滑出 nginx 白名单必须翻红（白名单门）",
+        "frontend/src/api/live.ts",
+        '"/rag/answer/stream"',
+        '"/rag/answers/stream"',
+        TESTS,
+    ),
 ]

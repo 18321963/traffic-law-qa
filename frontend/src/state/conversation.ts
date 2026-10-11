@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { SESSION_KEY, type AnswerMode, type Settings } from "../config";
+import { SESSION_KEY, type AnswerMode, type Channel, type Settings } from "../config";
 import { isAbort } from "../api/http";
 import type { Transport } from "../api/transport";
 import {
@@ -11,7 +11,7 @@ import {
 } from "../api/types";
 
 export const USAGE =
-  "会话状态机：一次提问 = 一个 turn。turn 走 streaming → interrupted | done | error；done 到达时权威答案整篇替换草稿，替换与否记在 replaced 上。";
+  "会话状态机：一次提问 = 一个 turn。turn 走 streaming → interrupted | done | error；done 到达时权威答案整篇替换草稿，替换与否记在 replaced 上；turn 记下提问时选的回答通道，之后切设置不改旧轮渲染。";
 
 export type TurnStatus = "streaming" | "interrupted" | "done" | "error" | "cancelled";
 
@@ -37,6 +37,7 @@ export type Turn = {
   error: TurnError | null;
   replaced: boolean;
   mode: AnswerMode;
+  channel: Channel;
   startedAt: number;
   elapsedMs: number | null;
 };
@@ -275,6 +276,7 @@ export function useConversations(transport: Transport, settings: Settings): Conv
         error: null,
         replaced: false,
         mode: settingsRef.current.answerMode,
+        channel: settingsRef.current.channel,
         startedAt: Date.now(),
         elapsedMs: null,
       };

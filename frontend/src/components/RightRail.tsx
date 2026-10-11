@@ -62,6 +62,7 @@ export function RightRail({ tab, onTab, turn, highlight, documents, activeDocIds
               mode={turn?.mode ?? "stream"}
               elapsedMs={turn?.elapsedMs ?? null}
               question={turn?.question ?? null}
+              channel={turn?.channel ?? "agent"}
             />
           ) : null}
           {tab === "materials" ? (

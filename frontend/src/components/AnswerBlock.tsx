@@ -1,9 +1,10 @@
 import { groupClass, paragraphsOf, segmentsOf, type ReviewState } from "../render";
 import type { DonePayload } from "../api/types";
+import type { Channel } from "../config";
 import styles from "./AnswerBlock.module.css";
 
 export const USAGE =
-  "答案正文：草稿态配灰底与光标，终稿配复核徽章与一行元信息；[依据N]/[时效N]/[材料N] 切成可点引用片。";
+  "答案正文：草稿态配灰底与光标，终稿配复核徽章与一行元信息；[依据N]/[时效N]/[材料N] 切成可点引用片；仅 RAG 通道的草稿标题不提复核。";
 
 export type DraftState = "streaming" | "error" | "cancelled" | "stopped";
 
@@ -12,6 +13,7 @@ type Props = {
   answer: DonePayload | null;
   draftState: DraftState | null;
   review: ReviewState;
+  channel: Channel;
   onCite: (index: number) => void;
 };
 
@@ -20,6 +22,11 @@ const DRAFT_HEADLINE: Record<DraftState, string> = {
   error: "流已中断，下面是中断前收到的文字",
   cancelled: "已取消，下面是取消前收到的文字",
   stopped: "这一轮已停下，下面是已收到的文字",
+};
+
+const RAG_DRAFT_HEADLINE: Record<DraftState, string> = {
+  ...DRAFT_HEADLINE,
+  streaming: "正在生成…",
 };
 
 const TIER_CLASS: Record<ReviewState["tier"], string> = {
@@ -42,7 +49,7 @@ function Meta({ answer, review }: { answer: DonePayload; review: ReviewState }) 
   return <p className={styles.meta}>{rows.join(" · ")}</p>;
 }
 
-export function AnswerBlock({ text, answer, draftState, review, onCite }: Props) {
+export function AnswerBlock({ text, answer, draftState, review, channel, onCite }: Props) {
   const paragraphs = paragraphsOf(text);
   const body = paragraphs.length > 0 ? paragraphs : [text];
   const draft = draftState !== null;
@@ -52,7 +59,9 @@ export function AnswerBlock({ text, answer, draftState, review, onCite }: Props)
       {draft ? (
         <div className={styles.headRow}>
           <span className={styles.draftChip}>草稿</span>
-          <span className={styles.draftHeadline}>{DRAFT_HEADLINE[draftState]}</span>
+          <span className={styles.draftHeadline}>
+            {channel === "rag" ? RAG_DRAFT_HEADLINE[draftState] : DRAFT_HEADLINE[draftState]}
+          </span>
         </div>
       ) : (
         <div className={styles.headRow}>

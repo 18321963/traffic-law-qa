@@ -61,7 +61,7 @@
   white-space: nowrap;
 }
 
-.resumeTag {
+.tag {
   flex-shrink: 0;
   padding: 0 8px;
   border-radius: 100px;

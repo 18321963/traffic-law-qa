@@ -955,6 +955,41 @@ def test_the_sse_frame_scan_has_teeth() -> None:
     assert _frontend_frames_in_source('if (frame.event === "step") return null;\n') == {"step"}
 
 
+FRONTEND_LIVE = ROOT / "frontend" / "src" / "api" / "live.ts"
+NGINX_CONF = ROOT / "frontend" / "nginx.conf"
+
+
+def _frontend_rag_paths_in_source(text: str) -> set[str]:
+    return set(re.findall(r'"(/rag/[a-z/]+)"', text))
+
+
+def _nginx_rag_allowlist_in_conf(text: str) -> set[str]:
+    match = re.search(r"location\s+~\s+\^/rag/\(([^)]+)\)\$", text)
+    assert match, "frontend/nginx.conf 里找不到 rag 白名单 location，这条门禁已经空转"
+    return {f"/rag/{name}" for name in match.group(1).split("|")}
+
+
+def test_the_frontend_rag_calls_stay_inside_the_nginx_allowlist() -> None:
+    called = _frontend_rag_paths_in_source(FRONTEND_LIVE.read_text(encoding="utf-8"))
+    allowed = _nginx_rag_allowlist_in_conf(NGINX_CONF.read_text(encoding="utf-8"))
+    assert called, "live.ts 里一条 /rag/... 字面量都没有，这条门禁已经空转"
+    beyond = called - allowed
+    assert not beyond, (
+        "前端调的 /rag 路径滑出了 nginx 白名单：部署后这些请求到不了 rag"
+        "（容器实测：POST 吃 405，GET 回退到 index.html）：\n"
+        f"  白名单外的：{sorted(beyond)}\n  白名单：{sorted(allowed)}"
+    )
+
+
+def test_the_rag_allowlist_scan_has_teeth() -> None:
+    probe = 'postAt("/rag/qa")\nstreamAt("/rag/answer/stream")\n'
+    assert _frontend_rag_paths_in_source(probe) == {"/rag/qa", "/rag/answer/stream"}
+    assert _nginx_rag_allowlist_in_conf("location ~ ^/rag/(qa|answer/stream)$ {\n") == {
+        "/rag/qa",
+        "/rag/answer/stream",
+    }
+
+
 DOCKERIGNORE = ROOT / ".dockerignore"
 IMAGE_DATA_KEEP = frozenset(
     {

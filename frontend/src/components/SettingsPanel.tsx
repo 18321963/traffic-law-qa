@@ -1,10 +1,10 @@
 import { Divider, Drawer, Input, InputNumber, Segmented, Select } from "antd";
-import { HEALTH_SCENARIOS, SCENARIOS } from "../api/mock";
+import { activeScenario, HEALTH_SCENARIOS, scenariosFor } from "../api/mock";
 import type { Settings } from "../config";
 import styles from "./SettingsPanel.module.css";
 
 export const USAGE =
-  "设置抽屉：数据来源（示例数据 / 直连服务）、服务地址与 key、答案模式与 top_k；示例数据模式下可挑问答场景与状态条场景演练各条路径。";
+  "设置抽屉：数据来源（示例数据 / 直连服务）、回答通道（Agent 编排 / 仅 RAG）、服务地址与 key、答案模式与 top_k；示例数据模式下可挑问答场景与状态条场景演练各条路径。";
 
 type Props = {
   open: boolean;
@@ -14,7 +14,8 @@ type Props = {
 };
 
 export function SettingsPanel({ open, settings, onChange, onClose }: Props) {
-  const scenario = SCENARIOS.find((row) => row.id === settings.scenario) ?? SCENARIOS[0];
+  const scenario = activeScenario(settings);
+  const scenarioRows = scenariosFor(settings.channel);
   const healthScenario = HEALTH_SCENARIOS.find((row) => row.id === settings.healthScenario) ?? HEALTH_SCENARIOS[0];
 
   return (
@@ -40,6 +41,26 @@ export function SettingsPanel({ open, settings, onChange, onClose }: Props) {
       <Divider className={styles.divider} />
 
       <div className={styles.section}>
+        <div className={styles.sectionTitle}>回答通道</div>
+        <Segmented
+          block
+          value={settings.channel}
+          onChange={(value) => onChange({ channel: value as Settings["channel"] })}
+          options={[
+            { label: "Agent 编排", value: "agent" },
+            { label: "仅 RAG", value: "rag" },
+          ]}
+        />
+        <p className={styles.hint}>
+          {settings.channel === "agent"
+            ? "走 Agent 编排：规划、工具循环、复核与跨轮记忆都在这一侧。"
+            : "直奔 rag 服务的线性管道：检索 → 材料 → 生成；单轮直答，不过复核、不带跨轮记忆。"}
+        </p>
+      </div>
+
+      <Divider className={styles.divider} />
+
+      <div className={styles.section}>
         <div className={styles.sectionTitle}>服务地址</div>
         <Input
           value={settings.base}
@@ -54,6 +75,9 @@ export function SettingsPanel({ open, settings, onChange, onClose }: Props) {
           onChange={(event) => onChange({ apiKey: event.target.value.trim() })}
         />
         <p className={styles.hint}>key 只存在这台浏览器的 localStorage 里，请求时放进 X-API-Key 头。</p>
+        {settings.channel === "rag" ? (
+          <p className={styles.hint}>仅 RAG 通道恒走同源 /rag，忽略这里填的地址与 key。</p>
+        ) : null}
       </div>
 
       <Divider className={styles.divider} />
@@ -70,9 +94,13 @@ export function SettingsPanel({ open, settings, onChange, onClose }: Props) {
           ]}
         />
         <p className={styles.hint}>
-          {settings.answerMode === "stream"
-            ? "POST /qa/stream：草稿增量出现，复核完成后整篇换成权威答复。"
-            : "POST /qa：等整篇答复一次性返回，中途没有草稿。"}
+          {settings.channel === "rag"
+            ? settings.answerMode === "stream"
+              ? "POST /rag/qa 检索 → POST /rag/answer/stream：答复逐字流出，收尾帧给全篇。"
+              : "POST /rag/qa 一次取全检索与答复，中途没有草稿。"
+            : settings.answerMode === "stream"
+              ? "POST /qa/stream：草稿增量出现，复核完成后整篇换成权威答复。"
+              : "POST /qa：等整篇答复一次性返回，中途没有草稿。"}
         </p>
         <div className={styles.sectionTitle + " " + styles.gap}>top_k</div>
         <InputNumber
@@ -92,12 +120,17 @@ export function SettingsPanel({ open, settings, onChange, onClose }: Props) {
           <div className={styles.section}>
             <div className={styles.sectionTitle}>演练场景（仅示例数据）</div>
             <Select
-              value={settings.scenario}
+              value={scenario.id}
               style={{ width: "100%" }}
               onChange={(value) => onChange({ scenario: value })}
-              options={SCENARIOS.map((row) => ({ label: row.label, value: row.id }))}
+              options={scenarioRows.map((row) => ({ label: row.label, value: row.id }))}
             />
             <p className={styles.hint}>{scenario.hint}</p>
+            {settings.channel === "rag" ? (
+              <p className={styles.hint}>
+                仅 RAG 通道不列 Agent 专属场景（澄清、降级、限流与状态码演练）；示例数据也不模拟材料检索，材料链路请在直连服务下验证。
+              </p>
+            ) : null}
             <div className={styles.sectionTitle + " " + styles.gap}>状态条场景</div>
             <Select
               value={settings.healthScenario}

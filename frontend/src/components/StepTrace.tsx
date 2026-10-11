@@ -13,10 +13,11 @@ import {
 } from "@ant-design/icons";
 import { nodeLabel, stepDetail } from "../render";
 import type { StepEvent } from "../api/types";
+import type { Channel } from "../config";
 import styles from "./StepTrace.module.css";
 
 export const USAGE =
-  "处理轨迹：inline 变体挂在回答里（流式中默认展开、收尾后收起，用户手动开合优先），panel 变体放在右栏轨迹页签。";
+  "处理轨迹：inline 变体挂在回答里（流式中默认展开、收尾后收起，用户手动开合优先），panel 变体放在右栏轨迹页签；仅 RAG 轮的 panel 空态另给通道口径。";
 
 type Props = {
   steps: StepEvent[];
@@ -25,6 +26,7 @@ type Props = {
   elapsedMs: number | null;
   variant?: "inline" | "panel";
   question?: string | null;
+  channel?: Channel;
 };
 
 type IconSpec = { icon: typeof AimOutlined; className: string };
@@ -54,7 +56,15 @@ function StepRow({ step }: { step: StepEvent }) {
   );
 }
 
-export function StepTrace({ steps, streaming, mode, elapsedMs, variant = "inline", question = null }: Props) {
+export function StepTrace({
+  steps,
+  streaming,
+  mode,
+  elapsedMs,
+  variant = "inline",
+  question = null,
+  channel = "agent",
+}: Props) {
   const [override, setOverride] = useState<boolean | null>(null);
   const open = override !== null ? override : streaming;
 
@@ -62,7 +72,9 @@ export function StepTrace({ steps, streaming, mode, elapsedMs, variant = "inline
     return (
       <div className={styles.panel}>
         {question ? <p className={styles.panelQuestion}>{question}</p> : null}
-        {mode === "once" ? (
+        {channel === "rag" ? (
+          <p className={styles.empty}>这一轮走的是仅 RAG 通道（检索 → 材料 → 生成），没有 Agent 步骤流。</p>
+        ) : mode === "once" ? (
           <p className={styles.empty}>这一次走的是一次性请求（/qa），没有步骤流。</p>
         ) : steps.length === 0 ? (
           <p className={styles.empty}>{streaming ? "等待第一个步骤…" : "这次提问没有步骤记录。"}</p>
