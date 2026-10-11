@@ -1,4 +1,4 @@
-import type { Settings } from "../../config";
+import type { Channel, Settings } from "../../config";
 import type { Transport } from "../transport";
 import {
   ApiError,
@@ -29,7 +29,7 @@ import {
 } from "./corpus";
 
 export const USAGE =
-  "示例数据源：按《接口文档》手搓的 SSE 帧（step / delta / interrupt / done / error 全覆盖）与非 200 状态码，不连服务、不外呼。事件序照真实节点顺序：region → agent → tools → delta… → finalize → review → done。";
+  "示例数据源：按《接口文档》手搓的 SSE 帧（step / delta / interrupt / done / error 全覆盖）与非 200 状态码，不连服务、不外呼。事件序照真实节点顺序：region → agent → tools → delta… → finalize → review → done。channel=rag 时只发 delta→done（review 恒 null、无 session_id、无 step 与 interrupt）；场景过滤先于回落——两通道都含 auto，回落兜底给 rows[0]。";
 
 const DEGRADED_RESUME_DETAIL = "规划模型暂不可用，无法恢复被中断的会话；请直接重新提问。";
 
@@ -42,6 +42,7 @@ export type Scenario = {
   label: string;
   hint: string;
   caseId: CaseId | "auto";
+  channel?: "agent";
   clarify?: boolean;
   failure?: Failure;
   resumeFailure?: Failure;
@@ -55,6 +56,7 @@ export const SCENARIOS: Scenario[] = [
     id: "clarify",
     label: "地区澄清中断",
     hint: "电动自行车载人怎么处理（没点地区）：判不出地区 → interrupt 帧 → 地区选择 → 恢复流",
+    channel: "agent",
     caseId: "shenzhen",
     clarify: true,
   },
@@ -63,6 +65,7 @@ export const SCENARIOS: Scenario[] = [
     id: "mismatch",
     label: "复核未过降级",
     hint: "复核判「依据不足」：草稿被整篇换成降级答复，原稿收在可展开的详情里",
+    channel: "agent",
     caseId: "mismatch",
   },
   { id: "empty", label: "检索为空", hint: "没有命中法条：无依据、不生成、无复核", caseId: "empty" },
@@ -70,6 +73,7 @@ export const SCENARIOS: Scenario[] = [
     id: "degraded",
     label: "未配置规划模型",
     hint: "提问降级为单轮检索；先制造一个待澄清会话，再切到本场景点恢复，会收到 503 文案",
+    channel: "agent",
     caseId: "degraded",
     resumeFailure: { mode: "frame", message: DEGRADED_RESUME_DETAIL, onceStatus: 503, onceDetail: DEGRADED_RESUME_DETAIL },
   },
@@ -89,6 +93,7 @@ export const SCENARIOS: Scenario[] = [
     id: "conflict409",
     label: "会话无等待中的澄清",
     hint: "流式面落在 error 帧，非流式面是 409",
+    channel: "agent",
     caseId: "red_light",
     failure: {
       mode: "frame",
@@ -101,6 +106,7 @@ export const SCENARIOS: Scenario[] = [
     id: "ratelimit429",
     label: "限流",
     hint: "429 + Retry-After，开场前就拦下",
+    channel: "agent",
     caseId: "red_light",
     failure: { mode: "http", status: 429, detail: "请求过于频繁：每分钟上限 30 次", retryAfter: 42 },
   },
@@ -108,6 +114,7 @@ export const SCENARIOS: Scenario[] = [
     id: "quota429",
     label: "日额度用完",
     hint: "429 + Retry-After 到次日 UTC 0 点",
+    channel: "agent",
     caseId: "red_light",
     failure: {
       mode: "http",
@@ -119,7 +126,7 @@ export const SCENARIOS: Scenario[] = [
   {
     id: "unready503",
     label: "服务未就绪",
-    hint: "图形装配失败时 /qa 全 503",
+    hint: "服务未就绪（装配或启动失败）时请求全 503",
     caseId: "red_light",
     failure: { mode: "http", status: 503, detail: "服务未就绪" },
   },
@@ -127,6 +134,7 @@ export const SCENARIOS: Scenario[] = [
     id: "unauthorized401",
     label: "鉴权失败",
     hint: "配了 key 但请求头不对",
+    channel: "agent",
     caseId: "red_light",
     failure: { mode: "http", status: 401, detail: "API key 缺失或无效" },
   },
@@ -134,6 +142,7 @@ export const SCENARIOS: Scenario[] = [
     id: "badrequest400",
     label: "会话存储不可用",
     hint: "带了 session_id 但服务没接会话存储",
+    channel: "agent",
     caseId: "red_light",
     failure: { mode: "http", status: 400, detail: "这个 runner 没接会话存储（sessions=None），不能带 session_id" },
   },
@@ -156,12 +165,13 @@ export const HEALTH_SCENARIOS: { id: string; label: string; hint: string }[] = [
   { id: "offline", label: "连不上", hint: "请求本身发不出去" },
 ];
 
-function scenarioOf(id: string): Scenario {
-  return SCENARIOS.find((row) => row.id === id) ?? SCENARIOS[0];
+export function scenariosFor(channel: Channel): Scenario[] {
+  return SCENARIOS.filter((row) => row.channel !== "agent" || channel === "agent");
 }
 
 export function activeScenario(settings: Settings): Scenario {
-  return scenarioOf(settings.scenario);
+  const rows = scenariosFor(settings.channel);
+  return rows.find((row) => row.id === settings.scenario) ?? rows[0];
 }
 
 function caseOf(question: string): CaseId {
@@ -252,6 +262,38 @@ function donePayload(caseId: CaseId, question: string, sessionId: string): DoneP
     session_id: sessionId,
     request_ms: 4380.2,
   };
+}
+
+function ragDonePayload(caseId: CaseId, question: string): DonePayload {
+  const { session_id: _session_id, ...payload } = donePayload(caseId, question, "");
+  return { ...payload, review: null };
+}
+
+function ragAskBeats(settings: Settings, question: string): Beat[] {
+  const scenario = activeScenario(settings);
+  const pace = pacing(scenario.pace ?? 1);
+  const caseId = resolveCase(settings, question);
+  const beats: Beat[] = [];
+  if (scenario.failure?.mode === "frame") {
+    const pieces = splitDeltas(contentOf(caseId).draft);
+    const cut = Math.max(1, Math.floor(pieces.length / 3));
+    for (const piece of pieces.slice(0, cut)) {
+      beats.push({ delay: pace(22), event: { type: "delta", data: { text: piece } } });
+    }
+    beats.push({
+      delay: pace(500),
+      event:
+        scenario.failure.message === "__MALFORMED__"
+          ? { type: "parse_failure", data: { raw: "event: delta  data: {oops" } }
+          : { type: "error", data: { message: scenario.failure.message, partial: pieces.slice(0, cut).join("") } },
+    });
+    return beats;
+  }
+  splitDeltas(contentOf(caseId).draft).forEach((piece, index) => {
+    beats.push({ delay: pace(index === 0 ? 620 : 22), event: { type: "delta", data: { text: piece } } });
+  });
+  beats.push({ delay: pace(200), event: { type: "done", data: ragDonePayload(caseId, question) } });
+  return beats;
 }
 
 function pacing(pace: number) {
@@ -458,6 +500,10 @@ export function createMockTransport(getSettings: () => Settings): Transport {
   return {
     async *ask(req: QaRequest, signal?: AbortSignal) {
       const settings = getSettings();
+      if (settings.channel === "rag") {
+        yield* stream(ragAskBeats(settings, req.question), activeScenario(settings).failure, signal);
+        return;
+      }
       const sessionId = req.session_id || hex32();
       yield* stream(askBeats(settings, req.question, sessionId), activeScenario(settings).failure, signal);
     },
@@ -472,6 +518,9 @@ export function createMockTransport(getSettings: () => Settings): Transport {
       const failure = onceFailure(scenario.failure);
       await sleep(900, signal);
       if (failure) throw failure;
+      if (settings.channel === "rag") {
+        return { status: "ok", ...ragDonePayload(resolveCase(settings, req.question), req.question) } as AskOk;
+      }
       const sessionId = req.session_id || hex32();
       if (scenario.clarify) {
         interrupted.set(sessionId, { caseId: "shenzhen", question: req.question, place: "" });

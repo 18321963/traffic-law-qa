@@ -1,17 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { Button, Input, Tooltip } from "antd";
 import { CloseOutlined, FileTextOutlined, PaperClipOutlined, SendOutlined, StopOutlined } from "@ant-design/icons";
-import type { AnswerMode } from "../config";
+import type { AnswerMode, Channel } from "../config";
 import styles from "./Composer.module.css";
 
 export const USAGE =
-  "输入区：来源药丸（本会话挂上的材料，可单个摘掉）+ 发送卡；附件按钮上传会话材料，回车发送、Shift+回车换行。";
+  "输入区：来源药丸（本会话挂上的材料，可单个摘掉）+ 发送卡；附件按钮上传会话材料，回车发送、Shift+回车换行；meta 行分通道（Agent 给会话记忆，仅 RAG 给单轮直答与材料口径）。";
 
 export type Material = { docId: string; name: string };
 
 type Props = {
   busy: boolean;
   answerMode: AnswerMode;
+  channel: Channel;
   sessionId: string | null;
   materials: Material[];
   onRemoveDoc: (docId: string) => void;
@@ -23,6 +24,7 @@ type Props = {
 export function Composer({
   busy,
   answerMode,
+  channel,
   sessionId,
   materials,
   onRemoveDoc,
@@ -122,8 +124,17 @@ export function Composer({
       </div>
 
       <div className={styles.meta}>
-        {sessionId ? `会话 ${sessionId.slice(0, 10)}…（跨轮记忆已开）` : "这条会话还没有 session_id（首问后会有）"}
-        {materials.length > 0 ? ` · 材料 ${materials.length} 份` : ""}
+        {channel === "rag" ? (
+          <>
+            仅 RAG 通道：单轮直答，无跨轮记忆
+            {materials.length > 0 ? ` · 材料 ${materials.length} 份（提问时先检索材料）` : ""}
+          </>
+        ) : (
+          <>
+            {sessionId ? `会话 ${sessionId.slice(0, 10)}…（跨轮记忆已开）` : "这条会话还没有 session_id（首问后会有）"}
+            {materials.length > 0 ? ` · 材料 ${materials.length} 份` : ""}
+          </>
+        )}
       </div>
     </div>
   );

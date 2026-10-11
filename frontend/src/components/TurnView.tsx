@@ -18,7 +18,7 @@ import { StepTrace } from "./StepTrace";
 import styles from "./TurnView.module.css";
 
 export const USAGE =
-  "一轮问答：右侧用户气泡 + 助手消息（处理轨迹 → 草稿/终稿 → 澄清卡/出错面 → 操作行）；续答轮不重复用户气泡。";
+  "一轮问答：右侧用户气泡 + 助手消息（处理轨迹 → 草稿/终稿 → 澄清卡/出错面 → 操作行）；续答轮不重复用户气泡；仅 RAG 轮带通道小标签（与续答并列），等待文案与轨迹空态分通道。";
 
 type Props = {
   turn: Turn;
@@ -42,7 +42,7 @@ function SystemLine({ children }: { children: React.ReactNode }) {
 
 export function TurnView({ turn, busy, onResume, onRetry, onDismissInterrupt, onFocusEvidence }: Props) {
   const { message } = AntdApp.useApp();
-  const review = reviewStateOf(turn.answer);
+  const review = reviewStateOf(turn.answer, turn.channel);
   const streaming = turn.status === "streaming";
   const showDraft = turn.draft !== "" && turn.answer === null;
   const draftState: DraftState = streaming
@@ -86,7 +86,8 @@ export function TurnView({ turn, busy, onResume, onRetry, onDismissInterrupt, on
         <div className={styles.sender}>
           <Avatar size={30} className={styles.avatar} icon={<BrandMark size={30} />} />
           <span className={styles.name}>法规助手</span>
-          {turn.resumed ? <span className={styles.resumeTag}>续答</span> : null}
+          {turn.resumed ? <span className={styles.tag}>续答</span> : null}
+          {turn.channel === "rag" ? <span className={styles.tag}>仅 RAG</span> : null}
         </div>
 
         <div className={styles.content}>
@@ -95,6 +96,7 @@ export function TurnView({ turn, busy, onResume, onRetry, onDismissInterrupt, on
             streaming={streaming}
             mode={turn.mode}
             elapsedMs={turn.elapsedMs}
+            channel={turn.channel}
           />
 
           {showDraft ? (
@@ -103,6 +105,7 @@ export function TurnView({ turn, busy, onResume, onRetry, onDismissInterrupt, on
               answer={null}
               draftState={draftState}
               review={review}
+              channel={turn.channel}
               onCite={() => undefined}
             />
           ) : null}
@@ -124,6 +127,7 @@ export function TurnView({ turn, busy, onResume, onRetry, onDismissInterrupt, on
                 answer={turn.answer}
                 draftState={null}
                 review={review}
+                channel={turn.channel}
                 onCite={(index) => onFocusEvidence(turn.id, index)}
               />
               {review.tier === "failed" ? (
@@ -131,7 +135,7 @@ export function TurnView({ turn, busy, onResume, onRetry, onDismissInterrupt, on
                   <ExclamationCircleFilled className={styles.downgradeIcon} />
                   复核未过：服务没给结论，下面是降级答复与未经复核确认的候选法条，需人工复审。
                 </div>
-              ) : turn.replaced ? (
+              ) : turn.replaced && turn.channel === "agent" ? (
                 <p className={styles.swap}>
                   <SyncOutlined className={styles.swapIcon} />
                   复核后的答案与草稿不一致，界面已整篇换成权威版本。
@@ -180,7 +184,13 @@ export function TurnView({ turn, busy, onResume, onRetry, onDismissInterrupt, on
             <div className={styles.searching}>
               <span className={styles.searchingIcon} aria-hidden="true" />
               <span className={styles.searchingText}>
-                {turn.mode === "once" ? "一次性请求已发出，等结果返回…" : "正在检索与规划…"}
+                {turn.channel === "rag"
+                  ? turn.mode === "once"
+                    ? "仅 RAG 通道：请求已发出，等结果返回…"
+                    : "仅 RAG 通道：正在检索、取材料并生成…"
+                  : turn.mode === "once"
+                    ? "一次性请求已发出，等结果返回…"
+                    : "正在检索与规划…"}
               </span>
             </div>
           ) : null}

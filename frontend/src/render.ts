@@ -1,7 +1,8 @@
 import type { DonePayload, Evidence, Review, StepEvent } from "./api/types";
+import type { Channel } from "./config";
 
 export const USAGE =
-  "展示口径：答案正文里的 [依据N] / [时效N] / [材料N] 切成可点的引用片；复核三态（通过 / 未通过 / 未复核）与步骤中文名都从这里出。";
+  "展示口径：答案正文里的 [依据N] / [时效N] / [材料N] 切成可点的引用片；复核三态（通过 / 未通过 / 未复核）与步骤中文名都从这里出；channel=rag 的答复恒按未复核渲染。";
 
 export type Segment = { kind: "text"; text: string } | { kind: "ref"; label: string; group: string; index: number };
 
@@ -32,7 +33,7 @@ export type ReviewState = {
   detail: string;
 };
 
-export function reviewStateOf(answer: DonePayload | null): ReviewState {
+export function reviewStateOf(answer: DonePayload | null, channel: Channel = "agent"): ReviewState {
   if (!answer) return { tier: "none", label: "未复核", detail: "" };
   const review: Review | null | undefined = answer.review;
   if (review) {
@@ -56,6 +57,8 @@ export function reviewStateOf(answer: DonePayload | null): ReviewState {
   if (unfinished) return { tier: "unfinished", label: "本次未复核", detail: unfinished };
   const unscored = notes.find((row) => row.startsWith("复核未打分"));
   if (unscored) return { tier: "unscored", label: "本次未打分", detail: unscored };
+  if (channel === "rag") return { tier: "none", label: "未复核", detail: "仅 RAG 通道不经复核" };
+  if ((answer.evidences ?? []).length > 0) return { tier: "none", label: "未复核", detail: "这条回答没有跑复核" };
   return { tier: "none", label: "未复核", detail: "答案里没有引用依据，复核没有可判的据" };
 }
 

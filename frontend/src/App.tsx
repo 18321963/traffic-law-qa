@@ -171,6 +171,7 @@ export function App() {
             <Composer
               busy={conversations.busy}
               answerMode={settings.answerMode}
+              channel={settings.channel}
               sessionId={active.sessionId}
               materials={materials}
               onRemoveDoc={toggleDoc}
