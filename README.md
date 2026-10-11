@@ -22,7 +22,7 @@
 | 会话记忆（短期） | ✅ | 请求带 `session_id` = 同一张会话跨轮记得住（LangGraph checkpointer，SQLite 落 `data/sessions.db`）；提示词里带最近 N 轮（每轮已定地区随行标出），不带则每问独立；整条可删（`DELETE /sessions/{session_id}`，thread 与挂起澄清一起物理清掉） |
 | 地区澄清（人在环） | ✅ | 判不出该按哪里的规定时（题面没点出地区、或点出的地名不是适用地，如产地题）先中断问一句「按该地法规还是只按全国法」再作答；判出地区直接答。回复经 resume 端点交回（服务里默认开，`AGENT_CLARIFY` 控制） |
 | 流式输出 | ✅ | rag `/qa/stream` 推检索结果与逐字 token；agent `/qa/stream` 推步骤流 + 逐字草稿；**草稿是草稿** —— `done` 才是复核之后的权威 |
-| 浏览器界面 | ✅ | web 镜像（nginx 静态托管，宿主 :3000）：问答流 · 依据/轨迹/材料三栏 · 材料上传 · 删会话 · 澄清回复 · 仅 RAG 通道（设置里切换）；同源反代到 agent（源码 `frontend/`，React + Vite） |
+| 浏览器界面 | ✅ | web 镜像（nginx 静态托管，宿主 :3000）：问答流 · 依据/轨迹/材料三栏 · 材料上传 · 删会话 · 澄清回复 · 仅 RAG 通道（设置里切换）；同源反代到 agent 与 rag（源码 `frontend/`，React + Vite） |
 | 末端复核 | ✅ | 逐条判「被原文支撑？」→ 低分整篇降级（阈值 0.35；标定账见[运维手册](deploy/运维手册.md) §9） |
 | 就绪门 | ✅ | 启动时比对 docx／本地产物／集合三者，不一致自动重建；也能 `--rebuild` 或 `POST /reindex` 手动触发 |
 | 权重门禁 | ✅ | 索引快照里记着嵌入权重的指纹（文件名 + 大小 + mtime）：换了权重就拒绝服务并说明差在哪，`POST /reindex` / `RAG_ALLOW_REBUILD=1` 显式放行；老快照没指纹不拦，只标 `degraded`。启发式，防误换不防篡改 |
@@ -40,11 +40,15 @@
 
 ## 它长什么样
 
-浏览器界面（web 镜像，宿主 :3000）。三张截图跑的都是**示例数据模式**（界面内置夹具，不连模型、不出网），真实服务下形态一致。
+浏览器界面（web 镜像，宿主 :3000）。四张截图跑的都是**示例数据模式**（界面内置夹具，不连模型、不出网），真实服务下形态一致。
 
 ![问答终态：权威答案、可点的依据引用与右栏条文原文](docs/images/frontend-qa.png)
 
 **问答终态**：`done` 之后的权威答案整篇替换草稿；正文 `[依据N]` 可点，右栏翻得到条文原文与这一轮的处理轨迹。
+
+![仅 RAG 通道：设置里切到「仅 RAG」，检索到生成一条线性管道，复核态写明不经复核](docs/images/frontend-rag-channel.png)
+
+**仅 RAG 通道**：设置里把回答通道切到「仅 RAG」—— 不进规划、不复核，检索 → 材料 → 生成一条线性管道走完；答复照常带 `[依据N]` 与右栏条文，复核态写明「仅 RAG 通道不经复核」。
 
 ![地区澄清中断卡：回复地区名，或只按全国法](docs/images/frontend-clarify.png)
 
@@ -138,7 +142,7 @@ deploy/build.sh                                  # 建三个镜像并上线（�
 docker compose -f deploy/docker-compose.yml up -d
 docker compose -f deploy/docker-compose.yml ps   # 等六个容器 healthy（首次启动 app 要先在容器里自动建库/核对，比日常启动多花几分钟）
 curl localhost:8001/health  # PowerShell 里要写 curl.exe：curl 是 IWR 别名
-# 界面在 localhost:3000（nginx 静态托管 + 同源反代到 agent），8001 是 API 直连
+# 界面在 localhost:3000（nginx 静态托管 + 同源反代到 agent 与 rag），8001 是 API 直连
 ```
 
 生产面（base compose）宿主见两个入口：**8001**（agent，API 直连）与 **3000**（web，浏览器界面）。本地开发用覆盖文件恢复全部端口与默认凭据：
@@ -260,7 +264,7 @@ flowchart LR
 
 换向量库、换模型供应商、换检索策略，都只改继承；**装配只在各自的 `container.py` 发生**（rag 侧的 `build_store` / `build_retriever` / `build_rag` / `readiness` …，agent 侧的 `build_client` / `build_agent_runner`），别处不许自己 `new` 具体实现，只能接收注入的对象 —— 测试里塞内存假件就是靠这条；agent 侧连装配点都只允许造 `RagClient`，不许造 `LegalRAG`。
 
-这些不靠自觉，`tests/test_architecture.py` 与 `tests/test_contracts_architecture.py` 用 AST 加子进程逐条检查：import 方向、装配只准在 `container.py` 发生、重依赖不许被 `import rag_service` 顺手拉起、退役的包名不许复活、同一句文案只许写一遍、提示词教的工具与真给模型的工具必须一致；契约包那侧另有一组：只许被 import 不许反向 import 消费者、import 它不拉起 torch 一类的重依赖、每个顶层包都得写进 `packages.find.include`。子包的 `__init__.py` 一律空着，不做 re-export。
+这些不靠自觉，`tests/test_architecture.py` 与 `tests/test_contracts_architecture.py` 用 AST 加子进程逐条检查：import 方向、装配只准在 `container.py` 发生、重依赖不许被 `import rag_service` 顺手拉起、退役的包名不许复活、同一句文案只许写一遍、提示词教的工具与真给模型的工具必须一致、前端调的 `/rag` 路径必须落在 nginx 白名单里；契约包那侧另有一组：只许被 import 不许反向 import 消费者、import 它不拉起 torch 一类的重依赖、每个顶层包都得写进 `packages.find.include`。子包的 `__init__.py` 一律空着，不做 re-export。
 
 ### 目录
 

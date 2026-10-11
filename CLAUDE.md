@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 两个进程、一条 HTTP 缝：`agent_service ──RagClient──▶ rag_service`；双向都不许 import 对方。可换件都挂 `rag_contracts/ports.py` 的 ABC；装配只准发生在各自的 `container.py`（agent 侧连装配点都只准造 `RagClient`），别处只收注入。
 - 代码里不写注释、不写 docstring（全仓刻意为之）；用法文本放模块级 `USAGE` 常量，且必须真被引用。
 - 运行期状态（台账 / 会话 / 上传 / 轨迹 / 备份 / 模型权重）不进镜像：`.dockerignore` 挡着。
-- 这些都不靠自觉：`tests/test_architecture.py`、`tests/test_contracts_architecture.py` 用 AST + 子进程逐条钉死 import 方向、装配点、重依赖隔离、退役包名、文案单源、提示词与工具一致、eval 直取边、前端 SSE 帧词汇、零注释、README 引用。改结构或文案前先读这两个文件，别绕门。
+- 这些都不靠自觉：`tests/test_architecture.py`、`tests/test_contracts_architecture.py` 用 AST + 子进程逐条钉死 import 方向、装配点、重依赖隔离、退役包名、文案单源、提示词与工具一致、eval 直取边、前端 SSE 帧词汇、前端 `/rag` 调用面 ⊆ nginx 白名单、零注释、README 引用。改结构或文案前先读这两个文件，别绕门。
 
 ## 常用命令
 
