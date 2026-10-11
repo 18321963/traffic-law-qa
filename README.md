@@ -188,7 +188,7 @@ ruff check .
 
 ## 架构
 
-两个进程、一条 HTTP 缝，外加一个纯静态的界面服务：
+两个进程、一条 HTTP 缝，外加一个界面服务（静态托管 + 同源反代到 agent）：
 
 ```mermaid
 flowchart LR
