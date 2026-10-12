@@ -137,6 +137,8 @@ def make_region_node(llm: LLM, laws: Sequence[LawInfo], *, history_turns: int = 
 
         reply, usage, _finish = llm.chat(prompt, temperature=0.0, name="llm.region")
         region, place = _parse_region(reply.get("content") or "")
+        if region in {law.law_name for law in laws}:
+            region = REGION_UNKNOWN
         return {
             **reset,
             "region": region,

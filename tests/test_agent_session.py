@@ -329,6 +329,17 @@ def test_a_no_place_question_still_clarifies() -> None:
     assert "涉及具体的地区" not in message
 
 
+def test_a_law_name_reply_still_pauses_for_clarification() -> None:
+    runner, _client = _runner(plan=PLAN, clarify=True, region=(ROAD, ""))
+
+    events = list(runner.stream(QUESTION, session_id="s1"))
+
+    kinds = [kind for kind, _payload in events]
+    assert kinds == ["step", "interrupt"]
+    assert events[0][1]["region"] == "?"
+    assert events[1][1]["interrupt"]["value"]["type"] == "region_clarify"
+
+
 def test_resuming_with_a_region_keeps_national_plus_that_local_law() -> None:
     runner, _client = _runner(plan=_plan(2), clarify=True, region=("?", "深圳"))
 
