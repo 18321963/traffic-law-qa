@@ -178,6 +178,16 @@ def test_the_region_node_takes_its_law_table_from_the_service() -> None:
     assert ROAD in system and PENALTY in system
 
 
+def test_a_law_name_reply_from_the_region_model_reads_as_unknown() -> None:
+    client = AgentStubService()
+    llm = AgentStubLLM(_region(ROAD))
+
+    update = region_mod.make_region_node(llm, client.laws())(_state())
+
+    assert update["region"] == region_mod.REGION_UNKNOWN
+    assert update["region_scope"] == ()
+
+
 def test_the_agent_prompt_lists_the_laws_the_service_reported() -> None:
     client = AgentStubService()
     llm = AgentStubLLM([{"role": "assistant", "content": "够了"}])
