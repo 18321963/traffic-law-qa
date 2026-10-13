@@ -251,6 +251,98 @@ def test_the_topic_id_folding_table_holds_line_by_line() -> None:
         assert update["topic_id"] == expected, replies
 
 
+def test_a_slot_only_restatement_keeps_the_topic_when_new_is_reported() -> None:
+    client = AgentStubService()
+    conversation = [
+        _memory("电动自行车载人怎么处理", "t6", 6),
+        _memory("深圳电动自行车上牌需要什么材料", "t7", 7),
+    ]
+    intake = AgentStubLLM(
+        intake=_intake(
+            "new",
+            query="广州电动自行车上牌需要什么材料",
+            summary="问深圳电动自行车上牌材料；按深圳",
+            region="?",
+        )
+    )
+    node = region_mod.make_region_node(intake, client.laws())
+
+    update = node(_state(conversation=list(conversation), topic_id="t7", turn_no=7))
+
+    assert update["switch_raw"] == "new"
+    assert update["topic_switch"] == "continue", "同事项仅换地区槽位，环节一规则 3 不许换话题"
+    assert update["topic_id"] == "t7"
+    assert "topic_summaries" not in update, "没离开活跃话题，摘要不落账"
+    assert update["history"] == [
+        ("user", "深圳电动自行车上牌需要什么材料"),
+        ("assistant", "（本轮按「深圳」的规定作答）答案：深圳电动自行车上牌需要什么材料"),
+    ]
+
+
+def test_a_true_new_matter_survives_the_slot_gate() -> None:
+    client = AgentStubService()
+    conversation = [_memory("深圳电动自行车上牌需要什么材料", "t7", 7)]
+    intake = AgentStubLLM(
+        intake=_intake(
+            "new",
+            query="广州电动自行车载人怎么处罚",
+            summary="问深圳电动自行车上牌材料；按深圳",
+            region="?",
+        )
+    )
+    node = region_mod.make_region_node(intake, client.laws())
+
+    update = node(_state(conversation=list(conversation), topic_id="t7", turn_no=7))
+
+    assert update["switch_raw"] == "new"
+    assert update["topic_switch"] == "new", "真换事项不许被闸拉回旧话题"
+    assert update["topic_id"] == "t8"
+    assert update["topic_summaries"] == {"t7": "问深圳电动自行车上牌材料；按深圳"}
+
+
+def test_the_slot_gate_reads_the_active_summary_first() -> None:
+    client = AgentStubService()
+    conversation = [_memory("最早问的那件事", "t7", 7)]
+    intake = AgentStubLLM(intake=_intake("new", query="广州电动自行车上牌需要什么材料", region="?"))
+    node = region_mod.make_region_node(intake, client.laws())
+
+    update = node(
+        _state(
+            conversation=list(conversation),
+            topic_id="t7",
+            turn_no=7,
+            topic_summaries={"t7": "深圳电动自行车上牌需要什么材料"},
+        )
+    )
+
+    assert update["switch_raw"] == "new"
+    assert update["topic_switch"] == "continue", "有摘要时以摘要为头，不被旧问题头挡住"
+    assert update["topic_id"] == "t7"
+
+
+def test_the_slot_gate_only_touches_plain_new_turns() -> None:
+    client = AgentStubService()
+    conversation = [_memory("深圳电动自行车上牌需要什么材料", "t1", 1)]
+    resume = AgentStubLLM(
+        intake=_intake("resume", query="广州电动自行车上牌需要什么材料", topic="t1", region="?")
+    )
+    node = region_mod.make_region_node(resume, client.laws())
+    update = node(_state(conversation=list(conversation), topic_id="t1", turn_no=1))
+    assert update["topic_switch"] == "resume", "闸只认 new，resume 原样穿过"
+
+    short = AgentStubLLM(intake=_intake("new", query="那记分呢", region="深圳"))
+    node = region_mod.make_region_node(short, client.laws())
+    update = node(_state(conversation=[_memory("那记分呢", "t1", 1)], topic_id="t1", turn_no=1))
+    assert update["topic_switch"] == "new", "短头的相似度不稳，不参与闸判"
+    assert update["topic_id"] == "t2"
+
+    empty = AgentStubLLM(intake=_intake("new", region="深圳"))
+    node = region_mod.make_region_node(empty, client.laws())
+    update = node(_state(conversation=list(conversation), topic_id="t1", turn_no=1))
+    assert update["topic_switch"] == "new", "没有改写就没有可比对的问句"
+    assert update["topic_id"] == "t2"
+
+
 def test_the_intake_stage_runs_every_turn_with_a_model() -> None:
     client = AgentStubService()
     intake = AgentStubLLM(intake=_intake("new", query="深圳醉驾怎么罚", region="深圳"))

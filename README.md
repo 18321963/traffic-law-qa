@@ -198,7 +198,7 @@ npm run dev               # Vite 开发服务器 → http://localhost:5173；/qa
 ### 测试
 
 ```powershell
-python -m pytest                # 388 条离线用例，约 30 秒；不碰 Milvus、不调模型
+python -m pytest                # 427 条离线用例，约 40 秒；不碰 Milvus、不调模型
 ruff check .
 ```
 
