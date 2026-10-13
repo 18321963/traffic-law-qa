@@ -231,12 +231,14 @@ class AgentStubLLM:
         self.tokens = tokens
         self.prompts: list[list[dict]] = []
         self.offered: list[set[str]] = []
+        self.names: list[str] = []
 
     def chat(self, messages, *, tools=None, temperature=None, name="llm.chat"):
         if not self.available:
             raise AssertionError("这个模型不可用，不该被调用")
         self.prompts.append(list(messages))
         self.offered.append({tool["function"]["name"] for tool in tools or ()})
+        self.names.append(name)
         reply = self._replies.pop(0) if self._replies else {"role": "assistant", "content": "够了"}
         finish = self._finishes.pop(0) if self._finishes else "stop"
         return reply, {"total_tokens": self.tokens}, finish

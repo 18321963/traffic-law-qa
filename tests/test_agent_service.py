@@ -61,6 +61,35 @@ def _region(text: str, place: str | None = None) -> list[dict]:
     return [{"role": "assistant", "content": json.dumps(payload, ensure_ascii=False)}]
 
 
+def _intake(switch: str = "continue", *, intent: str = "other", query: str = "", topic: str = "") -> list[dict]:
+    return [
+        {
+            "role": "assistant",
+            "content": json.dumps(
+                {"switch": switch, "intent": intent, "query": query, "topic_id": topic},
+                ensure_ascii=False,
+            ),
+        }
+    ]
+
+
+def _memory(question: str, topic_id: str, turn: int, *, intent: str = "other") -> dict:
+    return {
+        "question": question,
+        "answer": f"答案：{question}",
+        "region": "深圳",
+        "topic_id": topic_id,
+        "intent": intent,
+        "turn": turn,
+    }
+
+
+class _BoomLLM(AgentStubLLM):
+
+    def chat(self, messages, **kwargs):
+        raise RuntimeError("入口模型炸了")
+
+
 def _review(*judgments: bool) -> list[dict]:
     payload = {"judgments": [{"n": n, "supported": ok} for n, ok in enumerate(judgments, start=1)]}
     return [{"role": "assistant", "content": json.dumps(payload, ensure_ascii=False)}]
@@ -186,6 +215,248 @@ def test_a_law_name_reply_from_the_region_model_reads_as_unknown() -> None:
 
     assert update["region"] == region_mod.REGION_UNKNOWN
     assert update["region_scope"] == ()
+
+
+def test_the_topic_id_folding_table_holds_line_by_line() -> None:
+    client = AgentStubService()
+    conversation = [
+        _memory("醉酒驾驶怎么处罚", "t1", 1),
+        _memory("那记分呢", "t2", 2, intent="followup"),
+    ]
+    cases = [
+        (_intake("continue", intent="followup", query="深圳醉驾记分"), "t2"),
+        (_intake("resume", query="醉驾怎么处罚", topic="t1"), "t1"),
+        (_intake("resume", query="旧问题", topic="t9"), "t2"),
+        (_intake("new", query="外地车限行"), "t3"),
+        (_intake("unsure"), "t2"),
+    ]
+    for replies, expected in cases:
+        node = region_mod.make_region_node(
+            AgentStubLLM(_region("深圳")), client.laws(), intake_llm=AgentStubLLM(replies)
+        )
+        update = node(_state(conversation=list(conversation), topic_id="t2", turn_no=2))
+        assert update["topic_id"] == expected, replies
+
+
+def test_the_intake_stage_only_runs_with_history_and_a_model() -> None:
+    client = AgentStubService()
+    intake = AgentStubLLM(_intake("new", query="深圳醉驾怎么罚"))
+    node = region_mod.make_region_node(AgentStubLLM(_region("深圳")), client.laws(), intake_llm=intake)
+
+    update = node(_state())
+
+    assert intake.prompts == []
+    assert update["query_rewrite"] == ""
+    assert update["topic_switch"] == ""
+    assert update["intent"] == ""
+    assert update["topic_id"] == "t1"
+    assert update["turn_no"] == 1
+
+    off = AgentStubLLM(_intake("new"), available=False)
+    node_off = region_mod.make_region_node(
+        AgentStubLLM(_region("深圳")), client.laws(), intake_llm=off
+    )
+    update_off = node_off(_state(conversation=[_memory("旧问", "t1", 1)], topic_id="t1"))
+    assert off.prompts == []
+    assert update_off["topic_id"] == "t1"
+
+    plain = region_mod.make_region_node(AgentStubLLM(_region("深圳")), client.laws())
+    assert plain(_state())["query_rewrite"] == ""
+
+
+def test_the_intake_stage_rewrites_before_the_region_stage() -> None:
+    client = AgentStubService()
+    region = AgentStubLLM(_region("深圳"))
+    intake = AgentStubLLM(_intake("continue", intent="followup", query="深圳醉酒驾驶记多少分"))
+    node = region_mod.make_region_node(region, client.laws(), intake_llm=intake)
+
+    update = node(
+        _state(conversation=[_memory("醉酒驾驶怎么处罚", "t1", 1)], topic_id="t1", turn_no=1)
+    )
+
+    assert update["query_rewrite"] == "深圳醉酒驾驶记多少分"
+    assert update["topic_switch"] == "continue"
+    assert update["intent"] == "followup"
+    assert update["topic_id"] == "t1"
+    assert update["turn_no"] == 2
+
+    ask = intake.prompts[0]
+    assert ask[0]["role"] == "system"
+    assert {"role": "user", "content": "醉酒驾驶怎么处罚"} in ask
+    assert "当前活跃话题：t1。" in ask[-1]["content"]
+    assert "本轮用户问题：在深圳，醉酒驾驶机动车怎么处罚？" in ask[-1]["content"]
+    assert "较早的其他话题" not in ask[-1]["content"]
+
+    user = region.prompts[0][-1]
+    assert user["content"] == (
+        "深圳醉酒驾驶记多少分\n\n（本轮为追问；问句可能已是入口改写后的自包含写法）"
+        "\n\n（上文已定地区，未新点地区时沿用）"
+    )
+
+
+def test_the_region_signals_follow_the_switch_and_the_intent() -> None:
+    client = AgentStubService()
+    cases = [
+        (_intake("new", query="外地车限行"), "（新话题，历史地区不沿用）", "（上文已定地区"),
+        (_intake("continue", intent="challenge"), "（上文已定地区，未新点地区时沿用）", "（新话题"),
+    ]
+    for replies, wanted, avoided in cases:
+        region = AgentStubLLM(_region("深圳"))
+        node = region_mod.make_region_node(region, client.laws(), intake_llm=AgentStubLLM(replies))
+        node(_state(conversation=[_memory("旧问", "t1", 1)], topic_id="t1", turn_no=1))
+        user = region.prompts[0][-1]["content"]
+        assert wanted in user
+        assert avoided not in user
+
+
+def test_a_broken_intake_falls_back_to_the_plain_turn() -> None:
+    client = AgentStubService()
+    junk = [
+        _BoomLLM(),
+        AgentStubLLM([{"role": "assistant", "content": "不是 JSON"}]),
+    ]
+    for intake in junk:
+        node = region_mod.make_region_node(
+            AgentStubLLM(_region("深圳")), client.laws(), intake_llm=intake
+        )
+        update = node(_state(conversation=[_memory("旧问", "t1", 1)], topic_id="t1", turn_no=1))
+
+        assert update["topic_id"] == "t1", intake
+        assert update["turn_no"] == 2
+        assert update["query_rewrite"] == ""
+        assert update["topic_switch"] == ""
+        assert update["intent"] == ""
+        assert update["history"] == [
+            ("user", "旧问"),
+            ("assistant", "（本轮按「深圳」的规定作答）答案：旧问"),
+        ]
+
+
+def test_unknown_enum_values_land_on_unsure_and_other() -> None:
+    client = AgentStubService()
+    intake = AgentStubLLM(
+        [
+            {
+                "role": "assistant",
+                "content": '{"switch": "飞到火星", "intent": "未知", "query": "q", "topic_id": "t9"}',
+            }
+        ]
+    )
+    node = region_mod.make_region_node(
+        AgentStubLLM(_region("深圳")), client.laws(), intake_llm=intake
+    )
+
+    update = node(_state(conversation=[_memory("旧问", "t1", 1)], topic_id="t1", turn_no=1))
+
+    assert update["topic_switch"] == "unsure"
+    assert update["intent"] == "other"
+    assert update["query_rewrite"] == "q"
+    assert update["topic_id"] == "t1"
+
+
+def test_a_missing_region_model_still_carries_the_view_and_the_topic() -> None:
+    client = AgentStubService()
+    intake = AgentStubLLM(_intake("continue", intent="followup", query="深圳醉驾记多少分"))
+    node = region_mod.make_region_node(
+        AgentStubLLM(_region("深圳"), available=False), client.laws(), intake_llm=intake
+    )
+
+    update = node(
+        _state(conversation=[_memory("醉酒驾驶怎么处罚", "t1", 1)], topic_id="t1", turn_no=1)
+    )
+
+    assert update["region"] == region_mod.REGION_UNKNOWN
+    assert update["region_scope"] == ()
+    assert update["topic_id"] == "t1"
+    assert update["query_rewrite"] == "深圳醉驾记多少分"
+    assert update["history"] == [
+        ("user", "醉酒驾驶怎么处罚"),
+        ("assistant", "（本轮按「深圳」的规定作答）答案：醉酒驾驶怎么处罚"),
+    ]
+    assert update["usage_extra"].value == [{"total_tokens": 3}]
+
+
+def test_the_turn_counter_steps_over_seen_topic_numbers() -> None:
+    client = AgentStubService()
+    node = region_mod.make_region_node(
+        AgentStubLLM(_region("深圳")), client.laws(), intake_llm=AgentStubLLM(_intake("new"))
+    )
+
+    update = node(_state(conversation=[_memory("老问", "t5", 5)]))
+
+    assert update["turn_no"] == 6
+    assert update["topic_id"] == "t6"
+
+
+def test_the_memory_view_switches_to_the_active_topic() -> None:
+    client = AgentStubService()
+    conversation = [
+        _memory("醉驾怎么处罚", "t1", 1),
+        _memory("记分呢", "t1", 2, intent="followup"),
+        _memory("电动车上牌", "t2", 3),
+        _memory("电池着火怎么赔", "", 4),
+    ]
+    intake = AgentStubLLM(_intake("continue", intent="followup", query="上牌要多少钱"))
+    node = region_mod.make_region_node(
+        AgentStubLLM(_region("深圳")), client.laws(), intake_llm=intake
+    )
+
+    update = node(_state(conversation=list(conversation), topic_id="t2", turn_no=4))
+
+    assert update["history"] == [
+        ("user", "电动车上牌"),
+        ("assistant", "（本轮按「深圳」的规定作答）答案：电动车上牌"),
+        ("user", "电池着火怎么赔"),
+        ("assistant", "（本轮按「深圳」的规定作答）答案：电池着火怎么赔"),
+    ]
+    ask = intake.prompts[0][-1]["content"]
+    assert "较早的其他话题（只有索引，没有原文）：" in ask
+    assert "（仅列最近 10 个话题；更早话题未列出、无法回访，指代不到时按 new 处理）" in ask
+    assert "[t1] 醉驾怎么处罚（共 2 轮，最近第 2 轮）" in ask
+    assert "[?]" not in ask
+
+
+def test_stale_unnumbered_turns_collapse_into_a_tail_line() -> None:
+    client = AgentStubService()
+    conversation = [_memory(f"旧问{index}", "", index + 1) for index in range(4)]
+    conversation.append(_memory("新话题", "t1", 5))
+    intake = AgentStubLLM(_intake("continue", query="继续问"))
+    node = region_mod.make_region_node(
+        AgentStubLLM(_region("深圳")), client.laws(), intake_llm=intake
+    )
+
+    update = node(_state(conversation=list(conversation), topic_id="t1", turn_no=5))
+
+    assert [content for role, content in update["history"] if role == "user"] == [
+        "旧问2",
+        "旧问3",
+        "新话题",
+    ]
+    ask = intake.prompts[0][-1]["content"]
+    assert "[?] 更早 2 轮" in ask
+    assert ask.index("[?] 更早 2 轮") > ask.index("仅列最近")
+
+
+def test_without_an_active_topic_the_view_is_the_plain_window() -> None:
+    client = AgentStubService()
+    conversation = [_memory(f"第{index}问", "", index) for index in range(1, 5)]
+    intake = AgentStubLLM(_intake("new", query="全新问题"))
+    node = region_mod.make_region_node(
+        AgentStubLLM(_region("深圳")), client.laws(), intake_llm=intake
+    )
+
+    update = node(_state(conversation=list(conversation)))
+
+    assert [content for role, content in update["history"] if role == "user"] == [
+        "第2问",
+        "第3问",
+        "第4问",
+    ]
+    assert update["turn_no"] == 5
+    assert update["topic_id"] == "t5"
+    ask = intake.prompts[0][-1]["content"]
+    assert "当前没有活跃话题。" in ask
+    assert "较早的其他话题" not in ask
 
 
 def test_the_agent_prompt_lists_the_laws_the_service_reported() -> None:

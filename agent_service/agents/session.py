@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 import threading
 from collections.abc import Iterator, Sequence
 from typing import Any
@@ -20,12 +21,31 @@ from ..storage import open_sessions_db
 __all__ = ["open_sessions"]
 
 
+def _prune_schema_ok(conn: sqlite3.Connection) -> bool:
+    required = {"thread_id", "checkpoint_ns", "checkpoint_id"}
+    try:
+        for table in ("checkpoints", "writes"):
+            columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if not required <= columns:
+                return False
+    except sqlite3.Error:
+        return False
+    return True
+
+
 class _LockedSaver(BaseCheckpointSaver):
 
     def __init__(self, inner: SqliteSaver, conn: sqlite3.Connection) -> None:
         self._inner = inner
         self._conn = conn
         self._lock = threading.Lock()
+        self._prune_ok = _prune_schema_ok(conn)
+        if not self._prune_ok:
+            print(
+                "[agent] prune disabled: sessions.db schema missing"
+                " thread_id/checkpoint_ns/checkpoint_id",
+                file=sys.stderr,
+            )
         super().__init__(serde=inner.serde)
 
     def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
@@ -93,6 +113,34 @@ class _LockedSaver(BaseCheckpointSaver):
         with self._lock:
             self._conn.commit()
             self._conn.execute("VACUUM")
+
+    def prune(self, thread_ids: Sequence[str], *, strategy: str = "keep_latest") -> None:
+        with self._lock:
+            if strategy == "delete":
+                for thread_id in thread_ids:
+                    self._inner.delete_thread(thread_id)
+                self._conn.commit()
+                return
+            if strategy != "keep_latest" or not self._prune_ok:
+                return
+            for thread_id in thread_ids:
+                kept = self._conn.execute(
+                    "SELECT checkpoint_ns, MAX(checkpoint_id) FROM checkpoints"
+                    " WHERE thread_id = ? GROUP BY checkpoint_ns",
+                    (thread_id,),
+                ).fetchall()
+                for checkpoint_ns, checkpoint_id in kept:
+                    self._conn.execute(
+                        "DELETE FROM writes WHERE thread_id = ? AND checkpoint_ns = ?"
+                        " AND checkpoint_id != ?",
+                        (thread_id, checkpoint_ns, checkpoint_id),
+                    )
+                    self._conn.execute(
+                        "DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ?"
+                        " AND checkpoint_id != ?",
+                        (thread_id, checkpoint_ns, checkpoint_id),
+                    )
+            self._conn.commit()
 
     def get_next_version(self, current: Any, channel: Any) -> Any:
         return self._inner.get_next_version(current, channel)

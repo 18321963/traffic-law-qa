@@ -19,14 +19,18 @@ from conftest import (  # noqa: E402
     AgentStubLLM,
     AgentStubService,
 )
+from langgraph.checkpoint.base import empty_checkpoint  # noqa: E402
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
+from langgraph.checkpoint.sqlite import SqliteSaver  # noqa: E402
 
 from agent_service.agents import region as region_mod  # noqa: E402
+from agent_service.agents import session as session_mod  # noqa: E402
 from agent_service.agents.errors import ResumeConflict, SessionUnsupported  # noqa: E402
 from agent_service.agents.graph import AgentRunner, make_run_config  # noqa: E402
 from agent_service.agents.region import HISTORY_ANSWER_CHARS  # noqa: E402
 from agent_service.agents.session import open_sessions  # noqa: E402
 from agent_service.prompts import REVIEW_DOWNGRADE_ANSWER  # noqa: E402
+from agent_service.storage import open_sessions_db  # noqa: E402
 
 ROAD_ID = "road_traffic_safety"
 PENALTY_ID = "shenzhen_penalty"
@@ -67,6 +71,18 @@ def _region(region: str, place: str = "") -> list[dict]:
     ]
 
 
+def _intake(switch: str = "continue", *, intent: str = "other", query: str = "", topic: str = "") -> list[dict]:
+    return [
+        {
+            "role": "assistant",
+            "content": json.dumps(
+                {"switch": switch, "intent": intent, "query": query, "topic_id": topic},
+                ensure_ascii=False,
+            ),
+        }
+    ]
+
+
 def _review(*judgments: bool) -> list[dict]:
     payload = {"judgments": [{"n": n, "supported": ok} for n, ok in enumerate(judgments, start=1)]}
     return [{"role": "assistant", "content": json.dumps(payload, ensure_ascii=False)}]
@@ -79,6 +95,7 @@ def _runner(
     region=("深圳", ""),
     llm=None,
     review_llm=None,
+    intake_llm=None,
     sessions=_MISSING,
     laws=_MISSING,
     cfg=None,
@@ -96,6 +113,7 @@ def _runner(
         review_llm=review_llm
         if review_llm is not None
         else AgentStubLLM(_review(True) * 4, model="stub-review"),
+        intake_llm=intake_llm,
         cfg=cfg or config.AgentConfig(max_steps=2, clarify=clarify, history_turns=history_turns),
         tracer=Tracer(),
         sessions=sessions,
@@ -254,7 +272,14 @@ def test_memory_survives_a_disabled_review() -> None:
 
     assert state["answer"].review is None
     assert state["conversation"] == [
-        {"question": QUESTION, "answer": "答案正文[依据1]", "region": "深圳"}
+        {
+            "question": QUESTION,
+            "answer": "答案正文[依据1]",
+            "region": "深圳",
+            "topic_id": "t1",
+            "intent": "",
+            "turn": 1,
+        }
     ]
 
 
@@ -549,7 +574,7 @@ def test_only_the_review_node_writes_the_conversation_channel() -> None:
     assert writers == set()
 
 
-def test_the_conversation_is_capped_and_truncated_to_n_turns() -> None:
+def test_every_turn_stays_in_the_conversation_intact() -> None:
     runner, _client = _runner(
         plan=_plan(6),
         cfg=config.AgentConfig(max_steps=2, history_turns=2),
@@ -558,13 +583,11 @@ def test_the_conversation_is_capped_and_truncated_to_n_turns() -> None:
 
     for index in range(6):
         state = runner.invoke(f"第 {index} 问", session_id="s1")
-        assert len(state["conversation"]) <= 2 * 2
 
     assert [entry["question"] for entry in state["conversation"]] == [
-        "第 3 问",
-        "第 4 问",
-        "第 5 问",
+        f"第 {index} 问" for index in range(6)
     ]
+    assert all(entry["answer"] == "答案正文[依据1]" for entry in state["conversation"])
 
 
 def test_an_injected_law_table_wins_over_the_service_laws() -> None:
@@ -636,3 +659,265 @@ def test_a_saver_without_vacuum_still_deletes() -> None:
     assert runner.delete_session("s1") is True
     assert saver.get_tuple({"configurable": {"thread_id": "s1"}}) is None
     assert runner.delete_session("s1") is False
+
+
+def test_a_follow_up_rides_the_rewrite_into_the_plan_and_the_generator() -> None:
+    intake = AgentStubLLM(
+        _intake("continue", intent="followup", query="深圳醉酒驾驶记多少分"), model="stub-intake"
+    )
+    runner, client = _runner(plan=_plan(2), intake_llm=intake)
+
+    runner.invoke(QUESTION, session_id="s1")
+    state = runner.invoke(FOLLOW_UP, session_id="s1")
+
+    assert state["query_rewrite"] == "深圳醉酒驾驶记多少分"
+    assert state["topic_switch"] == "continue"
+    assert state["intent"] == "followup"
+    assert state["topic_id"] == "t1"
+    assert state["turn_no"] == 2
+    planner = runner.llm.prompts[2]
+    assert planner[-1]["content"] == (
+        "深圳醉酒驾驶记多少分\n\n（入口已把用户问句整理为上面这句；用户原话：那记分呢？）"
+    )
+    asked = client.answers[-1]["question"]
+    assert asked.text == "深圳醉酒驾驶记多少分"
+    assert asked.history == ()
+
+
+def test_a_challenging_follow_up_hands_the_topic_view_to_the_generator() -> None:
+    intake = AgentStubLLM(
+        _intake("continue", intent="challenge", query="深圳醉驾真的吊销驾照吗"), model="stub-intake"
+    )
+    runner, client = _runner(plan=_plan(2), intake_llm=intake)
+
+    runner.invoke(QUESTION, session_id="s1")
+    runner.invoke(FOLLOW_UP, session_id="s1")
+
+    asked = client.answers[-1]["question"]
+    assert asked.text == "深圳醉驾真的吊销驾照吗"
+    assert asked.history == (
+        ("user", QUESTION),
+        ("assistant", "（本轮按「深圳」的规定作答）答案正文[依据1]"),
+    )
+
+
+def test_topics_stay_isolated_and_an_old_one_can_be_resumed() -> None:
+    intake = AgentStubLLM(
+        _intake("continue", intent="followup", query="深圳醉酒驾驶记多少分")
+        + _intake("new", intent="other", query="广州电动自行车上牌要什么材料")
+        + _intake("continue", intent="followup", query="广州电动自行车上牌要多少钱")
+        + _intake("resume", intent="other", query="深圳醉酒驾驶的处罚是什么", topic="t1"),
+        model="stub-intake",
+    )
+    runner, client = _runner(
+        plan=_plan(5),
+        intake_llm=intake,
+        review_llm=AgentStubLLM(_review(True) * 5, model="stub-review"),
+    )
+
+    runner.invoke(QUESTION, session_id="s1")
+    runner.invoke(FOLLOW_UP, session_id="s1")
+    runner.invoke("广州电动自行车上牌要什么材料？", session_id="s1")
+    runner.invoke("那要多少钱？", session_id="s1")
+    state = runner.invoke("回到醉驾那个，罚多少钱？", session_id="s1")
+
+    assert state["topic_id"] == "t1"
+    assert [entry["topic_id"] for entry in state["conversation"]] == ["t1", "t1", "t3", "t3", "t1"]
+
+    planner4 = runner.llm.prompts[6]
+    assert planner4[-1]["content"].startswith("广州电动自行车上牌要多少钱")
+    assert {"role": "user", "content": QUESTION} not in planner4
+    assert {"role": "user", "content": FOLLOW_UP} not in planner4
+    assert client.answers[3]["question"].history == ()
+
+    ask4 = intake.prompts[2][-1]["content"]
+    assert "[t1] 在深圳，醉酒驾驶机动车怎么处罚？（共 2 轮，最近第 2 轮）" in ask4
+
+    planner5 = runner.llm.prompts[8]
+    assert {"role": "user", "content": QUESTION} in planner5
+    assert {"role": "user", "content": "深圳醉酒驾驶记多少分"} in planner5
+    assert {"role": "user", "content": "广州电动自行车上牌要什么材料"} not in planner5
+    asked5 = client.answers[4]["question"]
+    assert asked5.text == "深圳醉酒驾驶的处罚是什么"
+    assert ("user", QUESTION) in asked5.history
+    assert ("user", "深圳醉酒驾驶记多少分") in asked5.history
+    assert ("user", "广州电动自行车上牌要什么材料") not in asked5.history
+
+    ask5 = intake.prompts[3][-1]["content"]
+    assert "当前活跃话题：t3。" in ask5
+    assert "[t1] 在深圳，醉酒驾驶机动车怎么处罚？（共 2 轮，最近第 2 轮）" in ask5
+
+
+def test_without_an_intake_the_generator_still_sees_the_plain_window() -> None:
+    runner, client = _runner(plan=_plan(2))
+
+    runner.invoke(QUESTION, session_id="s1")
+    runner.invoke(FOLLOW_UP, session_id="s1")
+
+    asked = client.answers[-1]["question"]
+    assert asked.text == FOLLOW_UP
+    assert asked.history == (
+        ("user", QUESTION),
+        ("assistant", "（本轮按「深圳」的规定作答）答案正文[依据1]"),
+    )
+
+
+def test_the_topic_window_keeps_only_the_last_three_turns() -> None:
+    intake = AgentStubLLM(
+        _intake("continue", query="问题的改写1")
+        + _intake("continue", query="问题的改写2")
+        + _intake("continue", query="问题的改写3")
+        + _intake("continue", query="问题的改写4"),
+        model="stub-intake",
+    )
+    runner, _client = _runner(
+        plan=_plan(5),
+        intake_llm=intake,
+        history_turns=3,
+        review_llm=AgentStubLLM(_review(True) * 5, model="stub-review"),
+    )
+
+    for index in range(5):
+        runner.invoke(f"第 {index} 问", session_id="s1")
+
+    planner5 = runner.llm.prompts[8]
+    users = [message["content"] for message in planner5 if message["role"] == "user"]
+    assert users[:-1] == ["问题的改写1", "问题的改写2", "问题的改写3"]
+    assert "第 0 问" not in "".join(users)
+
+
+def test_every_run_prunes_the_thread_to_a_single_checkpoint(tmp_path) -> None:
+    saver = open_sessions(str(tmp_path / "sessions.db"))
+    runner, _client = _runner(plan=_plan(3), sessions=saver)
+
+    for _ in range(3):
+        runner.invoke(QUESTION, session_id="s1")
+
+    kept = saver._conn.execute(
+        "SELECT COUNT(*) FROM checkpoints WHERE thread_id = 's1'"
+    ).fetchone()[0]
+    stale = saver._conn.execute(
+        "SELECT COUNT(*) FROM writes WHERE thread_id = 's1' AND checkpoint_id !="
+        " (SELECT MAX(checkpoint_id) FROM checkpoints WHERE thread_id = 's1')"
+    ).fetchone()[0]
+    saver.close()
+
+    assert kept == 1
+    assert stale == 0
+
+
+def _write_checkpoint(saver, thread_id: str, *, ns: str = "", task_id: str = "") -> str:
+    placed = saver.put(
+        {"configurable": {"thread_id": thread_id, "checkpoint_ns": ns}},
+        empty_checkpoint(),
+        {},
+        {},
+    )
+    if task_id:
+        saver.put_writes(placed, [("channel", task_id)], task_id=task_id)
+    return placed["configurable"]["checkpoint_id"]
+
+
+def test_prune_keeps_only_the_latest_checkpoint_per_namespace(tmp_path) -> None:
+    saver = open_sessions(str(tmp_path / "sessions.db"))
+    _write_checkpoint(saver, "t1", task_id="task-old")
+    latest = _write_checkpoint(saver, "t1", task_id="task-new")
+    _write_checkpoint(saver, "t1", ns="sub", task_id="task-sub")
+    _write_checkpoint(saver, "t2")
+
+    saver.prune(["t1"])
+
+    kept = saver._conn.execute(
+        "SELECT checkpoint_id FROM checkpoints WHERE thread_id = 't1' AND checkpoint_ns = ''"
+    ).fetchall()
+    assert kept == [(latest,)]
+    writes = saver._conn.execute(
+        "SELECT task_id FROM writes WHERE thread_id = 't1' AND checkpoint_ns = ''"
+    ).fetchall()
+    assert writes == [("task-new",)]
+    sub = saver._conn.execute(
+        "SELECT COUNT(*) FROM checkpoints WHERE thread_id = 't1' AND checkpoint_ns = 'sub'"
+    ).fetchone()[0]
+    assert sub == 1
+    other = saver._conn.execute(
+        "SELECT COUNT(*) FROM checkpoints WHERE thread_id = 't2'"
+    ).fetchone()[0]
+    assert other == 1
+    saver.close()
+
+
+def test_prune_is_idempotent(tmp_path) -> None:
+    saver = open_sessions(str(tmp_path / "sessions.db"))
+    _write_checkpoint(saver, "t1", task_id="task-old")
+    _write_checkpoint(saver, "t1", task_id="task-new")
+
+    def snapshot() -> tuple:
+        return (
+            saver._conn.execute("SELECT * FROM checkpoints ORDER BY 1, 2, 3").fetchall(),
+            saver._conn.execute("SELECT * FROM writes ORDER BY 1, 2, 3, 4").fetchall(),
+        )
+
+    saver.prune(["t1"])
+    after_first = snapshot()
+    saver.prune(["t1"])
+    assert snapshot() == after_first
+    saver.close()
+
+
+def test_prune_delete_strategy_wipes_the_threads(tmp_path) -> None:
+    saver = open_sessions(str(tmp_path / "sessions.db"))
+    _write_checkpoint(saver, "t1", task_id="task-a")
+    _write_checkpoint(saver, "t2")
+    _write_checkpoint(saver, "t3")
+
+    saver.prune(["t1", "t2"], strategy="delete")
+
+    ghosts = saver._conn.execute(
+        "SELECT thread_id FROM checkpoints ORDER BY thread_id"
+    ).fetchall()
+    assert ghosts == [("t3",)]
+    assert saver._conn.execute("SELECT COUNT(*) FROM writes").fetchone()[0] == 0
+    saver.close()
+
+
+def test_a_foreign_schema_disables_prune_and_says_so(tmp_path, capsys) -> None:
+    path = str(tmp_path / "sessions.db")
+    conn = open_sessions_db(path)
+    SqliteSaver(conn).setup()
+    conn.executescript(
+        "DROP TABLE writes;"
+        " DROP TABLE checkpoints;"
+        " CREATE TABLE checkpoints (thread_id TEXT);"
+        " CREATE TABLE writes (thread_id TEXT);"
+    )
+    saver = session_mod._LockedSaver(SqliteSaver(conn), conn)
+
+    assert "prune disabled" in capsys.readouterr().err
+    saver.prune(["t1"])
+    assert saver._conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] == 0
+    saver.close()
+
+
+def test_prune_failures_never_take_a_run_down(capsys) -> None:
+    runner, _client = _runner()
+
+    class _Unavailable:
+        def prune(self, thread_ids, *, strategy="keep_latest"):
+            raise NotImplementedError
+
+    class _Broken:
+        def prune(self, thread_ids, *, strategy="keep_latest"):
+            raise RuntimeError("库坏了")
+
+    runner.sessions = _Unavailable()
+    runner._prune("s1")
+    assert capsys.readouterr().err == ""
+
+    runner.sessions = _Broken()
+    runner._prune("s1")
+    assert "[agent] prune skipped" in capsys.readouterr().err
+
+    runner.sessions = None
+    runner._prune("s1")
+    runner._prune(None)
+    assert capsys.readouterr().err == ""

@@ -362,8 +362,55 @@ def test_the_reviewed_prompt_fixes_stay_fixed() -> None:
         "防幻觉句又被粘回一句：两个分句之间必须有句号断开，否则「已命中」会被读成允许复述的内容"
     )
     assert "续查时，查询里带上法规名片段" in text, (
-        "规则 5 少了「续查时」限定，与规则 2「第一次检索一字不改用原话」字面冲突"
+        "规则 5 少了「续查时」限定，与规则 2「第一次检索用入口给出的自包含查询」字面冲突"
     )
+    assert "第一次检索用入口给出的自包含查询" in text, (
+        "规则 2 退回「一字不改用原话」了？入口改写会被规划的第一枪无视，指代原样打进检索"
+    )
+
+
+def test_the_intake_prompt_keeps_its_judgment_axes() -> None:
+    pytest.importorskip("langgraph", reason="agent extra 没装：只跑结构检查")
+    from agent_service import prompts
+
+    text = prompts.INTAKE_SYSTEM_PROMPT
+    order = ["**一、话题切换判断**", "**二、意图识别**", "**三、改写**", "**四、话题匹配**"]
+    positions = [text.find(section) for section in order]
+    assert all(position >= 0 for position in positions), "入口提示词的四环节丢了"
+    assert positions == sorted(positions), "判话题 → 意图 → 改写 → 匹配 的先后不能乱"
+
+    for axis in (
+        "1. 核心事项（违法情形 / 业务事项：醉驾、超速、上牌、记分……）—— 判断的主轴。",
+        "2. 法规名与条款号 —— 只有与核心事项同时变，才判为换话题",
+        "3. 条件槽位（地区 / 车型 / 驾照类型 / 场景）—— 槽位变化一律不触发换话题。",
+        "4. 意图目标（问处罚 / 问流程 / 问对比 / 问条文）—— 不单独触发换话题。",
+        "5. 实体（电动自行车、C1……）—— 看它是不是核心事项的一部分。",
+        "6. 最近活跃 —— 难分时取最近；拿不准按继续。",
+    ):
+        assert axis in text, f"入口提示词的同话题判断维度被动过：{axis}"
+
+    assert "（比如同一条处罚接着问「那广州呢」），仍是同一话题。" in text, (
+        "「只换法规名而事项延续＝同话题」的正例没了：那广州呢 这类追问会被判成新话题"
+    )
+    assert "continue（延续当前活跃话题）/ resume（回到索引里的某个旧话题）/" in text
+    assert "new（开了一个全新话题）/ unsure（拿不准，按继续处理）。" in text
+    assert "followup（追问）/ challenge（质疑）/ compare（对比）/" in text
+    assert "quote（要求引用原文）/ other（其他）。" in text
+    assert (
+        '{"switch": "continue", "intent": "followup", "query": "自包含问句", '
+        '"topic_id": "话题号 / new"}'
+    ) in text, "入口的 JSON 示例行变了：字段名和枚举取值在正文里都对不上就没人兜"
+
+
+def test_the_region_signal_lines_stay_verbatim() -> None:
+    pytest.importorskip("langgraph", reason="agent extra 没装：只跑结构检查")
+    from agent_service import prompts
+
+    assert (
+        prompts.REGION_SIGNAL_INTENT == "（本轮为{intent}；问句可能已是入口改写后的自包含写法）"
+    )
+    assert prompts.REGION_SIGNAL_NEW_TOPIC == "（新话题，历史地区不沿用）"
+    assert prompts.REGION_SIGNAL_INHERIT == "（上文已定地区，未新点地区时沿用）"
 
 
 def test_the_law_tool_description_hardcodes_no_corpus_counts() -> None:

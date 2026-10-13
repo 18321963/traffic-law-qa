@@ -35,7 +35,7 @@ __all__ = [
 _NO_EVIDENCE_STOP_NUDGE = (
     "你这一轮没有调用任何工具，而手上一条证据都还没有 ——「够了」这个判断此刻无凭无据，"
     "循环只会把它读成「模型说够了」直接去作答。请调用 search_law 查一次"
-    "（规则 2 的问法：一字不改地用用户的问题原文）。"
+    "（规则 2 的问法：用入口给出的自包含查询；入口没给出时用用户的问题原文）。"
 )
 
 _SKIP_DUPLICATE = (
@@ -87,8 +87,12 @@ def make_agent_node(llm: LLM, cfg: config.AgentConfig, laws: Sequence[LawInfo]):
                 % {"max_steps": max_steps, "law_count": law_count, "laws": laws_block},
             }
         ]
+        rewrite = str(state.get("query_rewrite") or "")
+        user_text = state["question"]
+        if rewrite:
+            user_text = f"{rewrite}\n\n（入口已把用户问句整理为上面这句；用户原话：{user_text}）"
         prompt.extend({"role": r, "content": c} for r, c in state.get("history") or ())
-        prompt.append({"role": "user", "content": state["question"]})
+        prompt.append({"role": "user", "content": user_text})
         prompt.extend(state.get("messages") or ())
 
         reply, usage, finish_reason = llm.chat(
@@ -252,6 +256,8 @@ def make_finalize_node(
 
     def finalize_node(state: AgentState) -> dict:
         active_top_k = state.get("top_k", config.retrieve_config().top_k)
+        rewrite = str(state.get("query_rewrite") or "")
+        query = rewrite or state["question"]
         logs = list(state.get("search_log") or ())
         extra: list[dict] = []
         notes: list[str] = []
@@ -260,9 +266,9 @@ def make_finalize_node(
             with observer.observation(
                 "兜底检索",
                 "retriever",
-                input={"query": state["question"], "top_k": active_top_k},
+                input={"query": query, "top_k": active_top_k},
             ) as span:
-                result = rag.search(state["question"], top_k=active_top_k)
+                result = rag.search(query, top_k=active_top_k)
                 span.update(output=retrieval_digest(result))
             logs = [result.to_dict()]
             extra = list(logs)
@@ -283,11 +289,10 @@ def make_finalize_node(
         )
         notes.extend(_trajectory_notes(state, merged, cfg))
 
-        question = Question(
-            text=state["question"],
-            history=tuple(tuple(pair) for pair in state.get("history") or ()),
-            top_k=active_top_k,
-        )
+        history = tuple(tuple(pair) for pair in state.get("history") or ())
+        if str(state.get("intent") or "") == "followup" and rewrite:
+            history = ()
+        question = Question(text=query, history=history, top_k=active_top_k)
         if state.get("stream_tokens") and hasattr(rag, "answer_stream"):
             from langgraph.config import get_stream_writer
 

@@ -44,7 +44,7 @@ def _laws_at_boot(client: RagClient) -> list[LawInfo]:
     except Exception as exc:  # noqa: BLE001
         print(
             f"[agent] 取法条清单失败（rag GET /laws）：{type(exc).__name__}: {exc} —— "
-            "先按空清单起，入口判地区时法规清单会是空的",
+            "先按空清单起，入口理解时法规清单会是空的",
             file=sys.stderr,
         )
         return []

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator, Sequence
 from typing import Literal
 from uuid import uuid4
@@ -56,7 +57,13 @@ def _step_detail(node: str, update: object) -> dict:
     if not isinstance(update, dict):
         return {}
     if node == "region":
-        return {"region": update.get("region"), "laws": len(update.get("region_scope") or ())}
+        return {
+            "region": update.get("region"),
+            "laws": len(update.get("region_scope") or ()),
+            "topic": update.get("topic_id"),
+            "switch": update.get("topic_switch"),
+            "intent": update.get("intent"),
+        }
     if node == "clarify":
         return {"region": update.get("region"), "laws": len(update.get("region_scope") or ())}
     if node == "agent":
@@ -93,6 +100,7 @@ def build_graph(
     cfg: config.AgentConfig,
     region_llm: LLM | None = None,
     review_llm: LLM | None = None,
+    intake_llm: LLM | None = None,
     tracer: Tracer | None = None,
     checkpointer=None,
     laws: Sequence[LawInfo] | None = None,
@@ -112,7 +120,9 @@ def build_graph(
         traced(
             tracer,
             "node.region",
-            make_region_node(region_llm, laws, history_turns=cfg.history_turns),
+            make_region_node(
+                region_llm, laws, history_turns=cfg.history_turns, intake_llm=intake_llm
+            ),
         ),
     )
     graph.add_node("clarify", traced(tracer, "node.clarify", make_clarify_node(laws)))
@@ -155,6 +165,7 @@ class AgentRunner:
         llm: LLM | None = None,
         region_llm: LLM | None = None,
         review_llm: LLM | None = None,
+        intake_llm: LLM | None = None,
         cfg: config.AgentConfig | None = None,
         tracer: Tracer | None = None,
         sessions=None,
@@ -168,6 +179,7 @@ class AgentRunner:
         self.llm = llm or build_llm(retries=self.cfg.retries, observer=self.tracer)
         self.region_llm = region_llm or self.llm
         self.review_llm = review_llm or self.region_llm
+        self.intake_llm = intake_llm
         self.sessions = sessions
         self._laws = None if laws is None else list(laws)
         self._graph = None
@@ -194,16 +206,19 @@ class AgentRunner:
 
             tracer = from_env()
         observer = tracer or Tracer()
+        llm = build_llm(retries=agent_cfg.retries, observer=observer)
         return cls(
             rag,
-            cfg=agent_cfg,
-            tracer=observer,
+            llm=llm,
             region_llm=build_llm(
                 config.region_llm_config(), retries=agent_cfg.retries, observer=observer
             ),
             review_llm=build_llm(
                 config.review_llm_config(), retries=agent_cfg.retries, observer=observer
             ),
+            intake_llm=llm,
+            cfg=agent_cfg,
+            tracer=observer,
             sessions=sessions,
             laws=laws,
         )
@@ -216,6 +231,7 @@ class AgentRunner:
                 cfg=self.cfg,
                 region_llm=self.region_llm,
                 review_llm=self.review_llm,
+                intake_llm=self.intake_llm,
                 tracer=self.tracer,
                 checkpointer=self.sessions,
                 laws=self._laws,
@@ -269,7 +285,19 @@ class AgentRunner:
             return None
         return getattr(snapshot, "values", None)
 
-    def _run(self, run_input, kwargs: dict, *, request=None) -> AgentState:
+    def _prune(self, sid: str | None) -> None:
+        if self.sessions is None or not sid:
+            return
+        try:
+            self.sessions.prune([sid])
+        except NotImplementedError:
+            return
+        except Exception as exc:  # noqa: BLE001
+            print(f"[agent] prune skipped: {exc}", file=sys.stderr)
+
+    def _run(
+        self, run_input, kwargs: dict, *, sid: str | None = None, request=None
+    ) -> AgentState:
         final: AgentState | None = None
         try:
             with self.tracer.span("invoke", root=True) as span:
@@ -277,6 +305,7 @@ class AgentRunner:
                 span.record(request if request is not None else run_input, final)
         finally:
             budget.record_state(final if final is not None else self._latest_state(kwargs))
+            self._prune(sid)
         return final
 
     def invoke(
@@ -289,7 +318,7 @@ class AgentRunner:
         query = question if isinstance(question, Question) else Question(text=question)
         kwargs, sid = self._config_kwargs(session_id)
         initial = self._initial(query, material_ids, session_id=sid or "", stream_tokens=False)
-        return self._run(initial, kwargs)
+        return self._run(initial, kwargs, sid=sid)
 
     def _stream_run(
         self, run_input, kwargs: dict, sid: str | None, *, request=None
@@ -323,6 +352,7 @@ class AgentRunner:
                         yield "step", {"node": node, **detail}
             finally:
                 budget.record_state(final)
+                self._prune(sid)
             span.record(request if request is not None else run_input, final)
         if paused:
             return
@@ -358,7 +388,9 @@ class AgentRunner:
         if self._degraded():
             return self.rag.ask(query)
         final = self._run(
-            self._initial(query, material_ids, session_id=sid or "", stream_tokens=False), kwargs
+            self._initial(query, material_ids, session_id=sid or "", stream_tokens=False),
+            kwargs,
+            sid=sid,
         )
         answer = final.get("answer")
         if answer is None:
@@ -377,7 +409,9 @@ class AgentRunner:
         if self._degraded():
             return "ok", {**self.rag.ask(query).to_dict(), "session_id": sid}
         final = self._run(
-            self._initial(query, material_ids, session_id=sid or "", stream_tokens=False), kwargs
+            self._initial(query, material_ids, session_id=sid or "", stream_tokens=False),
+            kwargs,
+            sid=sid,
         )
         return self._outcome(final, sid)
 
@@ -415,7 +449,7 @@ class AgentRunner:
         command, kwargs, sid = self._resume_input(session_id, value, stream_tokens=False)
         if self._degraded():
             raise QaError(RESUME_UNAVAILABLE_DETAIL)
-        final = self._run(command, kwargs, request={"resume": value, "session_id": sid})
+        final = self._run(command, kwargs, sid=sid, request={"resume": value, "session_id": sid})
         return self._outcome(final, sid)
 
     def resume_stream(self, session_id: str, value: dict) -> Iterator[tuple[str, dict]]:
@@ -448,9 +482,15 @@ class AgentRunner:
                 + (f"支撑 < {threshold:g} 降级转人工）" if threshold > 0 else "只打分不拦截）")
             )
         )
+        intake_state = (
+            f"入口理解（有历史时 1 次 {self.llm.model_name}：话题/意图/改写；"
+            f"判地区 1 次 {self.region_llm.model_name}，判不出则回问或不限地区）"
+            if self.intake_llm is not None
+            else f"入口判地区（1 次 {self.region_llm.model_name} 调用，判不出则回问或不限地区）"
+        )
         return (
             f"Agent：最多 {self.cfg.max_steps} 轮 | "
-            f"入口判地区（1 次 {self.region_llm.model_name} 调用，判不出则回问或不限地区） | "
+            f"{intake_state} | "
             f"{review_state} | "
             f"工具 {len(TOOLS)} 个（{'、'.join(tool['function']['name'] for tool in TOOLS)}） | "
             f"会话记忆：{'开（thread_id=session_id）' if self.sessions else '关'} | "
