@@ -94,8 +94,11 @@ def _graph_runner(graph: _StubGraph) -> AgentRunner:
 def _real_runner() -> AgentRunner:
     return AgentRunner(
         AgentStubService(),
-        llm=AgentStubLLM([dict(message) for message in PLAN], model="stub-agent"),
-        region_llm=AgentStubLLM(_region_line("national"), model="stub-region"),
+        llm=AgentStubLLM(
+            [dict(message) for message in PLAN],
+            model="stub-agent",
+            intake=_region_line("national"),
+        ),
         review_llm=AgentStubLLM(_review_line(True) * 4, model="stub-review"),
         cfg=config.AgentConfig(max_steps=2),
         tracer=Tracer(),
@@ -238,8 +241,11 @@ def test_a_real_run_keeps_the_ledger_equal_to_its_own_usage_events(tmp_path, mon
 def _clarify_runner(sessions) -> AgentRunner:
     return AgentRunner(
         AgentStubService(),
-        llm=AgentStubLLM([dict(message) for message in PLAN], model="stub-agent"),
-        region_llm=AgentStubLLM(_region_line("?", place="深圳"), model="stub-region"),
+        llm=AgentStubLLM(
+            [dict(message) for message in PLAN],
+            model="stub-agent",
+            intake=_region_line("?", place="深圳"),
+        ),
         review_llm=AgentStubLLM(_review_line(True) * 4, model="stub-review"),
         cfg=config.AgentConfig(max_steps=2, clarify=True),
         tracer=Tracer(),
@@ -247,7 +253,7 @@ def _clarify_runner(sessions) -> AgentRunner:
     )
 
 
-def test_a_clarify_interrupt_records_the_region_call(tmp_path, monkeypatch) -> None:
+def test_a_clarify_interrupt_records_the_intake_call(tmp_path, monkeypatch) -> None:
     ledger = tmp_path / "usage.db"
     monkeypatch.setattr(budget, "db_path", lambda: ledger)
     runner = _clarify_runner(InMemorySaver())

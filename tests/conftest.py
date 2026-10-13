@@ -222,9 +222,10 @@ class AgentStubService:
 class AgentStubLLM:
 
     def __init__(
-        self, replies=(), *, model="stub", available=True, finishes=(), tokens=3
+        self, replies=(), *, model="stub", available=True, finishes=(), tokens=3, intake=()
     ) -> None:
         self._replies = list(replies)
+        self._intake = list(intake)
         self._finishes = list(finishes)
         self.model_name = model
         self.available = available
@@ -232,13 +233,18 @@ class AgentStubLLM:
         self.prompts: list[list[dict]] = []
         self.offered: list[set[str]] = []
         self.names: list[str] = []
+        self.intake_prompts: list[list[dict]] = []
 
     def chat(self, messages, *, tools=None, temperature=None, name="llm.chat"):
         if not self.available:
             raise AssertionError("这个模型不可用，不该被调用")
+        self.names.append(name)
+        if name == "llm.intake":
+            self.intake_prompts.append(list(messages))
+            reply = self._intake.pop(0) if self._intake else {"role": "assistant", "content": "够了"}
+            return reply, {"total_tokens": self.tokens}, "stop"
         self.prompts.append(list(messages))
         self.offered.append({tool["function"]["name"] for tool in tools or ()})
-        self.names.append(name)
         reply = self._replies.pop(0) if self._replies else {"role": "assistant", "content": "够了"}
         finish = self._finishes.pop(0) if self._finishes else "stop"
         return reply, {"total_tokens": self.tokens}, finish

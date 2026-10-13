@@ -8,14 +8,7 @@ from rag_contracts.domain.laws import LawInfo
 from rag_contracts.domain.retrieval import REGION_UNKNOWN
 from rag_contracts.ports import LLM
 
-from ..prompts import (
-    INTAKE_SYSTEM_PROMPT,
-    REGION_OUTPUT_GUARD,
-    REGION_SIGNAL_INHERIT,
-    REGION_SIGNAL_INTENT,
-    REGION_SIGNAL_NEW_TOPIC,
-    REGION_SYSTEM_PROMPT,
-)
+from ..prompts import INTAKE_OUTPUT_GUARD, INTAKE_SYSTEM_PROMPT
 from .state import AgentState
 
 __all__ = [
@@ -48,14 +41,6 @@ INTAKE_INDEX_NOTE = "（仅列最近 {lines} 个话题；更早话题未列出�
 _NOT_A_PLACE = frozenset({"?", "？", "全国", "空串"})
 _SWITCH_VALUES = frozenset({"continue", "resume", "new", "unsure"})
 _INTENT_VALUES = frozenset({"followup", "challenge", "compare", "quote", "other"})
-_INHERIT_INTENTS = frozenset({"followup", "challenge", "compare", "quote"})
-_INTENT_LABELS = {
-    "followup": "追问",
-    "challenge": "质疑",
-    "compare": "对比",
-    "quote": "要求引用",
-    "other": "其他",
-}
 _TURN_RE = re.compile(r"^t(\d+)$")
 
 
@@ -216,13 +201,14 @@ def _topic_view(
 
 
 def _intake_prompt(
+    system: str,
     history: list[tuple[str, str]],
     index_lines: list[str],
     active: str,
     question: str,
     active_summary: str = "",
 ) -> list[dict]:
-    prompt: list[dict] = [{"role": "system", "content": INTAKE_SYSTEM_PROMPT}]
+    prompt: list[dict] = [{"role": "system", "content": system}]
     prompt.extend({"role": role, "content": content} for role, content in history)
     blocks: list[str] = []
     if index_lines:
@@ -231,6 +217,7 @@ def _intake_prompt(
     if active and active_summary:
         blocks.append(f"当前活跃话题既有摘要：{active_summary}（离开本话题时以它为底更新）")
     blocks.append(f"本轮用户问题：{question}")
+    blocks.append(INTAKE_OUTPUT_GUARD)
     prompt.append({"role": "user", "content": "\n\n".join(blocks)})
     return prompt
 
@@ -268,18 +255,6 @@ def _summaries_after_write(
     return {topic: value for topic, value in updated.items() if topic in keep}
 
 
-def _region_signals(parsed: dict) -> list[str]:
-    if not parsed:
-        return []
-    intent = str(parsed.get("intent") or "other")
-    signals = [REGION_SIGNAL_INTENT.format(intent=_INTENT_LABELS.get(intent, "其他"))]
-    if parsed.get("switch") == "new":
-        signals.append(REGION_SIGNAL_NEW_TOPIC)
-    elif intent in _INHERIT_INTENTS:
-        signals.append(REGION_SIGNAL_INHERIT)
-    return signals
-
-
 def _next_turn_no(state: AgentState) -> int:
     try:
         current = int(state.get("turn_no") or 0)
@@ -301,11 +276,10 @@ def make_region_node(
     laws: Sequence[LawInfo],
     *,
     history_turns: int = 3,
-    intake_llm: LLM | None = None,
 ):
     from langgraph.types import Overwrite
 
-    prompt_head = REGION_SYSTEM_PROMPT % {
+    prompt_head = INTAKE_SYSTEM_PROMPT % {
         "law_count": len(laws),
         "laws": "\n".join(f"- {law.law_name}" for law in laws),
     }
@@ -320,22 +294,31 @@ def make_region_node(
         summaries = dict(raw_summaries) if isinstance(raw_summaries, dict) else {}
 
         parsed: dict = {}
-        intake_usage: dict = {}
+        usage: dict = {}
         exposed: set[str] = set()
-        if intake_llm is not None and intake_llm.available and convo:
+        region, place = REGION_UNKNOWN, ""
+        if llm.available:
             pre_view, pre_index, exposed = _topic_view(entries, active, history_turns, summaries)
             try:
-                reply, intake_usage, _finish = intake_llm.chat(
+                reply, usage, _finish = llm.chat(
                     _intake_prompt(
-                        pre_view, pre_index, active, state["question"], summaries.get(active, "")
+                        prompt_head,
+                        pre_view,
+                        pre_index,
+                        active,
+                        state["question"],
+                        summaries.get(active, ""),
                     ),
                     temperature=0.0,
                     name="llm.intake",
                 )
-                parsed = _parse_intake(reply.get("content") or "")
+                content = reply.get("content") or ""
+                parsed = _parse_intake(content)
+                region, place = _parse_region(content)
             except Exception:  # noqa: BLE001
                 parsed = {}
-                intake_usage = {}
+                region, place = REGION_UNKNOWN, ""
+                usage = {}
 
         if parsed:
             topic_id = _fold_topic(parsed, active, turn_no, exposed)
@@ -366,27 +349,6 @@ def make_region_node(
         written = _summaries_after_write(entries, summaries, active, topic_id, parsed)
         if written is not None:
             reset["topic_summaries"] = written
-        carried = Overwrite([intake_usage] if intake_usage else [])
-        if not llm.available:
-            return {
-                **reset,
-                "region": REGION_UNKNOWN,
-                "region_scope": (),
-                "place": "",
-                "usage_extra": carried,
-            }
-
-        prompt: list[dict] = [{"role": "system", "content": prompt_head}]
-        prompt.extend({"role": role, "content": content} for role, content in history)
-        user_text = reset["query_rewrite"] or state["question"]
-        signals = _region_signals(parsed)
-        if signals:
-            user_text = "\n\n".join([user_text, *signals])
-        user_text = "\n\n".join([user_text, REGION_OUTPUT_GUARD])
-        prompt.append({"role": "user", "content": user_text})
-
-        reply, usage, _finish = llm.chat(prompt, temperature=0.0, name="llm.region")
-        region, place = _parse_region(reply.get("content") or "")
         if region in {law.law_name for law in laws}:
             region = REGION_UNKNOWN
         return {
@@ -394,7 +356,7 @@ def make_region_node(
             "region": region,
             "region_scope": law_scope(region, laws),
             "place": place,
-            "usage_extra": Overwrite([u for u in (intake_usage, usage) if u]),
+            "usage_extra": Overwrite([usage] if usage else []),
         }
 
     return region_node

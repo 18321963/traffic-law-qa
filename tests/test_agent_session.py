@@ -29,14 +29,13 @@ from agent_service.agents.errors import ResumeConflict, SessionUnsupported  # no
 from agent_service.agents.graph import AgentRunner, make_run_config  # noqa: E402
 from agent_service.agents.region import HISTORY_ANSWER_CHARS  # noqa: E402
 from agent_service.agents.session import open_sessions  # noqa: E402
-from agent_service.prompts import REVIEW_DOWNGRADE_ANSWER  # noqa: E402
+from agent_service.prompts import INTAKE_OUTPUT_GUARD, REVIEW_DOWNGRADE_ANSWER  # noqa: E402
 from agent_service.storage import open_sessions_db  # noqa: E402
 
 ROAD_ID = "road_traffic_safety"
 PENALTY_ID = "shenzhen_penalty"
 QUESTION = "在深圳，醉酒驾驶机动车怎么处罚？"
 FOLLOW_UP = "那记分呢？"
-REGION_GUARD = "\n\n只输出 JSON 对象（region / place 两个字段），不要回答问题本身。"
 
 _MISSING = object()
 
@@ -63,33 +62,27 @@ def _plan(turns: int) -> list[dict]:
     return [dict(message) for _ in range(turns) for message in PLAN]
 
 
-def _region(region: str, place: str = "") -> list[dict]:
-    return [
-        {
-            "role": "assistant",
-            "content": json.dumps({"region": region, "place": place}, ensure_ascii=False),
-        }
-    ]
-
-
 def _intake(
-    switch: str = "continue", *, intent: str = "other", query: str = "", topic: str = "", summary: str = ""
+    switch: str = "continue",
+    *,
+    intent: str = "other",
+    query: str = "",
+    topic: str = "",
+    summary: str = "",
+    region: str = "",
+    place: str = "",
 ) -> list[dict]:
-    return [
-        {
-            "role": "assistant",
-            "content": json.dumps(
-                {
-                    "switch": switch,
-                    "intent": intent,
-                    "query": query,
-                    "topic_id": topic,
-                    "summary": summary,
-                },
-                ensure_ascii=False,
-            ),
-        }
-    ]
+    payload = {
+        "switch": switch,
+        "intent": intent,
+        "query": query,
+        "topic_id": topic,
+        "summary": summary,
+    }
+    if region:
+        payload["region"] = region
+        payload["place"] = place
+    return [{"role": "assistant", "content": json.dumps(payload, ensure_ascii=False)}]
 
 
 def _review(*judgments: bool) -> list[dict]:
@@ -102,9 +95,9 @@ def _runner(
     client=None,
     plan=(),
     region=("深圳", ""),
+    intake=None,
     llm=None,
     review_llm=None,
-    intake_llm=None,
     sessions=_MISSING,
     laws=_MISSING,
     cfg=None,
@@ -115,14 +108,20 @@ def _runner(
     if sessions is _MISSING:
         sessions = InMemorySaver()
     extra = {} if laws is _MISSING else {"laws": laws}
+    if llm is None:
+        llm = AgentStubLLM(
+            list(plan),
+            model="stub-agent",
+            intake=list(intake)
+            if intake is not None
+            else _intake(region=region[0], place=region[1]),
+        )
     runner = AgentRunner(
         client,
-        llm=llm if llm is not None else AgentStubLLM(list(plan), model="stub-agent"),
-        region_llm=AgentStubLLM(_region(*region), model="stub-region"),
+        llm=llm,
         review_llm=review_llm
         if review_llm is not None
         else AgentStubLLM(_review(True) * 4, model="stub-review"),
-        intake_llm=intake_llm,
         cfg=cfg or config.AgentConfig(max_steps=2, clarify=clarify, history_turns=history_turns),
         tracer=Tracer(),
         sessions=sessions,
@@ -176,25 +175,27 @@ def test_the_second_turn_prompts_carry_the_first_qa() -> None:
     runner.invoke(FOLLOW_UP, session_id="s1")
 
     tagged = "（本轮按「深圳」的规定作答）答案正文[依据1]"
-    turn2_region = runner.region_llm.prompts[1]
-    assert {"role": "user", "content": QUESTION} in turn2_region
-    assert {"role": "assistant", "content": tagged} in turn2_region
-    assert turn2_region[-1] == {"role": "user", "content": FOLLOW_UP + REGION_GUARD}
+    turn2_intake = runner.llm.intake_prompts[1]
+    assert {"role": "user", "content": QUESTION} in turn2_intake
+    assert {"role": "assistant", "content": tagged} in turn2_intake
+    assert turn2_intake[-1]["content"].endswith(f"本轮用户问题：{FOLLOW_UP}\n\n{INTAKE_OUTPUT_GUARD}")
 
     turn2_agent = runner.llm.prompts[2]
     assert {"role": "user", "content": QUESTION} in turn2_agent
     assert {"role": "assistant", "content": tagged} in turn2_agent
 
 
-def test_a_first_turn_prompt_is_still_system_plus_question() -> None:
+def test_a_first_turn_intake_prompt_carries_no_history_messages() -> None:
     runner, _client = _runner(plan=PLAN)
 
     runner.invoke(QUESTION, session_id="s1")
 
-    prompt = runner.region_llm.prompts[0]
-    assert len(prompt) == 2
+    prompt = runner.llm.intake_prompts[0]
+    assert len(prompt) == 2, "首轮也发入口调用：system + 单条 user 块（无历史消息）"
     assert prompt[0]["role"] == "system"
-    assert prompt[-1] == {"role": "user", "content": QUESTION + REGION_GUARD}
+    assert "当前没有活跃话题。" in prompt[-1]["content"]
+    assert f"本轮用户问题：{QUESTION}" in prompt[-1]["content"]
+    assert prompt[-1]["content"].endswith(INTAKE_OUTPUT_GUARD)
 
 
 def test_input_history_is_normalized_into_the_first_turn_prompt() -> None:
@@ -203,10 +204,10 @@ def test_input_history_is_normalized_into_the_first_turn_prompt() -> None:
 
     runner.invoke(query, session_id="s1")
 
-    prompt = runner.region_llm.prompts[0]
+    prompt = runner.llm.intake_prompts[0]
     assert {"role": "user", "content": "醉驾怎么罚"} in prompt
     assert {"role": "assistant", "content": "答案A"} in prompt
-    assert prompt[-1] == {"role": "user", "content": FOLLOW_UP + REGION_GUARD}
+    assert prompt[-1]["content"].endswith(f"本轮用户问题：{FOLLOW_UP}\n\n{INTAKE_OUTPUT_GUARD}")
 
 
 def test_the_history_snippet_clips_long_answers() -> None:
@@ -216,7 +217,7 @@ def test_the_history_snippet_clips_long_answers() -> None:
     runner.invoke(FOLLOW_UP, session_id="s1")
 
     tag = "（本轮按「深圳」的规定作答）"
-    assistant = [m["content"] for m in runner.region_llm.prompts[1] if m["role"] == "assistant"]
+    assistant = [m["content"] for m in runner.llm.intake_prompts[1] if m["role"] == "assistant"]
     assert len(assistant) == 1
     assert assistant[0].startswith(tag)
     assert assistant[0].endswith("…")
@@ -286,7 +287,7 @@ def test_memory_survives_a_disabled_review() -> None:
             "answer": "答案正文[依据1]",
             "region": "深圳",
             "topic_id": "t1",
-            "intent": "",
+            "intent": "other",
             "turn": 1,
         }
     ]
@@ -386,21 +387,21 @@ def test_resuming_with_a_region_keeps_national_plus_that_local_law() -> None:
     assert values["conversation"][-1]["region"] == "深圳经济特区"
 
 
-def test_the_resolved_region_rides_the_history_into_the_next_region_prompt() -> None:
+def test_the_resolved_region_rides_the_history_into_the_next_intake_prompt() -> None:
     runner, _client = _runner(plan=_plan(2), clarify=True, region=("?", "深圳"))
 
     list(runner.stream(QUESTION, session_id="s1"))
     list(runner.resume_stream("s1", {"region": "深圳经济特区"}))
     list(runner.stream(FOLLOW_UP, session_id="s1"))
 
-    prompts = runner.region_llm.prompts
+    prompts = runner.llm.intake_prompts
     assert len(prompts) >= 2
     first, second = prompts[0], prompts[-1]
-    assert second[-1] == {"role": "user", "content": FOLLOW_UP + REGION_GUARD}
+    assert second[-1]["content"].endswith(f"本轮用户问题：{FOLLOW_UP}\n\n{INTAKE_OUTPUT_GUARD}")
     assert any(
         "（本轮按「深圳经济特区」的规定作答）" in message["content"] for message in second
     )
-    assert "已定地区" in second[0]["content"]
+    assert "已定地区" in second[0]["content"], "沿用与否的判定读的是入口提示词里的历史地区"
     assert all("（本轮按" not in message["content"] for message in first)
 
 
@@ -420,7 +421,7 @@ def test_the_off_library_note_does_not_stick_to_the_next_turn() -> None:
 
     list(runner.stream(QUESTION, session_id="s1"))
     list(runner.resume_stream("s1", {"region": "广州"}))
-    runner.region_llm._replies.append(_region("深圳", "深圳")[0])
+    runner.llm._intake.append(_intake(region="深圳", place="深圳")[0])
     state = runner.invoke(FOLLOW_UP, session_id="s1")
 
     assert state["region"] == "深圳"
@@ -605,7 +606,7 @@ def test_an_injected_law_table_wins_over_the_service_laws() -> None:
 
     runner.invoke(QUESTION, session_id="s1")
 
-    system = runner.region_llm.prompts[0][0]["content"]
+    system = runner.llm.intake_prompts[0][0]["content"]
     assert "海商法" in system
     assert ROAD not in system
 
@@ -671,10 +672,11 @@ def test_a_saver_without_vacuum_still_deletes() -> None:
 
 
 def test_a_follow_up_rides_the_rewrite_into_the_plan_and_the_generator() -> None:
-    intake = AgentStubLLM(
-        _intake("continue", intent="followup", query="深圳醉酒驾驶记多少分"), model="stub-intake"
+    runner, client = _runner(
+        plan=_plan(2),
+        intake=_intake("continue", region="深圳")
+        + _intake("continue", intent="followup", query="深圳醉酒驾驶记多少分", region="深圳"),
     )
-    runner, client = _runner(plan=_plan(2), intake_llm=intake)
 
     runner.invoke(QUESTION, session_id="s1")
     state = runner.invoke(FOLLOW_UP, session_id="s1")
@@ -694,10 +696,11 @@ def test_a_follow_up_rides_the_rewrite_into_the_plan_and_the_generator() -> None
 
 
 def test_a_challenging_follow_up_hands_the_topic_view_to_the_generator() -> None:
-    intake = AgentStubLLM(
-        _intake("continue", intent="challenge", query="深圳醉驾真的吊销驾照吗"), model="stub-intake"
+    runner, client = _runner(
+        plan=_plan(2),
+        intake=_intake("continue", region="深圳")
+        + _intake("continue", intent="challenge", query="深圳醉驾真的吊销驾照吗", region="深圳"),
     )
-    runner, client = _runner(plan=_plan(2), intake_llm=intake)
 
     runner.invoke(QUESTION, session_id="s1")
     runner.invoke(FOLLOW_UP, session_id="s1")
@@ -711,16 +714,25 @@ def test_a_challenging_follow_up_hands_the_topic_view_to_the_generator() -> None
 
 
 def test_topics_stay_isolated_and_an_old_one_can_be_resumed() -> None:
-    intake = AgentStubLLM(
-        _intake("continue", intent="followup", query="深圳醉酒驾驶记多少分")
-        + _intake("new", intent="other", query="广州电动自行车上牌要什么材料")
-        + _intake("continue", intent="followup", query="广州电动自行车上牌要多少钱")
-        + _intake("resume", intent="other", query="深圳醉酒驾驶的处罚是什么", topic="t1"),
-        model="stub-intake",
+    llm = AgentStubLLM(
+        _plan(5),
+        model="stub-agent",
+        intake=(
+            _intake("continue", region="深圳")
+            + _intake("continue", intent="followup", query="深圳醉酒驾驶记多少分", region="深圳")
+            + _intake("new", intent="other", query="广州电动自行车上牌要什么材料", region="深圳")
+            + _intake("continue", intent="followup", query="广州电动自行车上牌要多少钱", region="深圳")
+            + _intake(
+                "resume",
+                intent="other",
+                query="深圳醉酒驾驶的处罚是什么",
+                topic="t1",
+                region="深圳",
+            )
+        ),
     )
     runner, client = _runner(
-        plan=_plan(5),
-        intake_llm=intake,
+        llm=llm,
         review_llm=AgentStubLLM(_review(True) * 5, model="stub-review"),
     )
 
@@ -733,16 +745,16 @@ def test_topics_stay_isolated_and_an_old_one_can_be_resumed() -> None:
     assert state["topic_id"] == "t1"
     assert [entry["topic_id"] for entry in state["conversation"]] == ["t1", "t1", "t3", "t3", "t1"]
 
-    planner4 = runner.llm.prompts[6]
+    planner4 = llm.prompts[6]
     assert planner4[-1]["content"].startswith("广州电动自行车上牌要多少钱")
     assert {"role": "user", "content": QUESTION} not in planner4
     assert {"role": "user", "content": FOLLOW_UP} not in planner4
     assert client.answers[3]["question"].history == ()
 
-    ask4 = intake.prompts[2][-1]["content"]
+    ask4 = llm.intake_prompts[3][-1]["content"]
     assert "[t1] 在深圳，醉酒驾驶机动车怎么处罚？（共 2 轮，最近第 2 轮）" in ask4
 
-    planner5 = runner.llm.prompts[8]
+    planner5 = llm.prompts[8]
     assert {"role": "user", "content": QUESTION} in planner5
     assert {"role": "user", "content": "深圳醉酒驾驶记多少分"} in planner5
     assert {"role": "user", "content": "广州电动自行车上牌要什么材料"} not in planner5
@@ -752,23 +764,30 @@ def test_topics_stay_isolated_and_an_old_one_can_be_resumed() -> None:
     assert ("user", "深圳醉酒驾驶记多少分") in asked5.history
     assert ("user", "广州电动自行车上牌要什么材料") not in asked5.history
 
-    ask5 = intake.prompts[3][-1]["content"]
+    ask5 = llm.intake_prompts[4][-1]["content"]
     assert "当前活跃话题：t3。" in ask5
     assert "[t1] 在深圳，醉酒驾驶机动车怎么处罚？（共 2 轮，最近第 2 轮）" in ask5
 
 
 def test_the_summary_survives_the_checkpoint_round_trip() -> None:
-    intake = AgentStubLLM(
-        _intake(
-            "new",
-            intent="other",
-            query="广州电动自行车上牌要什么材料",
-            summary="问醉酒驾驶处罚；按深圳",
-        )
-        + _intake("continue", intent="followup", query="广州电动自行车上牌要多少钱"),
-        model="stub-intake",
+    llm = AgentStubLLM(
+        _plan(3),
+        model="stub-agent",
+        intake=(
+            _intake("continue", region="深圳")
+            + _intake(
+                "new",
+                intent="other",
+                query="广州电动自行车上牌要什么材料",
+                summary="问醉酒驾驶处罚；按深圳",
+                region="深圳",
+            )
+            + _intake(
+                "continue", intent="followup", query="广州电动自行车上牌要多少钱", region="深圳"
+            )
+        ),
     )
-    runner, _client = _runner(plan=_plan(3), intake_llm=intake)
+    runner, _client = _runner(llm=llm)
 
     runner.invoke(QUESTION, session_id="s1")
     state = runner.invoke("广州电动自行车上牌要什么材料？", session_id="s1")
@@ -782,20 +801,26 @@ def test_the_summary_survives_the_checkpoint_round_trip() -> None:
     assert held["topic_summaries"] == {"t1": "问醉酒驾驶处罚；按深圳"}, (
         "没写摘要的轮次不能把通道带回空：checkpoint 里要留着旧摘要"
     )
-    ask3 = intake.prompts[1][-1]["content"]
+    ask3 = llm.intake_prompts[2][-1]["content"]
     assert "[t1] 问醉酒驾驶处罚；按深圳（共 1 轮，最近第 1 轮）" in ask3, (
         "下一轮入口要能看见沉降后的摘要，而不是起点问题的 80 字截图"
     )
 
 
-def test_without_an_intake_the_generator_still_sees_the_plain_window() -> None:
-    runner, client = _runner(plan=_plan(2))
+def test_a_broken_intake_falls_back_to_the_plain_window_for_the_generator() -> None:
+    llm = AgentStubLLM(
+        _plan(2),
+        model="stub-agent",
+        intake=_intake("continue", region="深圳")
+        + [{"role": "assistant", "content": "不是 JSON"}],
+    )
+    runner, client = _runner(llm=llm)
 
     runner.invoke(QUESTION, session_id="s1")
     runner.invoke(FOLLOW_UP, session_id="s1")
 
     asked = client.answers[-1]["question"]
-    assert asked.text == FOLLOW_UP
+    assert asked.text == FOLLOW_UP, "入口降级时生成侧看原话"
     assert asked.history == (
         ("user", QUESTION),
         ("assistant", "（本轮按「深圳」的规定作答）答案正文[依据1]"),
@@ -803,16 +828,13 @@ def test_without_an_intake_the_generator_still_sees_the_plain_window() -> None:
 
 
 def test_the_topic_window_keeps_only_the_last_three_turns() -> None:
-    intake = AgentStubLLM(
-        _intake("continue", query="问题的改写1")
-        + _intake("continue", query="问题的改写2")
-        + _intake("continue", query="问题的改写3")
-        + _intake("continue", query="问题的改写4"),
-        model="stub-intake",
-    )
     runner, _client = _runner(
         plan=_plan(5),
-        intake_llm=intake,
+        intake=_intake("continue", region="深圳")
+        + _intake("continue", query="问题的改写1", region="深圳")
+        + _intake("continue", query="问题的改写2", region="深圳")
+        + _intake("continue", query="问题的改写3", region="深圳")
+        + _intake("continue", query="问题的改写4", region="深圳"),
         history_turns=3,
         review_llm=AgentStubLLM(_review(True) * 5, model="stub-review"),
     )

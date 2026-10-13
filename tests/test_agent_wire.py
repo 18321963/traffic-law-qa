@@ -35,8 +35,17 @@ def _call(call_id: str, name: str, **arguments) -> dict:
     return {"role": "assistant", "content": "", "tool_calls": [_tool_call(call_id, name, arguments)]}
 
 
-def _region(text: str, place: str = "") -> list[dict]:
-    payload = {"region": text, "place": place}
+def _intake(region: str = "", place: str = "") -> list[dict]:
+    payload = {
+        "switch": "continue",
+        "intent": "other",
+        "query": "",
+        "topic_id": "",
+        "summary": "",
+    }
+    if region:
+        payload["region"] = region
+        payload["place"] = place
     return [{"role": "assistant", "content": json.dumps(payload, ensure_ascii=False)}]
 
 
@@ -69,8 +78,12 @@ def _runner(remote, *, plan=None, region=("深圳", ""), llm=None, sessions=None
         cfg=config.AgentConfig(max_steps=2, clarify=clarify),
         llm=llm
         if llm is not None
-        else AgentStubLLM(list(plan or PLAN_THEN_ANSWER), model="stub-agent", tokens=7),
-        region_llm=AgentStubLLM(_region(*region), model="stub-region"),
+        else AgentStubLLM(
+            list(plan or PLAN_THEN_ANSWER),
+            model="stub-agent",
+            tokens=7,
+            intake=_intake(*region),
+        ),
         review_llm=AgentStubLLM(_review(True), model="stub-review"),
         tracer=Tracer(),
         sessions=sessions,

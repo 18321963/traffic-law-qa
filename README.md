@@ -123,7 +123,7 @@ Copy-Item .env.example .env     # 填 LLM_API_KEY
 
 - `LLM_API_KEY`（连同 `LLM_BASE_URL` / `LLM_MODEL`）：生成要用的 OpenAI 兼容端点。没有 key 也能跑 —— 生成层拒答，检索照常。
 - 嵌入与重排是本地权重，没有远端端点要配：从 ModelScope（或 HF）拉 `bge-m3` 与 `bge-reranker-v2-m3`，目录名照抄、各占一层（`法规知识库/models/bge-m3/`、`法规知识库/models/bge-reranker-v2-m3/`），合计约 4.6GB，拉一次之后检索不出网（权重目录不入库，clone 里没有）。只做 BM25 就不需要这两个 —— 不放不报错，检索就是纯 BM25。
-- 可选：`AGENT_REGION_*` / `AGENT_REVIEW_*` 给判地区与末端复核单独配模型；`LANGFUSE_*` 开上报；`BOCHA_API_KEY` 给联网检索（已实现、当前未挂进工具面）。
+- 可选：`AGENT_REVIEW_*` 给末端复核单独配模型（不配时复核就是主模型）；`LANGFUSE_*` 开上报；`BOCHA_API_KEY` 给联网检索（已实现、当前未挂进工具面）。
 - 检索侧还有一组 `RAG_*`（`RAG_TOP_K` 召回条数、`RAG_CANDIDATES` 候选池、`RAG_RERANK` 开关…），默认值都在 `.env.example` 里列着。
 - 换了嵌入权重会让索引对不上号，所以建库时把权重目录的指纹（文件名 + 大小 + mtime）记进索引快照，启动时核对：对不上就拒绝服务（`/health` 503 并说明差在哪），指向同一目录的 `POST /reindex` 或 `RAG_ALLOW_REBUILD=1` 可显式放行 —— 放行即重建一次，新快照写入新指纹。指纹是启发式，防误换不防篡改。老快照（没记指纹）不拦，只把 `/health` 标成 `weights=unknown` / `degraded=true`，重建一次就补上。
 - 指纹误报最常见的一种：模型目录是拷贝或解压来的，mtime 是拷贝那一刻而不是原始时间 —— 换机、重新拷贝都会翻新。真遇上了不用改代码，`RAG_ALLOW_REBUILD=1` 重建一次即可。
@@ -348,7 +348,7 @@ agent_service/
 
 ```
 问题（POST http://127.0.0.1:8001/qa，可带 session_id 记上下文）
-  → agents/region          入口理解（话题/意图/改写/摘要 → 判地区）→ 定法名范围
+  → agents/region          入口理解（每轮一次调用：话题 / 意图 / 改写 / 判地区）→ 定法名范围
   → agents/clarify         判不出地区才回问一句再答（开了 AGENT_CLARIFY 时）
   → 单节点循环             模型自己决定调哪个工具、调几轮
       ├─ search_law            混合检索（可多轮，结果按 parent_id 合并去重）
@@ -361,7 +361,7 @@ agent_service/
   → trace.py               决策链渲染（--trace / --timing / Langfuse）
 ```
 
-上面每一步要的检索、取条、材料，都经 `RagClient` 打到 rag 服务的 HTTP 面（`/qa?mode=search` · `/articles/lookup` · `/materials/search` · `/laws` · `/answer` · `/answer/stream`）—— 进程里没有第二个 `LegalRAG`，也没有 `rag_service` 的任何 import。检索调用带超时预算（`AGENT_TOOL_TIMEOUT`，默认 15 秒）：超时回执单列「检索超时」（与一般失败分开），交模型换招、不自动重试。请求带 `session_id` 时同一会话跨轮记忆（LangGraph checkpointer，落 `data/sessions.db`；有历史时入口先整理问句与话题、再判地区，记忆按话题切、离开话题时沉降 ≤60 字摘要）；开了 `AGENT_CLARIFY` 时，判不出地区的问题先中断问一句、由 resume 端点收尾（见「端点」）。
+上面每一步要的检索、取条、材料，都经 `RagClient` 打到 rag 服务的 HTTP 面（`/qa?mode=search` · `/articles/lookup` · `/materials/search` · `/laws` · `/answer` · `/answer/stream`）—— 进程里没有第二个 `LegalRAG`，也没有 `rag_service` 的任何 import。检索调用带超时预算（`AGENT_TOOL_TIMEOUT`，默认 15 秒）：超时回执单列「检索超时」（与一般失败分开），交模型换招、不自动重试。请求带 `session_id` 时同一会话跨轮记忆（LangGraph checkpointer，落 `data/sessions.db`；每轮入口先整理问句、话题与地区（一次调用、首轮也发），记忆按话题切、离开话题时沉降 ≤60 字摘要）；开了 `AGENT_CLARIFY` 时，判不出地区的问题先中断问一句、由 resume 端点收尾（见「端点」）。
 
 三道关卡都在代码里，不靠提示词自觉：**就绪门**（rag 服务启动/请求前保证索引可用）、**零证据闸**（`agents/nodes.py::_unearned_stop`）、**末端复核**（逐条判支撑，支撑不住的整篇降级）。
 
@@ -380,7 +380,7 @@ rag 那条路只剩两档；agent 循环搬走之后，它有自己的端点（�
 | `python -m rag_service "问题"` | 提问：线性管道（评测基线） |
 | `python -m rag_service.cli.build <子命令>` | 建库：`build` / `status` / `layers` / `docx` / `parse` / `chunk` / `index` |
 | `python -m rag_service.cli.serve [--host H] [--port P]` | 起知识库服务 |
-| `python -m agent_service "问题" [--trace] [--timing] [--json]` | 提问：完整 Agent 循环（判地区 → 规划 → 工具调用 → 复核 → 生成），打的是 rag 服务的 HTTP 面 |
+| `python -m agent_service "问题" [--trace] [--timing] [--json]` | 提问：完整 Agent 循环（入口理解 → 规划 → 工具调用 → 复核 → 生成），打的是 rag 服务的 HTTP 面 |
 | `python -m uvicorn agent_service.api.app:app --port 8001` | 把 agent 立成服务（`/qa` · `/qa/stream` · `/qa/resume` · `/qa/resume/stream` · `/documents` 材料台账 · `/sessions/{id}` 删会话 · `/health`）；compose 里已常驻一个（宿主 :8001），这条是裸跑用 |
 | `python -m eval [--reference] [--pool N] [--http asgi\|URL]` | 评测：域内 池子召回 / hit@k / 单通道召回 ｜ 点名桶取条。`--http` 把同一套题发到服务端点（跨进程那条臂；不给默认走 asgi，等于在本进程里起一个真 app 过真 HTTP） |
 | `python -m eval.singlehop` | 单跳两臂对照 |

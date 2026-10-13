@@ -374,10 +374,16 @@ def test_the_intake_prompt_keeps_its_judgment_axes() -> None:
     from agent_service import prompts
 
     text = prompts.INTAKE_SYSTEM_PROMPT
-    order = ["**一、话题切换判断**", "**二、意图识别**", "**三、改写**", "**四、话题匹配**"]
+    order = [
+        "**一、话题切换判断**",
+        "**二、意图识别**",
+        "**三、改写**",
+        "**四、话题匹配**",
+        "**五、判地区**",
+    ]
     positions = [text.find(section) for section in order]
-    assert all(position >= 0 for position in positions), "入口提示词的四环节丢了"
-    assert positions == sorted(positions), "判话题 → 意图 → 改写 → 匹配 的先后不能乱"
+    assert all(position >= 0 for position in positions), "入口提示词的五环节丢了"
+    assert positions == sorted(positions), "判话题 → 意图 → 改写 → 匹配 → 判地区 的先后不能乱"
 
     for axis in (
         "1. 核心事项（违法情形 / 业务事项：醉驾、超速、上牌、记分……）—— 判断的主轴。",
@@ -411,25 +417,47 @@ def test_the_intake_prompt_keeps_its_judgment_axes() -> None:
     assert "switch 为 continue / unsure 时 summary 填空串。" in text, (
         "「continue / unsure 不填摘要」的收口没了：模型会在延续轮随手覆盖旧摘要"
     )
+    assert "**拿不准就给 `?`**" in text, (
+        "偏 `?` 的裁决句没了：模型会把拿不准的地区硬填成某个地名，把不相干的法规拉进检索"
+    )
+    assert "`?`：不限定地区。" in text
+    assert "- switch 为 continue / resume / unsure 时：**上文已定地区，未新点地区时沿用**。" in text, (
+        "地区继承句没了：带历史的追问会丢掉已定地区"
+    )
+    assert "- switch 为 new 时：**新话题，历史地区不沿用** —— 历史地区只属于旧话题。" in text, (
+        "「新话题不沿用历史地区」没了：换话题后旧地区的法规会继续参与作答"
+    )
+    rendered = prompts.INTAKE_SYSTEM_PROMPT % {"law_count": 1, "laws": "- 示例法规"}
+    assert "只有这 1 部法规" in rendered and "- 示例法规" in rendered, (
+        "提示词是 % 模板，改文本别引入裸 %"
+    )
     assert (
-        '{"switch": "continue", "intent": "followup", "query": "自包含问句", '
-        '"topic_id": "话题号 / new", "summary": ""}'
+        '{"switch": "continue", "intent": "followup", "query": "自包含问句", "topic_id": "话题号 / new",\n'
+        ' "summary": "", "region": "地区名 / ?", "place": "地区名 / 空串"}'
     ) in text, "入口的 JSON 示例行变了：字段名和枚举取值在正文里都对不上就没人兜"
 
 
-def test_the_region_signal_lines_stay_verbatim() -> None:
+def test_the_intake_output_guard_stays_verbatim() -> None:
     pytest.importorskip("langgraph", reason="agent extra 没装：只跑结构检查")
     from agent_service import prompts
 
     assert (
-        prompts.REGION_SIGNAL_INTENT == "（本轮为{intent}；问句可能已是入口改写后的自包含写法）"
-    )
-    assert prompts.REGION_SIGNAL_NEW_TOPIC == "（新话题，历史地区不沿用）"
-    assert prompts.REGION_SIGNAL_INHERIT == "（上文已定地区，未新点地区时沿用）"
-    assert (
-        prompts.REGION_OUTPUT_GUARD
-        == "只输出 JSON 对象（region / place 两个字段），不要回答问题本身。"
-    )
+        prompts.INTAKE_OUTPUT_GUARD
+        == "只输出 JSON 对象（switch / intent / query / topic_id / summary / region / place 七个字段），"
+        "不要回答问题本身。"
+    ), "尾行守卫被动过：「不要回答问题本身」是入口把问句续写成答案那条修复的锚点"
+    retired = [
+        name
+        for name in (
+            "REGION_SYSTEM_PROMPT",
+            "REGION_SIGNAL_INTENT",
+            "REGION_SIGNAL_NEW_TOPIC",
+            "REGION_SIGNAL_INHERIT",
+            "REGION_OUTPUT_GUARD",
+        )
+        if hasattr(prompts, name)
+    ]
+    assert not retired, f"P2b 退役的地区专用常量又长回来了：{retired}"
 
 
 def test_the_law_tool_description_hardcodes_no_corpus_counts() -> None:
