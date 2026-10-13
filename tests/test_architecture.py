@@ -399,9 +399,21 @@ def test_the_intake_prompt_keeps_its_judgment_axes() -> None:
     assert "new（开了一个全新话题）/ unsure（拿不准，按继续处理）。" in text
     assert "followup（追问）/ challenge（质疑）/ compare（对比）/" in text
     assert "quote（要求引用原文）/ other（其他）。" in text
+    assert "只在**离开当前活跃话题**时填" in text, (
+        "摘要的触发条件被动过：延续轮也会生成摘要，旧话题的沉降条目就没人维护了"
+    )
+    assert "**不是本轮新问题的摘要**" in text, (
+        "「摘要描述的是即将离开的话题、不是新问题」的限定没了：模型会把本轮问题缩成一句填进摘要"
+    )
+    assert "不超过 60 字" in text, (
+        "摘要字数上限被动过：渲染端按 60 字防御截断，提示词与代码会互相打架"
+    )
+    assert "switch 为 continue / unsure 时 summary 填空串。" in text, (
+        "「continue / unsure 不填摘要」的收口没了：模型会在延续轮随手覆盖旧摘要"
+    )
     assert (
         '{"switch": "continue", "intent": "followup", "query": "自包含问句", '
-        '"topic_id": "话题号 / new"}'
+        '"topic_id": "话题号 / new", "summary": ""}'
     ) in text, "入口的 JSON 示例行变了：字段名和枚举取值在正文里都对不上就没人兜"
 
 

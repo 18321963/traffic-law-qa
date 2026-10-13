@@ -153,4 +153,11 @@ PROBES = [
         'REGION_OUTPUT_GUARD = "只输出 JSON 对象，也可以顺便把问题回答了。"',
         TESTS,
     ),
+    (
+        "门禁㉒ 摘要「不是本轮新问题」的限定被换词必须翻红（摘要对象门）",
+        "agent_service/prompts.py",
+        "**不是本轮新问题的摘要**",
+        "**不是本轮新话题的摘要**",
+        TESTS,
+    ),
 ]

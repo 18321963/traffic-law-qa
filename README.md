@@ -19,7 +19,7 @@
 | 交叉编码器重排 | ✅ | `bge-reranker-v2-m3`（sigmoid）；不可用或抛异常时按融合序返回并留一条 note |
 | 强制引用式生成 | ✅ | 每条结论挂 `[依据N]`；参考文献段由 `Answer.render()` 拼，编号与原文的对应不过模型的手 |
 | Agentic RAG | ✅ | LangGraph 单节点循环：模型自决查什么、查几轮；一轮没调工具就想收工会被代码闸拦下 |
-| 会话记忆（短期） | ✅ | 请求带 `session_id` = 同一张会话跨轮记得住（LangGraph checkpointer，SQLite 落 `data/sessions.db`）；记忆按话题切：提示词里带活跃话题最近 N 轮 + 其他话题索引行，指代追问会被入口整理成自包含问句、跨话题不互相污染（每轮已定地区随行标出），不带则每问独立；整条可删（`DELETE /sessions/{session_id}`，thread 与挂起澄清一起物理清掉） |
+| 会话记忆（短期） | ✅ | 请求带 `session_id` = 同一张会话跨轮记得住（LangGraph checkpointer，SQLite 落 `data/sessions.db`）；记忆按话题切：提示词里带活跃话题最近 N 轮 + 其他话题索引行（离开话题时入口把它压成 ≤60 字摘要沉降进会话，索引行优先用摘要），指代追问会被入口整理成自包含问句、跨话题不互相污染（每轮已定地区随行标出），不带则每问独立；整条可删（`DELETE /sessions/{session_id}`，thread 与挂起澄清一起物理清掉） |
 | 地区澄清（人在环） | ✅ | 判不出该按哪里的规定时（题面没点出地区、或点出的地名不是适用地，如产地题）先中断问一句「按该地法规还是只按全国法」再作答；判出地区直接答。回复经 resume 端点交回（服务里默认开，`AGENT_CLARIFY` 控制） |
 | 流式输出 | ✅ | rag `/qa/stream` 推检索结果与逐字 token；agent `/qa/stream` 推步骤流 + 逐字草稿；**草稿是草稿** —— `done` 才是复核之后的权威 |
 | 浏览器界面 | ✅ | web 镜像（nginx 静态托管，宿主 :3000）：问答流 · 依据/轨迹/材料三栏 · 材料上传 · 删会话 · 澄清回复 · 仅 RAG 通道（设置里切换）；同源反代到 agent 与 rag（源码 `frontend/`，React + Vite） |
@@ -348,7 +348,7 @@ agent_service/
 
 ```
 问题（POST http://127.0.0.1:8001/qa，可带 session_id 记上下文）
-  → agents/region          入口理解（话题/意图/改写 → 判地区）→ 定法名范围
+  → agents/region          入口理解（话题/意图/改写/摘要 → 判地区）→ 定法名范围
   → agents/clarify         判不出地区才回问一句再答（开了 AGENT_CLARIFY 时）
   → 单节点循环             模型自己决定调哪个工具、调几轮
       ├─ search_law            混合检索（可多轮，结果按 parent_id 合并去重）
@@ -361,7 +361,7 @@ agent_service/
   → trace.py               决策链渲染（--trace / --timing / Langfuse）
 ```
 
-上面每一步要的检索、取条、材料，都经 `RagClient` 打到 rag 服务的 HTTP 面（`/qa?mode=search` · `/articles/lookup` · `/materials/search` · `/laws` · `/answer` · `/answer/stream`）—— 进程里没有第二个 `LegalRAG`，也没有 `rag_service` 的任何 import。检索调用带超时预算（`AGENT_TOOL_TIMEOUT`，默认 15 秒）：超时回执单列「检索超时」（与一般失败分开），交模型换招、不自动重试。请求带 `session_id` 时同一会话跨轮记忆（LangGraph checkpointer，落 `data/sessions.db`；有历史时入口先整理问句与话题、再判地区，记忆按话题切）；开了 `AGENT_CLARIFY` 时，判不出地区的问题先中断问一句、由 resume 端点收尾（见「端点」）。
+上面每一步要的检索、取条、材料，都经 `RagClient` 打到 rag 服务的 HTTP 面（`/qa?mode=search` · `/articles/lookup` · `/materials/search` · `/laws` · `/answer` · `/answer/stream`）—— 进程里没有第二个 `LegalRAG`，也没有 `rag_service` 的任何 import。检索调用带超时预算（`AGENT_TOOL_TIMEOUT`，默认 15 秒）：超时回执单列「检索超时」（与一般失败分开），交模型换招、不自动重试。请求带 `session_id` 时同一会话跨轮记忆（LangGraph checkpointer，落 `data/sessions.db`；有历史时入口先整理问句与话题、再判地区，记忆按话题切、离开话题时沉降 ≤60 字摘要）；开了 `AGENT_CLARIFY` 时，判不出地区的问题先中断问一句、由 resume 端点收尾（见「端点」）。
 
 三道关卡都在代码里，不靠提示词自觉：**就绪门**（rag 服务启动/请求前保证索引可用）、**零证据闸**（`agents/nodes.py::_unearned_stop`）、**末端复核**（逐条判支撑，支撑不住的整篇降级）。
 

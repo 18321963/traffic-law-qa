@@ -72,12 +72,20 @@ def _region(region: str, place: str = "") -> list[dict]:
     ]
 
 
-def _intake(switch: str = "continue", *, intent: str = "other", query: str = "", topic: str = "") -> list[dict]:
+def _intake(
+    switch: str = "continue", *, intent: str = "other", query: str = "", topic: str = "", summary: str = ""
+) -> list[dict]:
     return [
         {
             "role": "assistant",
             "content": json.dumps(
-                {"switch": switch, "intent": intent, "query": query, "topic_id": topic},
+                {
+                    "switch": switch,
+                    "intent": intent,
+                    "query": query,
+                    "topic_id": topic,
+                    "summary": summary,
+                },
                 ensure_ascii=False,
             ),
         }
@@ -747,6 +755,37 @@ def test_topics_stay_isolated_and_an_old_one_can_be_resumed() -> None:
     ask5 = intake.prompts[3][-1]["content"]
     assert "当前活跃话题：t3。" in ask5
     assert "[t1] 在深圳，醉酒驾驶机动车怎么处罚？（共 2 轮，最近第 2 轮）" in ask5
+
+
+def test_the_summary_survives_the_checkpoint_round_trip() -> None:
+    intake = AgentStubLLM(
+        _intake(
+            "new",
+            intent="other",
+            query="广州电动自行车上牌要什么材料",
+            summary="问醉酒驾驶处罚；按深圳",
+        )
+        + _intake("continue", intent="followup", query="广州电动自行车上牌要多少钱"),
+        model="stub-intake",
+    )
+    runner, _client = _runner(plan=_plan(3), intake_llm=intake)
+
+    runner.invoke(QUESTION, session_id="s1")
+    state = runner.invoke("广州电动自行车上牌要什么材料？", session_id="s1")
+
+    assert state["topic_id"] == "t2"
+    assert state["topic_summaries"] == {"t1": "问醉酒驾驶处罚；按深圳"}
+
+    runner.invoke("那要多少钱？", session_id="s1")
+
+    held = _values(runner, "s1")
+    assert held["topic_summaries"] == {"t1": "问醉酒驾驶处罚；按深圳"}, (
+        "没写摘要的轮次不能把通道带回空：checkpoint 里要留着旧摘要"
+    )
+    ask3 = intake.prompts[1][-1]["content"]
+    assert "[t1] 问醉酒驾驶处罚；按深圳（共 1 轮，最近第 1 轮）" in ask3, (
+        "下一轮入口要能看见沉降后的摘要，而不是起点问题的 80 字截图"
+    )
 
 
 def test_without_an_intake_the_generator_still_sees_the_plain_window() -> None:
