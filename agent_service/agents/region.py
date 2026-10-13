@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable, Sequence
+from difflib import SequenceMatcher
 
 from rag_contracts.domain.laws import LawInfo
 from rag_contracts.domain.retrieval import REGION_UNKNOWN
@@ -18,6 +19,8 @@ __all__ = [
     "INTAKE_INDEX_LINES",
     "SUMMARY_MAX_CHARS",
     "TOPIC_SUMMARIES_MAX",
+    "SLOT_RESTATEMENT_RATIO",
+    "SLOT_RESTATEMENT_MIN_CHARS",
     "law_scope",
     "national_law_ids",
     "make_region_node",
@@ -36,12 +39,21 @@ TOPIC_SUMMARIES_MAX = INTAKE_INDEX_LINES + 1
 取 INTAKE_INDEX_LINES 会恰丢它（回访中再离开时丢了增量基底），取 2× 则留一半永远
 渲染不到的死重。淘汰按各话题最近轮号、tie-break 取话题号小者。"""
 
+SLOT_RESTATEMENT_RATIO = 0.75
+"""槽位复述闸的相似度门槛（归一化去空白标点后的 SequenceMatcher ratio）：只在模型已报
+new 时做一次保守的二次确认 —— 同事项、仅槽位（地区 / 车型）换写的重述按环节一规则 3
+应判 continue。合成观测角（深圳上牌 → 广州上牌）≈0.87、真换事项对照 ≈0.4、换车型最险
+≈0.71 不触发；宁可漏降级（维持模型原判），不可误降级。"""
+SLOT_RESTATEMENT_MIN_CHARS = 8
+"""头文本归一化后的最短长度：短头（如「那记分呢」）的相似度不稳，不参与闸判。"""
+
 INTAKE_INDEX_NOTE = "（仅列最近 {lines} 个话题；更早话题未列出、无法回访，指代不到时按 new 处理）"
 
 _NOT_A_PLACE = frozenset({"?", "？", "全国", "空串"})
 _SWITCH_VALUES = frozenset({"continue", "resume", "new", "unsure"})
 _INTENT_VALUES = frozenset({"followup", "challenge", "compare", "quote", "other"})
 _TURN_RE = re.compile(r"^t(\d+)$")
+_NOISE_RE = re.compile(r"[\W_]+")
 
 
 def national_law_ids(laws: Sequence[LawInfo]) -> tuple[str, ...]:
@@ -145,6 +157,13 @@ def _entry_turn(entry: dict) -> int:
         return 0
 
 
+def _topic_head(entries: list[dict], topic: str) -> str:
+    for entry in entries:
+        if _entry_topic(entry) == topic:
+            return str(entry.get("question") or "")
+    return ""
+
+
 def _render_window(entries: list[dict], turns: int) -> list[tuple[str, str]]:
     history: list[tuple[str, str]] = []
     for entry in entries[-turns:] if turns > 0 else []:
@@ -220,6 +239,14 @@ def _intake_prompt(
     blocks.append(INTAKE_OUTPUT_GUARD)
     prompt.append({"role": "user", "content": "\n\n".join(blocks)})
     return prompt
+
+
+def _slot_only_restatement(head: str, query: str) -> bool:
+    core = _NOISE_RE.sub("", head)
+    ask = _NOISE_RE.sub("", query)
+    if len(core) < SLOT_RESTATEMENT_MIN_CHARS:
+        return False
+    return SequenceMatcher(None, core, ask).ratio() >= SLOT_RESTATEMENT_RATIO
 
 
 def _fold_topic(parsed: dict, active: str, turn_no: int, valid: set[str]) -> str:
@@ -320,7 +347,17 @@ def make_region_node(
                 region, place = REGION_UNKNOWN, ""
                 usage = {}
 
+        switch_raw = str(parsed.get("switch") or "")
         if parsed:
+            if switch_raw == "new":
+                head = str(summaries.get(active) or "").strip() or _topic_head(entries, active)
+                if (
+                    active
+                    and head
+                    and parsed.get("query")
+                    and _slot_only_restatement(head, str(parsed["query"]))
+                ):
+                    parsed["switch"] = "continue"
             topic_id = _fold_topic(parsed, active, turn_no, exposed)
             history = _topic_view(entries, topic_id, history_turns, summaries)[0]
         else:
@@ -342,6 +379,7 @@ def make_region_node(
             "history": history,
             "query_rewrite": str(parsed.get("query") or ""),
             "topic_switch": str(parsed.get("switch") or ""),
+            "switch_raw": switch_raw,
             "intent": str(parsed.get("intent") or ""),
             "topic_id": topic_id,
             "turn_no": turn_no,

@@ -35,6 +35,7 @@ class AgentState(TypedDict, total=False):
 
     query_rewrite: str
     topic_switch: str
+    switch_raw: str
     intent: str
     topic_id: str
     turn_no: int
