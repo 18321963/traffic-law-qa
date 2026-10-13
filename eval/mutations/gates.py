@@ -147,10 +147,10 @@ PROBES = [
         TESTS,
     ),
     (
-        "门禁㉑ 判地区的输出守护尾行被改坏必须翻红（作答串台门）",
+        "门禁㉑ 入口的输出守护尾行被改坏必须翻红（作答串台门）",
         "agent_service/prompts.py",
-        'REGION_OUTPUT_GUARD = "只输出 JSON 对象（region / place 两个字段），不要回答问题本身。"',
-        'REGION_OUTPUT_GUARD = "只输出 JSON 对象，也可以顺便把问题回答了。"',
+        '    "不要回答问题本身。"\n',
+        '    "也可以顺便把问题回答了。"\n',
         TESTS,
     ),
     (
@@ -158,6 +158,20 @@ PROBES = [
         "agent_service/prompts.py",
         "**不是本轮新问题的摘要**",
         "**不是本轮新话题的摘要**",
+        TESTS,
+    ),
+    (
+        "门禁㉓ 新话题不沿用历史地区的句子被删必须翻红（地区继承门）",
+        "agent_service/prompts.py",
+        "- switch 为 new 时：**新话题，历史地区不沿用** —— 历史地区只属于旧话题。\n",
+        "",
+        TESTS,
+    ),
+    (
+        "门禁㉔ 入口 JSON 示例的 region 字段被改坏必须翻红（七字段示例门）",
+        "agent_service/prompts.py",
+        '"summary": "", "region": "地区名 / ?", "place": "地区名 / 空串"',
+        '"summary": "", "region": "地区名", "place": "地区名 / 空串"',
         TESTS,
     ),
 ]

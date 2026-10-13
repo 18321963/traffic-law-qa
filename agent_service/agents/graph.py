@@ -98,9 +98,7 @@ def build_graph(
     rag: RagClient,
     llm: LLM,
     cfg: config.AgentConfig,
-    region_llm: LLM | None = None,
     review_llm: LLM | None = None,
-    intake_llm: LLM | None = None,
     tracer: Tracer | None = None,
     checkpointer=None,
     laws: Sequence[LawInfo] | None = None,
@@ -109,8 +107,7 @@ def build_graph(
 
     tracer = tracer or Tracer()
 
-    region_llm = region_llm or llm
-    review_llm = review_llm or region_llm
+    review_llm = review_llm or llm
 
     laws = list(laws) if laws is not None else list(rag.laws())
 
@@ -120,9 +117,7 @@ def build_graph(
         traced(
             tracer,
             "node.region",
-            make_region_node(
-                region_llm, laws, history_turns=cfg.history_turns, intake_llm=intake_llm
-            ),
+            make_region_node(llm, laws, history_turns=cfg.history_turns),
         ),
     )
     graph.add_node("clarify", traced(tracer, "node.clarify", make_clarify_node(laws)))
@@ -163,9 +158,7 @@ class AgentRunner:
         rag: RagClient,
         *,
         llm: LLM | None = None,
-        region_llm: LLM | None = None,
         review_llm: LLM | None = None,
-        intake_llm: LLM | None = None,
         cfg: config.AgentConfig | None = None,
         tracer: Tracer | None = None,
         sessions=None,
@@ -177,9 +170,7 @@ class AgentRunner:
         self.cfg = cfg or config.agent_config()
         self.tracer = tracer or Tracer()
         self.llm = llm or build_llm(retries=self.cfg.retries, observer=self.tracer)
-        self.region_llm = region_llm or self.llm
-        self.review_llm = review_llm or self.region_llm
-        self.intake_llm = intake_llm
+        self.review_llm = review_llm or self.llm
         self.sessions = sessions
         self._laws = None if laws is None else list(laws)
         self._graph = None
@@ -210,13 +201,9 @@ class AgentRunner:
         return cls(
             rag,
             llm=llm,
-            region_llm=build_llm(
-                config.region_llm_config(), retries=agent_cfg.retries, observer=observer
-            ),
             review_llm=build_llm(
                 config.review_llm_config(), retries=agent_cfg.retries, observer=observer
             ),
-            intake_llm=llm,
             cfg=agent_cfg,
             tracer=observer,
             sessions=sessions,
@@ -229,9 +216,7 @@ class AgentRunner:
                 rag=self.rag,
                 llm=self.llm,
                 cfg=self.cfg,
-                region_llm=self.region_llm,
                 review_llm=self.review_llm,
-                intake_llm=self.intake_llm,
                 tracer=self.tracer,
                 checkpointer=self.sessions,
                 laws=self._laws,
@@ -483,10 +468,8 @@ class AgentRunner:
             )
         )
         intake_state = (
-            f"入口理解（有历史时 1 次 {self.llm.model_name}：话题/意图/改写；"
-            f"判地区 1 次 {self.region_llm.model_name}，判不出则回问或不限地区）"
-            if self.intake_llm is not None
-            else f"入口判地区（1 次 {self.region_llm.model_name} 调用，判不出则回问或不限地区）"
+            f"入口理解（每轮 1 次 {self.llm.model_name}：话题/意图/改写/判地区，"
+            "判不出则回问或不限地区）"
         )
         return (
             f"Agent：最多 {self.cfg.max_steps} 轮 | "

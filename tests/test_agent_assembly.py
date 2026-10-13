@@ -55,25 +55,17 @@ def _spy_attach(seen: dict):
     return classmethod(spy)
 
 
-def test_attach_never_puts_the_main_model_on_review(monkeypatch):
+def test_attach_builds_the_main_model_and_a_separate_review(monkeypatch):
     main_cfg = replace(config.llm_config(), model="stub-main")
-    region_cfg = replace(config.region_llm_config(), model="stub-region")
     review_cfg = replace(config.review_llm_config(), model="stub-review")
-    assert len({main_cfg, region_cfg, review_cfg}) == 3
+    assert main_cfg != review_cfg
     monkeypatch.setattr(graph_mod.config, "llm_config", lambda: main_cfg)
-    monkeypatch.setattr(graph_mod.config, "region_llm_config", lambda: region_cfg)
     monkeypatch.setattr(graph_mod.config, "review_llm_config", lambda: review_cfg)
 
     runner = _attach()
 
     assert runner.review_llm is not runner.llm
-    assert runner.region_llm is not runner.llm
-    assert runner.intake_llm is runner.llm, "入口理解的 A 段要用主模型（attach 即装配工厂）"
-    assert (runner.llm.cfg, runner.region_llm.cfg, runner.review_llm.cfg) == (
-        main_cfg,
-        region_cfg,
-        review_cfg,
-    )
+    assert (runner.llm.cfg, runner.review_llm.cfg) == (main_cfg, review_cfg)
 
 
 def test_attach_asks_the_env_when_tracer_is_omitted(monkeypatch):

@@ -208,16 +208,6 @@ def llm_config() -> LLMConfig:
     )
 
 
-def region_llm_config() -> LLMConfig:
-    base = llm_config()
-    return LLMConfig(
-        base_url=_env("AGENT_REGION_BASE_URL") or base.base_url,
-        api_key=_env("AGENT_REGION_API_KEY") or base.api_key,
-        model=_env("AGENT_REGION_MODEL") or base.model,
-        temperature=base.temperature,
-    )
-
-
 def review_llm_config() -> LLMConfig:
     base = llm_config()
     return LLMConfig(
