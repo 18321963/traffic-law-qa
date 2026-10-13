@@ -23,6 +23,8 @@ __all__ = [
     "HISTORY_ANSWER_CHARS",
     "INTAKE_INDEX_SNIPPET",
     "INTAKE_INDEX_LINES",
+    "SUMMARY_MAX_CHARS",
+    "TOPIC_SUMMARIES_MAX",
     "law_scope",
     "national_law_ids",
     "make_region_node",
@@ -31,6 +33,15 @@ __all__ = [
 HISTORY_ANSWER_CHARS = 300
 INTAKE_INDEX_SNIPPET = 80
 INTAKE_INDEX_LINES = 10
+SUMMARY_MAX_CHARS = 60
+"""话题摘要的字数上限：入口产出时截断一次，索引行渲染时再兜底截一次。"""
+
+TOPIC_SUMMARIES_MAX = INTAKE_INDEX_LINES + 1
+"""摘要的保留面＝可渲染面，+1 是推导不是缓冲：消费者只有两处 —— 其他话题的索引行
+（最多 INTAKE_INDEX_LINES 个非活跃话题）＋ 活跃话题的「既有摘要」行 1 个槽位。
+回访前提是话题在可见窗内（_fold_topic 只认 valid），该槽位恒可渲染、必须保留；
+取 INTAKE_INDEX_LINES 会恰丢它（回访中再离开时丢了增量基底），取 2× 则留一半永远
+渲染不到的死重。淘汰按各话题最近轮号、tie-break 取话题号小者。"""
 
 INTAKE_INDEX_NOTE = "（仅列最近 {lines} 个话题；更早话题未列出、无法回访，指代不到时按 new 处理）"
 
@@ -127,6 +138,7 @@ def _parse_intake(text: str) -> dict:
         "intent": intent if intent in _INTENT_VALUES else "other",
         "query": str(data.get("query") or "").strip(),
         "topic": str(data.get("topic_id") or "").strip(),
+        "summary": str(data.get("summary") or "").strip(),
     }
 
 
@@ -167,7 +179,7 @@ def _build_history(
 
 
 def _topic_view(
-    entries: list[dict], active: str, turns: int
+    entries: list[dict], active: str, turns: int, summaries: dict[str, str]
 ) -> tuple[list[tuple[str, str]], list[str], set[str]]:
     if not active:
         return _render_window(entries, turns), [], set()
@@ -182,8 +194,12 @@ def _topic_view(
     rows: list[tuple[int, str, str]] = []
     for topic, group in groups.items():
         last = max(_entry_turn(entry) for entry in group)
-        head = str(group[0].get("question") or "")[:INTAKE_INDEX_SNIPPET]
-        rows.append((last, topic, f"[{topic}] {head}（共 {len(group)} 轮，最近第 {last} 轮）"))
+        note = str(summaries.get(topic) or "").strip()
+        if note:
+            body = note[:SUMMARY_MAX_CHARS]
+        else:
+            body = str(group[0].get("question") or "")[:INTAKE_INDEX_SNIPPET]
+        rows.append((last, topic, f"[{topic}] {body}（共 {len(group)} 轮，最近第 {last} 轮）"))
     rows.sort(key=lambda row: row[0], reverse=True)
     shown = rows[:INTAKE_INDEX_LINES]
     older = sum(
@@ -200,7 +216,11 @@ def _topic_view(
 
 
 def _intake_prompt(
-    history: list[tuple[str, str]], index_lines: list[str], active: str, question: str
+    history: list[tuple[str, str]],
+    index_lines: list[str],
+    active: str,
+    question: str,
+    active_summary: str = "",
 ) -> list[dict]:
     prompt: list[dict] = [{"role": "system", "content": INTAKE_SYSTEM_PROMPT}]
     prompt.extend({"role": role, "content": content} for role, content in history)
@@ -208,6 +228,8 @@ def _intake_prompt(
     if index_lines:
         blocks.append("较早的其他话题（只有索引，没有原文）：\n" + "\n".join(index_lines))
     blocks.append(f"当前活跃话题：{active}。" if active else "当前没有活跃话题。")
+    if active and active_summary:
+        blocks.append(f"当前活跃话题既有摘要：{active_summary}（离开本话题时以它为底更新）")
     blocks.append(f"本轮用户问题：{question}")
     prompt.append({"role": "user", "content": "\n\n".join(blocks)})
     return prompt
@@ -220,6 +242,30 @@ def _fold_topic(parsed: dict, active: str, turn_no: int, valid: set[str]) -> str
     if switch == "new":
         return f"t{turn_no}"
     return active or f"t{turn_no}"
+
+
+def _recent_topics(entries: Iterable[dict], limit: int) -> set[str]:
+    last: dict[str, int] = {}
+    for entry in entries:
+        topic = _entry_topic(entry)
+        if topic:
+            last[topic] = max(last.get(topic, 0), _entry_turn(entry))
+    ordered = sorted(last.items(), key=lambda item: (-item[1], item[0]))
+    return {topic for topic, _turn in ordered[:limit]}
+
+
+def _summaries_after_write(
+    entries: list[dict], summaries: dict[str, str], active: str, topic_id: str, parsed: dict
+) -> dict[str, str] | None:
+    if not parsed or not active or topic_id == active:
+        return None
+    text = str(parsed.get("summary") or "").strip()
+    if not text or not any(_entry_topic(entry) == active for entry in entries):
+        return None
+    updated = dict(summaries)
+    updated[active] = text[:SUMMARY_MAX_CHARS]
+    keep = _recent_topics(entries, TOPIC_SUMMARIES_MAX)
+    return {topic: value for topic, value in updated.items() if topic in keep}
 
 
 def _region_signals(parsed: dict) -> list[str]:
@@ -270,15 +316,19 @@ def make_region_node(
         conversation = state.get("conversation") or ()
         convo = [entry for entry in conversation if isinstance(entry, dict)]
         entries = convo or _pairs_to_entries(state.get("history") or ())
+        raw_summaries = state.get("topic_summaries")
+        summaries = dict(raw_summaries) if isinstance(raw_summaries, dict) else {}
 
         parsed: dict = {}
         intake_usage: dict = {}
         exposed: set[str] = set()
         if intake_llm is not None and intake_llm.available and convo:
-            pre_view, pre_index, exposed = _topic_view(entries, active, history_turns)
+            pre_view, pre_index, exposed = _topic_view(entries, active, history_turns, summaries)
             try:
                 reply, intake_usage, _finish = intake_llm.chat(
-                    _intake_prompt(pre_view, pre_index, active, state["question"]),
+                    _intake_prompt(
+                        pre_view, pre_index, active, state["question"], summaries.get(active, "")
+                    ),
                     temperature=0.0,
                     name="llm.intake",
                 )
@@ -289,7 +339,7 @@ def make_region_node(
 
         if parsed:
             topic_id = _fold_topic(parsed, active, turn_no, exposed)
-            history = _topic_view(entries, topic_id, history_turns)[0]
+            history = _topic_view(entries, topic_id, history_turns, summaries)[0]
         else:
             topic_id = active or f"t{turn_no}"
             history = _render_window(entries, history_turns)
@@ -313,6 +363,9 @@ def make_region_node(
             "topic_id": topic_id,
             "turn_no": turn_no,
         }
+        written = _summaries_after_write(entries, summaries, active, topic_id, parsed)
+        if written is not None:
+            reset["topic_summaries"] = written
         carried = Overwrite([intake_usage] if intake_usage else [])
         if not llm.available:
             return {

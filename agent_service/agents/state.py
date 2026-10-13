@@ -38,6 +38,7 @@ class AgentState(TypedDict, total=False):
     intent: str
     topic_id: str
     turn_no: int
+    topic_summaries: dict[str, str]
 
     conversation: Annotated[list[dict], operator.add]
     answer: Answer | None

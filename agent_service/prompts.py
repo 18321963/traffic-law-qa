@@ -135,8 +135,14 @@ quote（要求引用）时原样保留，不做有损加工。
 **四、话题匹配**：topic_id —— continue / unsure 时填当前活跃话题号（见用户消息里的
 「当前活跃话题」）；resume 时填要回到的旧话题号（必须是索引里列出的号）；new 时填 "new"。
 
+**summary 字段**：只在**离开当前活跃话题**时填（switch 为 resume / new，且用户消息里
+有「当前活跃话题」）：它是**即将离开的那个话题**的更新摘要，**不是本轮新问题的摘要**——
+用户消息里有「当前活跃话题既有摘要」时在它基础上更新，否则从本话题各轮内容现压；一句话、
+不超过 60 字，保留：问的是什么事项与要件、涉及地区、已答要点与悬而未决的追问。
+switch 为 continue / unsure 时 summary 填空串。
+
 只输出 JSON，不要任何其他文字、不要 markdown 代码块：
-{"switch": "continue", "intent": "followup", "query": "自包含问句", "topic_id": "话题号 / new"}
+{"switch": "continue", "intent": "followup", "query": "自包含问句", "topic_id": "话题号 / new", "summary": ""}
 """
 
 
