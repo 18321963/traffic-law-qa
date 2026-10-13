@@ -254,7 +254,14 @@ def test_memory_survives_a_disabled_review() -> None:
 
     assert state["answer"].review is None
     assert state["conversation"] == [
-        {"question": QUESTION, "answer": "答案正文[依据1]", "region": "深圳"}
+        {
+            "question": QUESTION,
+            "answer": "答案正文[依据1]",
+            "region": "深圳",
+            "topic_id": "t1",
+            "intent": "",
+            "turn": 1,
+        }
     ]
 
 
@@ -549,7 +556,7 @@ def test_only_the_review_node_writes_the_conversation_channel() -> None:
     assert writers == set()
 
 
-def test_the_conversation_is_capped_and_truncated_to_n_turns() -> None:
+def test_every_turn_stays_in_the_conversation_intact() -> None:
     runner, _client = _runner(
         plan=_plan(6),
         cfg=config.AgentConfig(max_steps=2, history_turns=2),
@@ -558,13 +565,11 @@ def test_the_conversation_is_capped_and_truncated_to_n_turns() -> None:
 
     for index in range(6):
         state = runner.invoke(f"第 {index} 问", session_id="s1")
-        assert len(state["conversation"]) <= 2 * 2
 
     assert [entry["question"] for entry in state["conversation"]] == [
-        "第 3 问",
-        "第 4 问",
-        "第 5 问",
+        f"第 {index} 问" for index in range(6)
     ]
+    assert all(entry["answer"] == "答案正文[依据1]" for entry in state["conversation"])
 
 
 def test_an_injected_law_table_wins_over_the_service_laws() -> None:
