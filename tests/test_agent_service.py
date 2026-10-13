@@ -291,6 +291,7 @@ def test_the_intake_stage_rewrites_before_the_region_stage() -> None:
     assert user["content"] == (
         "深圳醉酒驾驶记多少分\n\n（本轮为追问；问句可能已是入口改写后的自包含写法）"
         "\n\n（上文已定地区，未新点地区时沿用）"
+        "\n\n只输出 JSON 对象（region / place 两个字段），不要回答问题本身。"
     )
 
 
@@ -316,9 +317,8 @@ def test_a_broken_intake_falls_back_to_the_plain_turn() -> None:
         AgentStubLLM([{"role": "assistant", "content": "不是 JSON"}]),
     ]
     for intake in junk:
-        node = region_mod.make_region_node(
-            AgentStubLLM(_region("深圳")), client.laws(), intake_llm=intake
-        )
+        region = AgentStubLLM(_region("深圳"))
+        node = region_mod.make_region_node(region, client.laws(), intake_llm=intake)
         update = node(_state(conversation=[_memory("旧问", "t1", 1)], topic_id="t1", turn_no=1))
 
         assert update["topic_id"] == "t1", intake
@@ -330,6 +330,9 @@ def test_a_broken_intake_falls_back_to_the_plain_turn() -> None:
             ("user", "旧问"),
             ("assistant", "（本轮按「深圳」的规定作答）答案：旧问"),
         ]
+        assert region.prompts[0][-1]["content"].endswith(
+            "只输出 JSON 对象（region / place 两个字段），不要回答问题本身。"
+        )
 
 
 def test_unknown_enum_values_land_on_unsure_and_other() -> None:

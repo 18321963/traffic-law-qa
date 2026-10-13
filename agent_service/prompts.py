@@ -7,6 +7,7 @@ __all__ = [
     "REGION_SIGNAL_INTENT",
     "REGION_SIGNAL_NEW_TOPIC",
     "REGION_SIGNAL_INHERIT",
+    "REGION_OUTPUT_GUARD",
     "REVIEW_SYSTEM_PROMPT",
     "REVIEW_PATCH_NOTE",
     "REVIEW_DOWNGRADE_ANSWER",
@@ -127,7 +128,9 @@ new（开了一个全新话题）/ unsure（拿不准，按继续处理）。
 quote（要求引用原文）/ other（其他）。
 
 **三、改写**：query 填消解掉指代后的自包含问句 —— 把「那深圳呢」「这个罚多少」补全成
-不看历史也能独立理解的完整问法；quote（要求引用）时原样保留，不做有损加工。
+不看历史也能独立理解的完整问法；问到「最早 / 最开始 / 第一个」这类回到**更早轮次**的说法时，
+必须把所指那轮的问题在 query 里补全（地区与事项都带上），原样照抄或留下指代词都算没改写；
+quote（要求引用）时原样保留，不做有损加工。
 
 **四、话题匹配**：topic_id —— continue / unsure 时填当前活跃话题号（见用户消息里的
 「当前活跃话题」）；resume 时填要回到的旧话题号（必须是索引里列出的号）；new 时填 "new"。
@@ -145,6 +148,9 @@ REGION_SIGNAL_NEW_TOPIC = "（新话题，历史地区不沿用）"
 
 REGION_SIGNAL_INHERIT = "（上文已定地区，未新点地区时沿用）"
 """判地区信号行：继承类意图（追问 / 质疑 / 对比 / 要求引用）且非新话题时附上。"""
+
+REGION_OUTPUT_GUARD = "只输出 JSON 对象（region / place 两个字段），不要回答问题本身。"
+"""判地区提示的尾行：追加在用户消息末尾，防模型把带历史的问句续写成答案而不是判地区。"""
 
 
 REVIEW_SYSTEM_PROMPT = """你是交通法规问答的末端复核员。给你一个答案，以及答案里**引用到的**每一条法条原文，

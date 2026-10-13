@@ -139,4 +139,18 @@ PROBES = [
         "",
         TESTS,
     ),
+    (
+        "门禁⑳ 入口的跨回指代消解规则被翻转必须翻红（改写照抄门）",
+        "agent_service/prompts.py",
+        "原样照抄或留下指代词都算没改写",
+        "原样照抄或留下指代词也可以接受",
+        TESTS,
+    ),
+    (
+        "门禁㉑ 判地区的输出守护尾行被改坏必须翻红（作答串台门）",
+        "agent_service/prompts.py",
+        'REGION_OUTPUT_GUARD = "只输出 JSON 对象（region / place 两个字段），不要回答问题本身。"',
+        'REGION_OUTPUT_GUARD = "只输出 JSON 对象，也可以顺便把问题回答了。"',
+        TESTS,
+    ),
 ]

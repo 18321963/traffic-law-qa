@@ -10,6 +10,7 @@ from rag_contracts.ports import LLM
 
 from ..prompts import (
     INTAKE_SYSTEM_PROMPT,
+    REGION_OUTPUT_GUARD,
     REGION_SIGNAL_INHERIT,
     REGION_SIGNAL_INTENT,
     REGION_SIGNAL_NEW_TOPIC,
@@ -328,6 +329,7 @@ def make_region_node(
         signals = _region_signals(parsed)
         if signals:
             user_text = "\n\n".join([user_text, *signals])
+        user_text = "\n\n".join([user_text, REGION_OUTPUT_GUARD])
         prompt.append({"role": "user", "content": user_text})
 
         reply, usage, _finish = llm.chat(prompt, temperature=0.0, name="llm.region")

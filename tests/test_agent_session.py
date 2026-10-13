@@ -36,6 +36,7 @@ ROAD_ID = "road_traffic_safety"
 PENALTY_ID = "shenzhen_penalty"
 QUESTION = "在深圳，醉酒驾驶机动车怎么处罚？"
 FOLLOW_UP = "那记分呢？"
+REGION_GUARD = "\n\n只输出 JSON 对象（region / place 两个字段），不要回答问题本身。"
 
 _MISSING = object()
 
@@ -170,7 +171,7 @@ def test_the_second_turn_prompts_carry_the_first_qa() -> None:
     turn2_region = runner.region_llm.prompts[1]
     assert {"role": "user", "content": QUESTION} in turn2_region
     assert {"role": "assistant", "content": tagged} in turn2_region
-    assert turn2_region[-1] == {"role": "user", "content": FOLLOW_UP}
+    assert turn2_region[-1] == {"role": "user", "content": FOLLOW_UP + REGION_GUARD}
 
     turn2_agent = runner.llm.prompts[2]
     assert {"role": "user", "content": QUESTION} in turn2_agent
@@ -185,7 +186,7 @@ def test_a_first_turn_prompt_is_still_system_plus_question() -> None:
     prompt = runner.region_llm.prompts[0]
     assert len(prompt) == 2
     assert prompt[0]["role"] == "system"
-    assert prompt[-1] == {"role": "user", "content": QUESTION}
+    assert prompt[-1] == {"role": "user", "content": QUESTION + REGION_GUARD}
 
 
 def test_input_history_is_normalized_into_the_first_turn_prompt() -> None:
@@ -197,7 +198,7 @@ def test_input_history_is_normalized_into_the_first_turn_prompt() -> None:
     prompt = runner.region_llm.prompts[0]
     assert {"role": "user", "content": "醉驾怎么罚"} in prompt
     assert {"role": "assistant", "content": "答案A"} in prompt
-    assert prompt[-1] == {"role": "user", "content": FOLLOW_UP}
+    assert prompt[-1] == {"role": "user", "content": FOLLOW_UP + REGION_GUARD}
 
 
 def test_the_history_snippet_clips_long_answers() -> None:
@@ -387,7 +388,7 @@ def test_the_resolved_region_rides_the_history_into_the_next_region_prompt() -> 
     prompts = runner.region_llm.prompts
     assert len(prompts) >= 2
     first, second = prompts[0], prompts[-1]
-    assert second[-1] == {"role": "user", "content": FOLLOW_UP}
+    assert second[-1] == {"role": "user", "content": FOLLOW_UP + REGION_GUARD}
     assert any(
         "（本轮按「深圳经济特区」的规定作答）" in message["content"] for message in second
     )
