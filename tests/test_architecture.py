@@ -392,6 +392,9 @@ def test_the_intake_prompt_keeps_its_judgment_axes() -> None:
     assert "（比如同一条处罚接着问「那广州呢」），仍是同一话题。" in text, (
         "「只换法规名而事项延续＝同话题」的正例没了：那广州呢 这类追问会被判成新话题"
     )
+    assert "原样照抄或留下指代词都算没改写" in text, (
+        "「最早 / 最开始 / 第一个」的跨回指代消解规则没了：照抄的 query 会把指代原样带进检索"
+    )
     assert "continue（延续当前活跃话题）/ resume（回到索引里的某个旧话题）/" in text
     assert "new（开了一个全新话题）/ unsure（拿不准，按继续处理）。" in text
     assert "followup（追问）/ challenge（质疑）/ compare（对比）/" in text
@@ -411,6 +414,10 @@ def test_the_region_signal_lines_stay_verbatim() -> None:
     )
     assert prompts.REGION_SIGNAL_NEW_TOPIC == "（新话题，历史地区不沿用）"
     assert prompts.REGION_SIGNAL_INHERIT == "（上文已定地区，未新点地区时沿用）"
+    assert (
+        prompts.REGION_OUTPUT_GUARD
+        == "只输出 JSON 对象（region / place 两个字段），不要回答问题本身。"
+    )
 
 
 def test_the_law_tool_description_hardcodes_no_corpus_counts() -> None:
