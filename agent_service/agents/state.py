@@ -33,5 +33,11 @@ class AgentState(TypedDict, total=False):
     place: str
     region_note: str
 
+    query_rewrite: str
+    topic_switch: str
+    intent: str
+    topic_id: str
+    turn_no: int
+
     conversation: Annotated[list[dict], operator.add]
     answer: Answer | None

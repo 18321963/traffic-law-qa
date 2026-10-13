@@ -95,18 +95,20 @@ def _build_payload(question: str, answer_text: str, listed: list[Evidence]) -> l
 
 
 def make_review_node(llm: LLM, cfg: config.AgentConfig):
-    from langgraph.types import Overwrite
 
     def _remember(state: AgentState, answer: Answer, text: str) -> dict:
+        try:
+            turn = int(state.get("turn_no") or 0)
+        except (TypeError, ValueError):
+            turn = 0
         entry = {
             "question": answer.question,
             "answer": text,
             "region": str(state.get("region") or ""),
+            "topic_id": str(state.get("topic_id") or ""),
+            "intent": str(state.get("intent") or ""),
+            "turn": turn,
         }
-        entries = list(state.get("conversation") or ()) + [entry]
-        keep = max(cfg.history_turns, 0)
-        if len(entries) > 2 * keep:
-            return {"conversation": Overwrite(entries[len(entries) - keep :])}
         return {"conversation": [entry]}
 
     def review_node(state: AgentState) -> dict:

@@ -63,12 +63,27 @@ export function reviewStateOf(answer: DonePayload | null, channel: Channel = "ag
 }
 
 const NODE_LABELS: Record<string, string> = {
-  region: "识别地区",
+  region: "入口理解",
   clarify: "地区澄清",
   agent: "规划",
   tools: "检索",
   finalize: "生成",
   review: "复核",
+};
+
+const SWITCH_LABELS: Record<string, string> = {
+  continue: "继续话题",
+  resume: "回到旧话题",
+  new: "新话题",
+  unsure: "拿不准，按继续",
+};
+
+const INTENT_LABELS: Record<string, string> = {
+  followup: "追问",
+  challenge: "质疑",
+  compare: "对比",
+  quote: "要求引用",
+  other: "其他",
 };
 
 export function nodeLabel(node: string): string {
@@ -79,12 +94,26 @@ function number(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+function intakeHead(row: Record<string, unknown>): string {
+  const topic = typeof row.topic === "string" && row.topic ? row.topic : "";
+  const switchLabel = typeof row.switch === "string" ? (SWITCH_LABELS[row.switch] ?? "") : "";
+  const intentLabel = typeof row.intent === "string" ? (INTENT_LABELS[row.intent] ?? "") : "";
+  const parts: string[] = [];
+  if (switchLabel) parts.push(topic ? `${switchLabel} ${topic}` : switchLabel);
+  if (intentLabel) parts.push(intentLabel);
+  return parts.length > 0 ? `入口：${parts.join(" · ")}` : "";
+}
+
 export function stepDetail(step: StepEvent): string {
   const row = step as Record<string, unknown>;
   if (step.node === "region") {
     const region = typeof row.region === "string" && row.region ? row.region : null;
     const laws = number(row.laws);
-    return region ? `地区：${region} · 库内地方性法规 ${laws} 部` : `未涉及具体地区 · 地方性法规 ${laws} 部`;
+    const tail = region
+      ? `地区：${region} · 库内地方性法规 ${laws} 部`
+      : `未涉及具体地区 · 地方性法规 ${laws} 部`;
+    const head = intakeHead(row);
+    return head ? `${head} · ${tail}` : tail;
   }
   if (step.node === "clarify") {
     const region = typeof row.region === "string" && row.region ? row.region : "national";

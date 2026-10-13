@@ -68,6 +68,7 @@ def test_attach_never_puts_the_main_model_on_review(monkeypatch):
 
     assert runner.review_llm is not runner.llm
     assert runner.region_llm is not runner.llm
+    assert runner.intake_llm is runner.llm, "入口理解的 A 段要用主模型（attach 即装配工厂）"
     assert (runner.llm.cfg, runner.region_llm.cfg, runner.review_llm.cfg) == (
         main_cfg,
         region_cfg,
